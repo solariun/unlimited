@@ -1,0 +1,9 @@
+-xc++
+-std=c++11
+-Wall
+-Wextra
+-Wpedantic
+-Isrc
+-Ipc
+-Itests
+-Itests/support
