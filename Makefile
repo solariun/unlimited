@@ -34,13 +34,10 @@ LONG_BIN    = $(BINDIR)/unlimited_regression
 
 # Core flags for the embedded check: no exceptions, no RTTI, freestanding-friendly.
 EMBED_FLAGS = -std=c++11 -O2 $(WARN) -fno-exceptions -fno-rtti -Isrc
-# Decoder builds check_embedded compiles besides the default (caps 8, 32, int bank), spec 8.7 B1: the MCU caps (7, 16)
-# with the sizeof(Decoder) <= 12288 static_assert, the smallest caps, and the float bank of each. '+' separates flags.
-DECODER_VARIANTS = -DUNLIMITED_BANK_FLOAT \
-                   -DUNLIMITED_MAX_BITS_PER_PEAK=7+-DUNLIMITED_MAX_FRAME_BYTES=16 \
-                   -DUNLIMITED_MAX_BITS_PER_PEAK=7+-DUNLIMITED_MAX_FRAME_BYTES=16+-DUNLIMITED_BANK_FLOAT \
-                   -DUNLIMITED_MAX_BITS_PER_PEAK=1+-DUNLIMITED_MAX_FRAME_BYTES=1 \
-                   -DUNLIMITED_MAX_BITS_PER_PEAK=1+-DUNLIMITED_MAX_FRAME_BYTES=1+-DUNLIMITED_BANK_FLOAT
+# Decoder builds check_embedded compiles besides the default cap (32; 16 on Arduino), spec 8.6 B1: caps 16 and 64,
+# each with its sizeof(Decoder) static_assert. '+' separates flags.
+DECODER_VARIANTS = -DUNLIMITED_MAX_BITS_PER_PACKAGE=16 \
+                   -DUNLIMITED_MAX_BITS_PER_PACKAGE=64
 DECODER_SRC = src/unlimited/decoder.cpp src/unlimited/dsp.cpp
 # Encoder queue sizes besides the default 64 (the AVR size gate B5 holds for any of them).
 QUEUE_VARIANTS = 16 128
@@ -48,7 +45,8 @@ QUEUE_VARIANTS = 16 128
 # interpreter for each case of tests/avr/isr_cases.hpp.
 AVR_SKETCH_FLAGS = -std=c++11 -Os -flto $(WARN) -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
                    -fno-threadsafe-statics -mmcu=atmega328p -DF_CPU=16000000L -Isrc -Wl,--gc-sections
-AVR_ISR_CASES = 0 1 2 3 4 5 6
+AVR_ISR_CASES = 0 1 2 3 4 5 6 7
+AVR_ENCODER_SRC = src/unlimited/encoder.cpp src/unlimited/protocol.cpp src/unlimited/tables.cpp
 AVR_TOOLS = $(if $(AVR_GXX),$(dir $(AVR_GXX)),)
 # Soft-float routines: the AVR encoder must never pull them in (B5).
 AVR_FLOAT_SYMBOLS = '__(add|sub|mul|div)sf3|__fix(uns)?sfsi|__float(un)?sisf|__(eq|ne|lt|le|gt|ge)sf2'
@@ -146,12 +144,12 @@ check_embedded:
 				-o /dev/null || exit 1; \
 		done; \
 		echo "check_embedded: avr (atmega328p) OK, encoder queues 64 $(QUEUE_VARIANTS)"; \
-		$(CXX) -std=c++11 -O2 $(WARN) -Isrc tests/avr/isr_cycles.cpp src/unlimited/encoder.cpp src/unlimited/tables.cpp \
+		$(CXX) -std=c++11 -O2 $(WARN) -Isrc tests/avr/isr_cycles.cpp $(AVR_ENCODER_SRC) \
 			-o $(BUILDDIR)/embedded/isr_cycles || exit 1; \
 		for c in $(AVR_ISR_CASES); do \
 			out=$(BUILDDIR)/embedded/avr_isr_$$c; \
-			$(AVR_GXX) $(AVR_SKETCH_FLAGS) -DUNLIMITED_ISR_CASE=$$c tests/avr/isr_harness.cpp src/unlimited/encoder.cpp \
-				src/unlimited/tables.cpp -o $$out.elf || exit 1; \
+			$(AVR_GXX) $(AVR_SKETCH_FLAGS) -DUNLIMITED_ISR_CASE=$$c tests/avr/isr_harness.cpp $(AVR_ENCODER_SRC) \
+				-o $$out.elf || exit 1; \
 			$(AVR_TOOLS)avr-objdump -d $$out.elf > $$out.dis && \
 			$(AVR_TOOLS)avr-objcopy -O binary -j .text -j .data $$out.elf $$out.bin && \
 			$(AVR_TOOLS)avr-nm $$out.elf > $$out.sym || exit 1; \
@@ -184,31 +182,42 @@ arduino_check:
 	else echo "arduino_check: tx_uno has no float routine"; fi
 	@echo "arduino_check: all examples compile warning-free"
 
-# Encode → channel → decode round trips for every radio path with the v0.2 presets (L14): the text must come back
-# exactly, and the decoder learns the mode from the header alone. Each run: name, channel, receiver profile, preset,
-# SNR (dB; am/fm: carrier), TX sample rate, frequency offset (Hz; lsb: shift after the inversion), packet framing
-# ("-" = none).
+# Encode → channel → decode round trips with the v0.3 presets (spec 7, L14): the text must come back exactly, and the
+# receiver is told neither T nor N (only its profile and passband). Each run: name, channel, receiver profile, preset,
+# SNR (dB; am/fm: carrier), TX sample rate, frequency offset (Hz; lsb: the shift after the inversion), then the extra
+# encoder and decoder options ('+' separates words, '-' = none). Then a configuration the sender must refuse.
 DEMO_TEXT = CQ CQ DE UNLIMITED TEST 0123456789
 DEMO_DIR  = $(BUILDDIR)/demo_run
-DEMO_RUNS = "usb_hf usb ssb hf 10 8000 80 -" \
-            "lsb_hf_fast lsb ssb hf_fast 10 48000 -150 -" \
-            "am_hf_robust am am hf_robust 10 8000 80 --packet" \
-            "fm_fm fm fm fm 20 8000 80 -" \
-            "fm_fm_fast fm fm fm_fast 20 8000 80 -"
+DEMO_RUNS = "usb_hf usb ssb hf 10 8000 80 - -" \
+            "lsb_hf_fast lsb ssb hf_fast 10 48000 -150 - -" \
+            "usb_hf_slow_narrow usb ssb hf_slow 8 8000 50 --tone+1200+--passband+300:2100 --passband+300:2100" \
+            "usb_n32 usb ssb hf 12 8000 80 --bits+32 -" \
+            "am_am am am am 10 8000 80 --packet --packet" \
+            "fm_fm fm fm fm 20 8000 80 - -"
+# hf_fast occupies 550 Hz (1225-1775 Hz): it cannot fit a 500 Hz passband.
+DEMO_REFUSED = --preset hf_fast --passband 1250:1750
 demo_run: demo
 	@mkdir -p $(DEMO_DIR)
 	@printf '%s' "$(DEMO_TEXT)" > $(DEMO_DIR)/expect.txt
 	@for run in $(DEMO_RUNS); do \
-		set -- $$run; name=$$1; ch=$$2; profile=$$3; preset=$$4; snr=$$5; rate=$$6; offset=$$7; packet=$$8; \
-		if [ "$$packet" = - ]; then packet=; fi; \
-		echo "== $$name: $$ch channel, preset $$preset, profile $$profile, snr $$snr dB, offset $$offset Hz, tx rate $$rate Hz $$packet"; \
-		./$(ENCODE_BIN) --text "$(DEMO_TEXT)" --profile $$profile --preset $$preset --rate $$rate $$packet \
+		set -- $$run; name=$$1; ch=$$2; profile=$$3; preset=$$4; snr=$$5; rate=$$6; offset=$$7; \
+		tx=$$(echo "$$8" | tr '+' ' '); rx=$$(echo "$$9" | tr '+' ' '); \
+		if [ "$$tx" = - ]; then tx=; fi; if [ "$$rx" = - ]; then rx=; fi; \
+		echo "== $$name: $$ch channel, preset $$preset$${tx:+ $$tx}, receiver profile $$profile$${rx:+ $$rx}, SNR $$snr dB, offset $$offset Hz, TX rate $$rate Hz"; \
+		./$(ENCODE_BIN) --text "$(DEMO_TEXT)" --preset $$preset --rate $$rate $$tx \
 			--channel $$ch --snr $$snr --offset $$offset --out $(DEMO_DIR)/$$name.wav \
 			--clean-out $(DEMO_DIR)/$${name}_clean.wav || exit 1; \
-		./$(DECODE_BIN) --in $(DEMO_DIR)/$$name.wav --profile $$profile $$packet \
+		./$(DECODE_BIN) --in $(DEMO_DIR)/$$name.wav --profile $$profile $$rx \
 			--expect $(DEMO_DIR)/expect.txt || exit 1; \
 	done
-	@echo "demo_run: all round trips decoded exactly"
+	@echo "== refused: $(DEMO_REFUSED) (550 Hz of signal in a 500 Hz passband) must fail with exit code 2"
+	@./$(ENCODE_BIN) --text "$(DEMO_TEXT)" $(DEMO_REFUSED) --out $(DEMO_DIR)/refused.wav 2> $(DEMO_DIR)/refused.txt; \
+		status=$$?; cat $(DEMO_DIR)/refused.txt; \
+		if [ $$status -ne 2 ] || ! grep -q "does not fit" $(DEMO_DIR)/refused.txt; then \
+			echo "demo_run: FAILED (the encoder must refuse it with exit code 2 and say why; exit code $$status)"; \
+			exit 1; \
+		fi
+	@echo "demo_run: all round trips decoded exactly; the configuration that does not fit was refused"
 
 # Builds tools/gen_tables.cpp and checks that src/unlimited/tables.cpp holds exactly the table it prints.
 TABLES_SRC = src/unlimited/tables.cpp
@@ -223,17 +232,23 @@ $(GEN_TABLES): tools/gen_tables.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-# Documentation generated from the library itself: tools/doc_figures.cpp draws docs/images/*.svg from the real
-# Encoder, sim::Channel and Decoder (the BER figure runs the chain on every core, about 20 s on 10 cores);
-# tools/doc_examples.cpp prints the bit-exact protocol examples of docs/protocol_examples.md.
+# Documentation generated from the library itself (spec 12.2): tools/doc_examples.cpp prints the bit-exact protocol
+# examples of docs/protocol_examples.md; tools/doc_figures.cpp draws docs/images/*.svg from the real Encoder,
+# sim::Channel and Decoder (the BER figure runs the chain on every core). Both stop with an error when the library
+# disagrees with an example of spec.md. Everything is built in $(DOCS_BUILD) first; docs/ is replaced only when both
+# tools succeeded (stale figures are removed). Deterministic: a rerun writes the same bytes.
 DOCS_DIR     = docs
+DOCS_BUILD   = $(BUILDDIR)/docs
 DOC_FIGURES  = $(BUILDDIR)/tools/doc_figures
 DOC_EXAMPLES = $(BUILDDIR)/tools/doc_examples
 docs: $(DOC_FIGURES) $(DOC_EXAMPLES)
+	@rm -rf $(DOCS_BUILD) && mkdir -p $(DOCS_BUILD)/images
+	./$(DOC_EXAMPLES) > $(DOCS_BUILD)/protocol_examples.md
+	./$(DOC_FIGURES) $(DOCS_BUILD)/images
 	@mkdir -p $(DOCS_DIR)/images
-	./$(DOC_FIGURES) $(DOCS_DIR)/images
-	./$(DOC_EXAMPLES) > $(DOCS_DIR)/protocol_examples.md.tmp
-	mv $(DOCS_DIR)/protocol_examples.md.tmp $(DOCS_DIR)/protocol_examples.md
+	@rm -f $(DOCS_DIR)/images/*.svg
+	@cp $(DOCS_BUILD)/images/*.svg $(DOCS_DIR)/images/
+	@cp $(DOCS_BUILD)/protocol_examples.md $(DOCS_DIR)/protocol_examples.md
 	@echo "docs: $(DOCS_DIR)/images/*.svg and $(DOCS_DIR)/protocol_examples.md regenerated"
 
 $(DOC_FIGURES): $(BUILDDIR)/tools/doc_figures.o $(SUPPORT_OBJ) $(PC_OBJ) $(LIB_DEP)

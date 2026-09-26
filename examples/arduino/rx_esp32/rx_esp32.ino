@@ -3,15 +3,18 @@
 // The decoder needs 8 kHz int16 audio. The ESP32 ADC DMA cannot sample below 20 kHz, so it runs at
 // 24 kHz without any CPU timing (no ISR, no jitter) and the sketch decimates by 3: DC blocker, then a
 // 47-tap low-pass (flat to 3 kHz, below -50 dB from 5 kHz, which is what folds back onto 300..3000 Hz).
-// The decoder's drift loop tracks a sample-clock error of up to +-1000 ppm (spec test L5) and the ADC clock
-// is derived from the crystal, so no calibration is expected. The receiver chooses one thing, the range of T it
-// accepts (k_profile below: ssb takes the HF presets, T 16..128 ms; a T below 16 ms over SSB needs am); the
-// sender's header gives T, the bits per peak, the data slots, the spacing and the grid side, and USB or LSB
-// only mirrors the grid.
+// The decoder tracks a sample-clock error of up to +-1000 ppm (spec test L5) and the ADC clock is derived from
+// the crystal, so no calibration is expected.
+//
+// The receiver chooses only two things (k_profile below): the range of slot lengths it listens to and the audio
+// passband of the radio. ssb hears slots of 8..64 ms in 300..2700 Hz (the hf_slow, hf, hf_fast and am presets);
+// fm hears 4..32 ms (the fm preset). It finds the pitch, the slot length T and the bits per package N by itself;
+// USB or LSB and mistuning only move the pitch.
 //
 // loop() blocks in adc_continuous_read() until the next 10 ms DMA frame arrives; the decoder runs there,
-// in task context, as the core requires. Prints "locked" with the mode, every CRC-valid packet, "end" and
-// "lost".
+// in task context, as the core requires. Prints "locked" with the pitch, T, N, the rate, the SNR and the
+// received band, every CRC-valid packet, "end" and "lost". The DCD pin is high while the receiver holds a
+// signal (Decoder::dcd(): a modem waits for it to drop before it transmits).
 //
 // Wiring:
 //   radio speaker / data out --||--+-- GPIO36 (VP, ADC1 channel 0, classic ESP32; fine with Wi-Fi on)
@@ -19,6 +22,7 @@
 //                  3V3 --[10k]-----+-----[10k]-- GND     (bias at mid-scale)
 //   Keep the audio under about 1.5 V peak-to-peak (ADC range with 12 dB attenuation: 0.15..2.45 V).
 //   Optional: 1k in series and 47 nF to GND at the pin keeps strong hiss above 12 kHz from aliasing.
+//   GPIO2 (the on-board LED of most ESP32 DevKit boards) shows DCD.
 #include <unlimited.h>
 #include <esp_adc/adc_continuous.h>
 #include <math.h>
@@ -27,7 +31,8 @@ namespace {
 
 const uint32_t k_serial_baud = 115200;
 const int k_audio_pin = 36;
-const unlimited::Profile k_profile = unlimited::Profile::ssb;  // ssb: T 16..128 ms; am: 8..64; fm: 4..32
+const uint8_t k_dcd_pin = 2;
+const unlimited::Profile k_profile = unlimited::Profile::ssb;  // ssb: T 8..64 ms, 300..2700 Hz; fm: 4..32 ms
 
 const uint32_t k_adc_rate_hz = 24000;
 const uint8_t k_decimation = 3;
@@ -48,6 +53,8 @@ const float k_adc_to_int16 = 16.0f;        // 12-bit ADC -> int16 full scale
 const float k_int16_max = 32767.0f;
 const float k_int16_min = -32768.0f;
 const float k_two_pi = 6.28318531f;
+const float k_ms_per_s = 1000.0f;
+const float k_us_per_ms = 1000.0f;
 
 // 24 kHz ADC codes -> 8 kHz int16: DC blocker, then a Hamming-windowed sinc evaluated at every 3rd input.
 class Decimator {
@@ -92,14 +99,6 @@ private:
     uint8_t phase_ = 0;
 };
 
-void on_packet(const uint8_t* payload, uint16_t size, uint8_t flags, void*) {
-    Serial.printf("packet (%u bytes%s%s): ", static_cast<unsigned>(size),
-                  (flags & unlimited::event_flag_erasure) != 0 ? ", erasures" : "",
-                  (flags & unlimited::event_flag_mode_memory) != 0 ? ", mode memory" : "");
-    Serial.write(payload, size);
-    Serial.println();
-}
-
 const char* profile_name(unlimited::Profile profile) {
     switch (profile) {
         case unlimited::Profile::ssb:
@@ -122,29 +121,55 @@ const char* lost_reason(unlimited::LostReason reason) {
             return "preamble timeout";
         case unlimited::LostReason::reset:
             return "reset";
-        case unlimited::LostReason::no_header:
-            return "no header";
-        case unlimited::LostReason::unsupported_mode:
-            return "unsupported mode";
+        case unlimited::LostReason::unsupported:
+            return "more bits per package than this build decodes";
         case unlimited::LostReason::none:
             break;
     }
     return "none";
 }
 
+void on_packet(const uint8_t* payload, uint16_t size, uint8_t flags, void*) {
+    Serial.printf("packet (%u bytes%s%s): ", static_cast<unsigned>(size),
+                  (flags & unlimited::event_flag_late_join) != 0 ? ", late join" : "",
+                  (flags & (unlimited::event_flag_flywheel_start | unlimited::event_flag_flywheel_stop)) != 0
+                      ? ", a marker was flywheeled"
+                      : "");
+    Serial.write(payload, size);
+    Serial.println();
+}
+
 unlimited::PacketReader g_packets(&on_packet, nullptr);
+const unlimited::DecoderConfig g_config = unlimited::DecoderConfig::for_profile(k_profile);
+
+// Pitch, T, N, rate, SNR, and the received band against the passband (how far the radio may still drift).
+void print_lock(const unlimited::Event& event) {
+    const float rate = event.bits_per_package * k_ms_per_s / ((event.bits_per_package + 1) * event.slot_ms);
+    Serial.printf("locked: pitch %.1f Hz, T %.2f ms, N %u bits per package, %.1f bit/s, SNR %.1f dB%s\n",
+                  event.tone_hz, event.slot_ms, event.bits_per_package, rate, event.snr_db,
+                  (event.flags & unlimited::event_flag_late_join) != 0 ? " (late join)" : "");
+    const uint16_t tone_hz = static_cast<uint16_t>(lroundf(event.tone_hz));
+    const uint32_t slot_us = static_cast<uint32_t>(lroundf(event.slot_ms * k_us_per_ms));
+    const unlimited::Band band = unlimited::occupied_band(tone_hz, slot_us);
+    // The shift stops where the band leaves the passband or the pitch leaves this receiver's search (spec 1.5).
+    const unlimited::PassbandFit fit =
+        unlimited::passband_fit(tone_hz, slot_us, g_config.passband, g_config.search_range());
+    Serial.printf("  occupied bandwidth %u Hz (%u-%u Hz); passband %u-%u Hz: ", band.width_hz, band.low_hz,
+                  band.high_hz, g_config.passband.low_hz, g_config.passband.high_hz);
+    if (fit.fits)
+        Serial.printf("fits; shift tolerance -%d/+%d Hz\n", fit.margin_low_hz, fit.margin_high_hz);
+    else
+        Serial.println("does not fit");
+}
 
 void on_event(const unlimited::Event& event, void*) {
     g_packets.on_event(event);
     switch (event.type) {
+        case unlimited::EventType::state:
+            digitalWrite(k_dcd_pin, event.state != unlimited::DecoderState::search ? HIGH : LOW);
+            break;
         case unlimited::EventType::locked:
-            Serial.printf("locked: f_ref %.1f Hz, T %.0f ms, %u bits per peak, %u peaks per frame, %s spacing, "
-                          "grid %s, SNR %.1f dB%s%s\n",
-                          event.tone_hz, event.slot_ms, event.bits_per_peak, event.data_slots,
-                          event.spacing == unlimited::Spacing::dense ? "dense" : "standard",
-                          event.side > 0 ? "above" : "below", event.snr_db,
-                          (event.flags & unlimited::event_flag_late_join) != 0 ? " (late join)" : "",
-                          (event.flags & unlimited::event_flag_mode_memory) != 0 ? " (mode memory)" : "");
+            print_lock(event);
             break;
         case unlimited::EventType::end:
             Serial.println("end");
@@ -152,14 +177,14 @@ void on_event(const unlimited::Event& event, void*) {
         case unlimited::EventType::lost:
             Serial.printf("lost: %s\n", lost_reason(event.reason));
             break;
-        case unlimited::EventType::state:
         case unlimited::EventType::slot:
+        case unlimited::EventType::package:
         case unlimited::EventType::byte:
             break;
     }
 }
 
-unlimited::Decoder g_decoder(unlimited::DecoderConfig::for_profile(k_profile), &on_event, nullptr);
+unlimited::Decoder g_decoder(g_config, &on_event, nullptr);
 Decimator g_decimator;
 adc_continuous_handle_t g_adc = nullptr;
 uint8_t g_raw[k_frame_bytes];
@@ -192,15 +217,17 @@ bool start_adc() {
 
 void setup() {
     Serial.begin(k_serial_baud);
+    pinMode(k_dcd_pin, OUTPUT);
+    digitalWrite(k_dcd_pin, LOW);
     g_decimator.begin();
     if (!start_adc()) {
         Serial.println("rx_esp32: ADC setup failed");
         vTaskDelete(nullptr);
     }
-    const unlimited::DecoderConfig config = unlimited::DecoderConfig::for_profile(k_profile);
-    Serial.printf("Unlimited rx_esp32: GPIO%d, profile %s, slots %u..%u ms, tones %u..%u Hz\n", k_audio_pin,
-                  profile_name(k_profile), config.min_slot_ms, config.max_slot_ms(), config.min_tone_hz,
-                  config.max_tone_hz);
+    const unlimited::Passband search = g_config.search_range();
+    Serial.printf("Unlimited rx_esp32: GPIO%d, profile %s: slots %u..%u ms, passband %u-%u Hz, pitch search %u-%u Hz\n",
+                  k_audio_pin, profile_name(k_profile), g_config.min_slot_ms, g_config.max_slot_ms(),
+                  g_config.passband.low_hz, g_config.passband.high_hz, search.low_hz, search.high_hz);
 }
 
 void loop() {

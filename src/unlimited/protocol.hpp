@@ -2,57 +2,79 @@
 
 #include "unlimited/platform.hpp"
 
+// Largest N (bits per package) this build sends and decodes (spec 1.6, 3.14). The decoder grows with it (about
+// 0.57 KB per bit). Define it for the whole build only (-DUNLIMITED_MAX_BITS_PER_PACKAGE=N, on Arduino a
+// build property), never in one source file.
+#ifndef UNLIMITED_MAX_BITS_PER_PACKAGE
+#if defined(ARDUINO)
+#define UNLIMITED_MAX_BITS_PER_PACKAGE 16
+#else
+#define UNLIMITED_MAX_BITS_PER_PACKAGE 32
+#endif
+#endif
+
 namespace unlimited {
 
-// Transmission (spec 2.1): tune tone, sync train, an 8-slot mode header, then frames of a START marker and N
-// data peaks; the STOP of a frame is the START of the next. N = k_min_data_slots << (header N code).
+static_assert(UNLIMITED_MAX_BITS_PER_PACKAGE >= 16 && UNLIMITED_MAX_BITS_PER_PACKAGE <= 64,
+              "UNLIMITED_MAX_BITS_PER_PACKAGE must be 16..64");
+
+// Transmission (spec 2.1): lead-in, tune tone, sync train (its last marker is the first START), packages of
+// N bits each closed by a STOP that is also the next START, END markers, tail. Everything on one pitch.
 static const uint8_t k_min_sync_markers = 8;
 static const uint8_t k_max_sync_markers = 32;
-static const uint8_t k_eot_markers = 2;
-static const uint8_t k_header_slots = 8;
-static const uint8_t k_min_data_slots = 8;
-static const uint8_t k_max_data_slots = 32;
-// Defaults of EncoderConfig() and the presets.
 static const uint8_t k_default_sync_markers = 8;
-static const uint8_t k_default_data_slots = 8;
-static const uint8_t k_max_bits_per_peak = 8;
+static const uint8_t k_end_markers = 2;
+static const uint8_t k_min_tune_slots = 6;
+static const uint8_t k_min_bits_per_package = 1;
+static const uint8_t k_max_bits_per_package = UNLIMITED_MAX_BITS_PER_PACKAGE;
+static const uint8_t k_hf_bits_per_package = 8;     // HF presets and EncoderConfig()
+static const uint8_t k_wide_bits_per_package = 16;  // AM and FM presets
 static const uint8_t k_bits_per_byte = 8;
 
-// Tone grid (spec 1.3): data tone n at f_ref + side * (k_grid_guard + n * c) / T, c = 8/7 (standard) or
-// 1 (dense); header tone h at f_ref + side * (k_grid_guard + h * 8/7) / T in every mode.
-static const uint8_t k_grid_guard = 5;
-static const uint8_t k_standard_spacing_num = 8;  // 8 / (7 T): spectral zero of Tukey alpha 0.25
-static const uint8_t k_standard_spacing_den = 7;
-
-// Waveform, as fractions of the slot T; energies in T * A^2 / 2 units.
-static const float k_tukey_ramp = 0.25f;  // markers and tune: Tukey alpha 0.5
+// Waveform (spec 1.1), as fractions of the slot T; energies in T * A^2 / 2 units. Data "1" and markers share the
+// Tukey alpha 0.5 envelope; a marker adds the twist, a shaped 180 degree phase reversal in the middle of its slot.
+static const float k_tukey_ramp = 0.25f;
 static const float k_reversal_start = 0.375f;
 static const float k_reversal_width = 0.25f;
+static const float k_one_energy = 0.6875f;
 static const float k_marker_energy = 0.5625f;
-static const float k_data_ramp = 0.125f;  // data and header peaks: Tukey alpha 0.25
-static const float k_peak_energy = 0.84375f;
 
-// Speed is chosen by the sender only: T is a whole number of ms and (N + 1) T <= k_max_frame_us. A decoder
-// accepts T in [T_min, k_speed_span * T_min].
-static const uint32_t k_min_slot_us = 6000;  // the header needs 13 / T <= 2400 Hz
+// Speed (spec 1.4): the sender picks T and N; a receiver accepts T in [T_min, k_speed_span * T_min] and learns
+// both from the signal.
+static const uint32_t k_min_slot_us = 4000;
 static const uint32_t k_max_slot_us = 128000;
-static const uint32_t k_slot_quantum_us = 1000;
-static const uint32_t k_max_frame_us = 1152000;
-static const uint32_t k_min_dense_slot_us = 32000;  // G2: at T16 k5 dense the span leaves 150 Hz of SSB passband
+static const uint32_t k_max_package_us = 1152000;  // (N + 1) T: START to STOP
+static const uint32_t k_fast_slot_us = 8000;       // below it: FM-like channels only, tone >= k_min_fast_tone_hz
 static const uint8_t k_speed_span = 8;
 
-// f_ref and every data and header tone lie in [k_min_tone_hz, k_max_tone_hz].
+// Pitch (spec 1.3).
 static const uint16_t k_min_tone_hz = 300;
 static const uint16_t k_max_tone_hz = 2700;
-static const uint16_t k_band_centre_hz = 1500;  // HF presets centre the occupied band here
-static const uint16_t k_fm_tone_hz = 2650;
+static const uint16_t k_default_tone_hz = 1500;
+static const uint16_t k_min_fast_tone_hz = 1000;
+
+// Occupied band (spec 1.5), in thousandths of a cycle per slot: width_hz = k * 1000 / slot_us. 99 %: 99 % of a
+// data slot's energy (4.34 / T measured, rounded up); -26 dB and -40 dB: the widths outside which a data slot's
+// spectrum stays that far below its centre.
+static const uint32_t k_band_99_milli = 4400;
+static const uint32_t k_band_26db_milli = 7000;
+static const uint32_t k_band_40db_milli = 9900;
+
+// Receiver audio passbands (spec 1.5).
+static const uint16_t k_ssb_passband_low_hz = 300;  // 2.4 kHz SSB filter: the default
+static const uint16_t k_ssb_passband_high_hz = 2700;
+static const uint16_t k_am_passband_low_hz = 100;
+static const uint16_t k_am_passband_high_hz = 3000;
+static const uint16_t k_fm_passband_low_hz = 300;
+static const uint16_t k_fm_passband_high_hz = 3000;
+static const uint16_t k_max_passband_hz = 4000;  // half the decoder's 8 kHz input rate
 
 static const uint16_t k_default_tune_ms = 250;
 static const uint16_t k_default_fm_lead_in_ms = 300;
 static const uint16_t k_default_tail_ms = 100;
 
-// Quarter-wave sine, 256 steps plus the end point, scaled to 65534 (twice the Q15 full scale): linear interpolation
-// with one 16 x 16 multiply stays within 1 LSB of 32767 sin; phase is a full turn over 2^32.
+// Quarter-wave sine, 256 steps plus the end point, scaled to 65534 (twice the Q15 full scale): linear
+// interpolation with one 16 x 16 multiply stays within 1 LSB of 32767 sin; phase is a full turn over 2^32.
 static const uint8_t k_quarter_table_bits = 8;
 static const uint16_t k_quarter_table_size = (1u << k_quarter_table_bits) + 1;
 extern const uint16_t k_quarter_sine[k_quarter_table_size] UNLIMITED_ROM;
@@ -60,31 +82,61 @@ extern const uint16_t k_quarter_sine[k_quarter_table_size] UNLIMITED_ROM;
 int16_t sine_q15(uint32_t phase);
 int16_t cosine_q15(uint32_t phase);
 
-enum class Spacing : uint8_t { standard, dense };  // 8 / (7 T) | 1 / T
-enum class GridSide : uint8_t { above, below };    // as sent; USB/LSB inversion flips it at the receiver
-
-// Mode header (spec 2.2): word = (k - 1) | (T_ms mod 8) << 3 | spacing << 6 | N code << 7, N code 0/1/2 =
-// 8/16/32 data slots, 3 reserved. Sent as 8 tones, one per slot, of an RS(8,3) + x^3 coset code over GF(8).
-static const uint16_t k_header_words = 512;
-static const uint8_t k_header_slot_ms_modulo = 8;
-
-struct HeaderFields {
-    uint8_t bits_per_peak;   // 1..8
-    uint8_t data_slots;      // 8, 16, 32; 0 = reserved N code
-    uint8_t slot_ms_residue; // T_ms mod 8
-    Spacing spacing;
+struct Band {
+    uint16_t low_hz;
+    uint16_t high_hz;
+    uint16_t width_hz;  // high_hz - low_hz
 };
 
-uint16_t header_word(uint8_t bits_per_peak, uint8_t data_slots, uint32_t slot_us, Spacing spacing);
-HeaderFields header_fields(uint16_t word);
-uint8_t header_symbol(uint16_t word, uint8_t slot);  // tone 0..7 of header slot 0..7
+struct Passband {
+    uint16_t low_hz;
+    uint16_t high_hz;
+};
 
-// Data mapping (spec 1.5): slot i = 1..N of a frame carries symbol s on tone (gray^-1(s) + (i - 1) r) mod M,
-// M = 2^k, r = tone_rotation(k), so de-rotated neighbouring tones differ in one bit. `slot` below is i - 1.
-uint8_t gray_encode(uint8_t value);
-uint8_t gray_decode(uint8_t value);
-uint8_t tone_rotation(uint8_t bits_per_peak);  // (M / 8) | 1
-uint8_t peak_tone(uint8_t symbol, uint8_t slot, uint8_t bits_per_peak);
-uint8_t peak_symbol(uint8_t tone, uint8_t slot, uint8_t bits_per_peak);
+// How a signal sits in a receiver (spec 1.5): the radio may be mistuned so the tone moves down by margin_low_hz or
+// up by margin_high_hz; a negative margin is how far the band sticks out of the passband on that side.
+struct PassbandFit {
+    bool fits;              // the occupied band lies inside the passband
+    int16_t margin_low_hz;
+    int16_t margin_high_hz;
+    uint16_t tolerance_hz;  // min(margin_low_hz, margin_high_hz) when it fits, else 0
+};
+
+// Integer only (AVR). A tone of tone_hz sent with slot slot_us occupies tone +- half, half = ceil(k_band_99_milli *
+// 500 / slot_us), clipped to 0..65535 Hz.
+Band occupied_band(uint16_t tone_hz, uint32_t slot_us);
+uint16_t width_26db_hz(uint32_t slot_us);  // ceil(k_band_26db_milli * 1000 / slot_us)
+uint16_t width_40db_hz(uint32_t slot_us);
+bool passband_valid(const Passband& passband);  // low_hz < high_hz <= k_max_passband_hz
+// The pure filter fit: margin_low_hz = band low - passband low, margin_high_hz = passband high - band high. It knows
+// nothing of the pitches a receiver searches, so its margins may promise more mistuning than a receiver follows: the
+// shift tolerance is the four-argument passband_fit() below.
+PassbandFit passband_fit(const Band& band, const Passband& passband);
+// The pitches a receiver whose shortest slot is min_slot_us searches (spec 1.5, V14): its passband less half the
+// occupied band at its slowest slot (k_speed_span * min_slot_us), within [k_min_tone_hz, k_max_tone_hz], and from
+// k_min_fast_tone_hz when min_slot_us < k_fast_slot_us; empty (low_hz > high_hz) when nothing is left.
+Passband search_range(const Passband& passband, uint32_t min_slot_us);
+// The shift tolerance (spec 1.5): the filter fit of occupied_band(tone_hz, slot_us) in passband; when it fits, each
+// margin also ends where the pitch would leave `search`, the pitches the receiver searches (never below 0).
+PassbandFit passband_fit(uint16_t tone_hz, uint32_t slot_us, const Passband& passband, const Passband& search);
+
+// Why EncoderConfig::check() or DecoderConfig::check() refuses a configuration: the first rule broken, each check
+// testing its own rules in the order of spec 5.1.
+enum class ConfigError : uint8_t {
+    none,
+    sample_rate,       // encoder: outside k_min_sample_rate_hz..k_max_sample_rate_hz
+    tone,              // encoder: tone outside [k_min_tone_hz, k_max_tone_hz]
+    slot,              // encoder: T outside k_min_slot_us..k_max_slot_us
+    fast_tone,         // encoder: T < k_fast_slot_us needs a tone >= k_min_fast_tone_hz
+    bits_per_package,  // encoder: N outside k_min_bits_per_package..k_max_bits_per_package
+    package_length,    // encoder: (N + 1) T > k_max_package_us
+    passband,          // both: not passband_valid(); decoder: no tone left to search in it
+    outside_passband,  // encoder: the occupied band does not fit the passband
+    sync_markers,      // encoder: outside k_min_sync_markers..k_max_sync_markers
+    amplitude,         // encoder: not > 0
+    min_slot,          // decoder: min_slot_ms outside 4..32
+    decision_mode,     // decoder: not a DecisionMode value
+    fixed_ratio        // decoder: fixed_ratio outside (0, 1)
+};
 
 }  // namespace unlimited

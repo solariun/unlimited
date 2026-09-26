@@ -51,10 +51,12 @@ PacketReader::PacketReader(PacketHandler handler, void* context)
     : handler_(handler),
       context_(context),
       crc_errors_(0),
+      next_index_(0),
       length_(0),
       fill_(0),
       parsed_(0),
       flags_(0),
+      indexed_(false),
       buffer_() {}
 
 // Only a 0x2D can start the buffer, and a candidate never outgrows it: a complete one is consumed at once.
@@ -65,10 +67,15 @@ void PacketReader::push(uint8_t byte, uint8_t flags) {
     parse();
 }
 
+// A byte_index that does not follow the previous byte's: the bytes of a lost package are missing, which ends the
+// candidate as an end would (spec 2.6).
 void PacketReader::on_event(const Event& event) {
     switch (event.type) {
         case EventType::byte:
+            if (indexed_ && event.byte_index != next_index_) flush();
             push(event.value, event.flags);
+            next_index_ = event.byte_index + 1u;
+            indexed_ = true;
             break;
         case EventType::end:
         case EventType::lost:
@@ -77,15 +84,18 @@ void PacketReader::on_event(const Event& event) {
         case EventType::state:
         case EventType::locked:
         case EventType::slot:
+        case EventType::package:
             break;
     }
 }
 
 void PacketReader::reset() {
+    next_index_ = 0;
     length_ = 0;
     fill_ = 0;
     parsed_ = 0;
     flags_ = 0;
+    indexed_ = false;
 }
 
 uint32_t PacketReader::crc_errors() const {

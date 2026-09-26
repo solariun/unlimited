@@ -1,5 +1,5 @@
-// Heap trap (spec 8.7 B2): the whole core runs the L1' clean loopback, a packet round trip (a short, an
-// AX.25-size and a maximum-size packet) and a WAV round trip while every C++ allocation function aborts.
+// Heap trap (spec 8.6 B2): the whole core decodes every preset, N = 1 and N = 32 at 16 ms, a packet round trip (a
+// short, an AX.25-size and a maximum-size packet) and a WAV round trip while every C++ allocation function aborts.
 // Built by 'make check_embedded' from this file and src/ only, with -fno-exceptions -fno-rtti; malloc and
 // friends are covered by its nm check.
 #include "unlimited.h"
@@ -69,34 +69,22 @@ const uint32_t k_wav_buffer_bytes = 64 * 1024;
 
 struct Case {
     const char* name;
-    bool preset;
-    Preset preset_value;
-    // Custom mode (preset false): T, k, N, spacing, side and f_ref as the sender sets them.
-    uint32_t slot_us;
-    uint8_t bits_per_peak;
-    uint8_t data_slots;
-    Spacing spacing;
-    GridSide side;
-    uint16_t tone_hz;
+    Preset preset;
+    uint32_t slot_us;         // 0: the preset's
+    uint8_t bits_per_package; // 0: the preset's
     Profile profile;
     size_t bytes;
 };
 
-// L1': every preset, then T = 6, 12, 20, 37, 100 and 128 ms with other (k, N), both spacings and both sides.
+// Every preset, then N = 1 and N = 32 at 16 ms (spec 8.6 B2).
 const Case k_cases[] = {
-    {"fm_fast", true, Preset::fm_fast, 0, 0, 0, Spacing::standard, GridSide::below, 0, Profile::fm, 1000},
-    {"fm", true, Preset::fm, 0, 0, 0, Spacing::standard, GridSide::below, 0, Profile::am, 1000},
-    {"hf_fast", true, Preset::hf_fast, 0, 0, 0, Spacing::standard, GridSide::below, 0, Profile::ssb, 1000},
-    {"hf", true, Preset::hf, 0, 0, 0, Spacing::standard, GridSide::below, 0, Profile::ssb, 400},
-    {"hf_robust", true, Preset::hf_robust, 0, 0, 0, Spacing::standard, GridSide::below, 0, Profile::ssb, 120},
-    {"hf_weak", true, Preset::hf_weak, 0, 0, 0, Spacing::standard, GridSide::below, 0, Profile::ssb, 120},
-    {"T6 k2 N16", false, Preset::hf, 6000, 2, 16, Spacing::standard, GridSide::below, 2650, Profile::fm, 300},
-    {"T12 k4 N32", false, Preset::hf, 12000, 4, 32, Spacing::standard, GridSide::above, 600, Profile::am, 600},
-    {"T20 k1 N32", false, Preset::hf, 20000, 1, 32, Spacing::standard, GridSide::below, 1500, Profile::ssb, 60},
-    {"T20 k5 N16", false, Preset::hf, 20000, 5, 16, Spacing::standard, GridSide::below, 2400, Profile::ssb, 400},
-    {"T37 k6 N16", false, Preset::hf, 37000, 6, 16, Spacing::standard, GridSide::above, 450, Profile::ssb, 300},
-    {"T100 k7 N8", false, Preset::hf, 100000, 7, 8, Spacing::dense, GridSide::below, 2200, Profile::ssb, 100},
-    {"T128 k8 N8", false, Preset::hf, 128000, 8, 8, Spacing::dense, GridSide::above, 400, Profile::ssb, 100},
+    {"hf_slow", Preset::hf_slow, 0, 0, Profile::ssb, 60},
+    {"hf", Preset::hf, 0, 0, Profile::ssb, 120},
+    {"hf_fast", Preset::hf_fast, 0, 0, Profile::ssb, 240},
+    {"am", Preset::am, 0, 0, Profile::am, 240},
+    {"fm", Preset::fm, 0, 0, Profile::fm, 480},
+    {"T16 N1", Preset::hf, 16000, 1, Profile::ssb, 60},
+    {"T16 N32", Preset::hf, 16000, 32, Profile::ssb, 160},
 };
 const size_t k_case_count = sizeof(k_cases) / sizeof(k_cases[0]);
 
@@ -119,8 +107,7 @@ struct Tally {
     size_t losts;
     float slot_ms;
     float worst_slot_error;
-    uint8_t bits_per_peak;  // mode of the locked event
-    uint8_t data_slots;
+    uint8_t bits_per_package;  // N of the locked event
     PacketReader* packets;
 };
 
@@ -161,8 +148,7 @@ void on_event(const Event& event, void* context) {
     switch (event.type) {
         case EventType::locked:
             ++tally.locks;
-            tally.bits_per_peak = event.bits_per_peak;
-            tally.data_slots = event.data_slots;
+            tally.bits_per_package = event.bits_per_package;
             break;
         case EventType::end:
             ++tally.ends;
@@ -183,6 +169,7 @@ void on_event(const Event& event, void* context) {
         }
         case EventType::state:
         case EventType::slot:
+        case EventType::package:
             break;
     }
 }
@@ -235,20 +222,10 @@ void print_tally(const char* name, const Tally& tally, bool pass) {
 }
 
 EncoderConfig case_config(const Case& test_case) {
-    if (test_case.preset) return EncoderConfig::from_preset(test_case.preset_value, k_decoder_rate_hz);
-    EncoderConfig config = EncoderConfig::from_preset(Preset::hf, k_decoder_rate_hz);
-    config.slot_us = test_case.slot_us;
-    config.bits_per_peak = test_case.bits_per_peak;
-    config.data_slots = test_case.data_slots;
-    config.spacing = test_case.spacing;
-    config.side = test_case.side;
-    config.tone_hz = test_case.tone_hz;
+    EncoderConfig config = EncoderConfig::from_preset(test_case.preset, k_decoder_rate_hz);
+    if (test_case.slot_us != 0) config.slot_us = test_case.slot_us;
+    if (test_case.bits_per_package != 0) config.bits_per_package = test_case.bits_per_package;
     return config;
-}
-
-// A build with smaller caps (UNLIMITED_MAX_BITS_PER_PEAK, UNLIMITED_MAX_FRAME_BYTES) refuses larger modes.
-bool within_caps(const EncoderConfig& config) {
-    return config.bits_per_peak <= UNLIMITED_MAX_BITS_PER_PEAK && config.frame_bytes() <= UNLIMITED_MAX_FRAME_BYTES;
 }
 
 bool run_case(const Case& test_case, uint32_t& random_state) {
@@ -258,11 +235,6 @@ bool run_case(const Case& test_case, uint32_t& random_state) {
         printf("  %-10s invalid encoder configuration  FAIL\n", test_case.name);
         return false;
     }
-    if (!within_caps(config)) {
-        printf("  %-10s over the decoder caps (%u, %u): skipped\n", test_case.name,
-               static_cast<unsigned>(UNLIMITED_MAX_BITS_PER_PEAK), static_cast<unsigned>(UNLIMITED_MAX_FRAME_BYTES));
-        return true;
-    }
     Tally tally;
     reset_tally(tally, g_data, test_case.bytes, static_cast<float>(config.slot_us) / k_us_per_ms_f, nullptr);
     Encoder encoder(config);
@@ -270,8 +242,7 @@ bool run_case(const Case& test_case, uint32_t& random_state) {
     feed_silence(decoder, k_lead_silence_ms);
     const bool streamed = stream(encoder, decoder, g_data, test_case.bytes);
     drain(decoder, tally);
-    const bool pass = streamed && clean_run(tally) && tally.bits_per_peak == config.bits_per_peak &&
-                      tally.data_slots == config.data_slots;
+    const bool pass = streamed && clean_run(tally) && tally.bits_per_package == config.bits_per_package;
     print_tally(test_case.name, tally, pass);
     return pass;
 }

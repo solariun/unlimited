@@ -40,7 +40,9 @@ typedef void (*PacketHandler)(const uint8_t* payload, uint16_t size, uint8_t fla
 
 // Hunts for 0x2D 0xD4; LEN 0 or above k_packet_max_payload is rejected at once. After a CRC failure the
 // buffered bytes are rescanned from the byte after the failed 0x2D, so no packet behind it is lost. end and lost
-// events rescan the bytes behind a candidate still incomplete (e.g. a corrupted LEN), then reset it.
+// events, and a byte event whose byte_index is not the one after the previous byte's (bytes of a lost package are
+// missing), rescan the bytes behind a candidate still incomplete (e.g. a corrupted LEN), then reset it. slot and
+// package events are ignored.
 class PacketReader {
 public:
     PacketReader(PacketHandler handler, void* context);
@@ -59,10 +61,12 @@ private:
     PacketHandler handler_;
     void* context_;
     uint32_t crc_errors_;
-    uint16_t length_;   // LEN of the candidate, once its header is complete
-    uint16_t fill_;     // bytes buffered, starting at a candidate 0x2D
-    uint16_t parsed_;   // bytes of the candidate examined so far
-    uint8_t flags_;     // OR of the event flags of the buffered bytes
+    uint32_t next_index_;  // byte_index the next byte event should carry
+    uint16_t length_;      // LEN of the candidate, once its header is complete
+    uint16_t fill_;        // bytes buffered, starting at a candidate 0x2D
+    uint16_t parsed_;      // bytes of the candidate examined so far
+    uint8_t flags_;        // OR of the event flags of the buffered bytes
+    bool indexed_;         // next_index_ is known (a byte event arrived since the last reset)
     uint8_t buffer_[k_packet_max_payload + k_packet_overhead];
 };
 

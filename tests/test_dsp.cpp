@@ -697,34 +697,40 @@ TEST(dsp_candidate_list_merge) {
 }
 
 // Alias audit ring (spec 3.11): 2N + 1 positions, int8 in 1/15 units, committed per frame.
+// U25: 2N + 1 positions for N = 1..cap, int8 storage in 1/15, the maximum of the 4-package sums.
 TEST(dsp_audit_ring) {
     AuditRing ring;
+    for (unsigned n = 1; n <= k_max_bits_per_package; ++n) {
+        ring.reset(static_cast<uint8_t>(2 * n + 1));
+        CHECK_EQ(unsigned(ring.positions()), 2 * n + 1);
+    }
+    CHECK_EQ(unsigned(AuditRing::k_max_positions), 2u * k_max_bits_per_package + 1u);
     const uint8_t positions = 2 * 16 + 1;
     ring.reset(positions);
     CHECK_EQ(+ring.positions(), +positions);
-    CHECK_EQ(+ring.frames(), 0);
+    CHECK_EQ(+ring.packages(), 0);
     CHECK_NEAR(ring.max_evidence(), 0.0, 1e-6);
-    for (int f = 0; f < 3; ++f) {
+    for (int p = 0; p < 3; ++p) {
         ring.set(8, 5.0f);
         ring.set(3, -4.0f);
         ring.set(positions, 8.0f);  // outside: ignored
-        CHECK_NEAR(ring.max_evidence(), 5.0 * f, 1e-6);  // the frame being measured does not count
-        ring.next_frame();
+        CHECK_NEAR(ring.max_evidence(), 5.0 * p, 1e-6);  // the package being measured does not count
+        ring.next_package();
     }
     CHECK_NEAR(ring.max_evidence(), 15.0, 1e-6);
-    CHECK_EQ(+ring.frames(), 3);
+    CHECK_EQ(+ring.packages(), 3);
     ring.set(8, 8.0f);
-    ring.next_frame();
+    ring.next_package();
     CHECK_NEAR(ring.max_evidence(), 23.0, 1e-6);
-    for (int f = 0; f < 4; ++f) ring.next_frame();
+    for (int p = 0; p < 4; ++p) ring.next_package();
     CHECK_NEAR(ring.max_evidence(), 0.0, 1e-6);
-    CHECK_EQ(+ring.frames(), +AuditRing::k_frames);
+    CHECK_EQ(+ring.packages(), +AuditRing::k_packages);
     ring.set(0, 2.0f / 3.0f);  // 10 / 15, exact in the int8 scale
-    ring.next_frame();
+    ring.next_package();
     CHECK_NEAR(ring.max_evidence(), 2.0 / 3.0, 1e-6);
     ring.reset(3);
     ring.set(2, -4.0f);
-    ring.next_frame();
+    ring.next_package();
     CHECK_NEAR(ring.max_evidence(), 0.0, 1e-6);  // positions 0 and 1 hold 0
 }
 
@@ -769,547 +775,176 @@ TEST(dsp_impulse_blanker) {
     CHECK(step_blanks <= 3);
 }
 
-// ---------------------------------------------------------------------------
-// v0.2 slot path (spec 3.2, 3.8, 3.10)
-// ---------------------------------------------------------------------------
+// U11: the smart line, spec 3.10 table (+-0.005), clamps at 0.50 and 0.75, 0.75 for a^2 <= 0.
+TEST(dsp_smart_line) {
+    const float a[] = {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f, 10.0f, 15.0f};
+    const float rho[] = {0.750f, 0.705f, 0.630f, 0.591f, 0.567f, 0.542f, 0.529f, 0.515f};
+    for (std::size_t i = 0; i < test::count_of(a); ++i) {
+        CHECK_NEAR(equal_likelihood_ratio(a[i] * a[i]), rho[i], 0.005);
+    }
+    CHECK_NEAR(equal_likelihood_ratio(0.0f), 0.75, 1e-6);
+    CHECK_NEAR(equal_likelihood_ratio(-3.0f), 0.75, 1e-6);
+    CHECK_NEAR(equal_likelihood_ratio(1e6f), 0.50, 1e-3);
+    for (float a2 = 0.01f; a2 < 1e4f; a2 *= 1.3f) {
+        const float r = equal_likelihood_ratio(a2);
+        CHECK(r >= 0.5f && r <= 0.75f);
+    }
+}
+
+// U9: the history holds (cap + 5) slots of the slowest T (64 blocks) and 32 guard cells.
+TEST(dsp_history_cells_follow_the_cap) {
+    CHECK_EQ(unsigned(k_history_cells), (unsigned(k_max_bits_per_package) + 5u) * 64u + 32u);
+    CHECK(k_rebase_blocks > k_history_cells);
+    NOTE("cap %u: %u cells", unsigned(k_max_bits_per_package), unsigned(k_history_cells));
+}
 
 namespace {
 
-const double k_peak_ramp = 0.125;
-
-double tukey_peak(double u) {
-    if (u < 0.0 || u >= 1.0) return 0.0;
-    if (u < k_peak_ramp) return std::pow(std::sin(k_pi * u / (2.0 * k_peak_ramp)), 2.0);
-    if (u > 1.0 - k_peak_ramp) return std::pow(std::sin(k_pi * (1.0 - u) / (2.0 * k_peak_ramp)), 2.0);
-    return 1.0;
-}
-
-// Double-precision reference: |sum x[n] w[n] e^-jwn|^2 with w at u = (n + 0.5) / L.
-double reference_energy(const std::vector<int16_t>& x, double hz) {
-    const double length = static_cast<double>(x.size());
-    double re = 0.0;
-    double im = 0.0;
-    for (std::size_t n = 0; n < x.size(); ++n) {
-        const double w = tukey_peak((n + 0.5) / length) * x[n];
-        re += w * std::cos(k_two_pi * hz * n / k_rate);
-        im -= w * std::sin(k_two_pi * hz * n / k_rate);
-    }
-    return re * re + im * im;
-}
-
-template <typename Bank>
-void run_bank(Bank& bank, const std::vector<int16_t>& x, float skip = 0.0f) {
-    bank.open(static_cast<float>(x.size()), skip);
-    for (std::size_t n = static_cast<std::size_t>(std::ceil(skip)); n < x.size(); ++n) {
-        const bool closed = bank.push(x[n]);
-        if (closed) break;
-    }
-}
-
-std::vector<int16_t> tone_slot(std::size_t length, double hz, double amplitude, double phase, double noise_sigma,
-                               std::mt19937& generator) {
-    std::normal_distribution<double> noise(0.0, noise_sigma > 0.0 ? noise_sigma : 1.0);
-    std::vector<int16_t> x(length);
-    for (std::size_t n = 0; n < length; ++n) {
-        double value = amplitude * tukey_peak(static_cast<double>(n) / length) * std::sin(k_two_pi * hz * n / k_rate + phase);
-        if (noise_sigma > 0.0) value += noise(generator);
-        x[n] = static_cast<int16_t>(std::lround(std::max(-32768.0, std::min(32767.0, value))));
-    }
-    return x;
-}
-
-// Square-law header bins for the Monte Carlo of U22: |a e^jphi + n|^2 with n ~ CN(0, 1).
-struct HeaderSim {
-    std::mt19937_64 generator;
-    std::normal_distribution<double> gauss;
-    std::uniform_real_distribution<double> uniform;
-    explicit HeaderSim(uint64_t seed) : generator(seed), gauss(0.0, std::sqrt(0.5)), uniform(0.0, 1.0) {}
-    double bin(double amplitude, double leak = 0.0) {
-        const double phase = k_two_pi * uniform(generator);
-        const double leak_phase = k_two_pi * uniform(generator);
-        const double re = amplitude * std::cos(phase) + leak * std::cos(leak_phase) + gauss(generator);
-        const double im = amplitude * std::sin(phase) + leak * std::sin(leak_phase) + gauss(generator);
-        return re * re + im * im;
-    }
-};
-
-// A carrier between header tones 3 and 4 of side 0, k_leak_over_header_db over the header's peaks at its own frequency,
-// leaks into every tone of that side, k_leak_db_per_tone less per tone of distance: the header window's sidelobes, as
-// measured in C8' (+10 dB, 10 dB SNR, T = 32 ms: peaks 29 dB over the noise in a bin; +7, +1, -5, -6, -11, -11, -16,
-// -20 dB relative to the peaks in the tones from the nearest out).
-enum class HeaderCase { noise, carrier, chirp, misaligned, header, carrier_leak, header_carrier_leak };
-const double k_leak_db_per_tone = 8.0;
-const double k_leak_centre = 3.3;
-const double k_leak_over_header_db = 10.0;
-
-// P(accepted wrong) and P(accepted right) over `trials`.
-void header_monte_carlo(HeaderCase kind, double level_db, int trials, uint64_t seed, double& wrong, double& right) {
-    HeaderSim sim(seed);
-    const double amplitude = std::sqrt(std::pow(10.0, level_db / 10.0));
-    const uint8_t interferer_tone = 3;
-    long wrong_count = 0;
-    long right_count = 0;
-    for (int trial = 0; trial < trials; ++trial) {
-        const uint16_t word = static_cast<uint16_t>(sim.generator() % k_header_words);
-        const uint8_t side = static_cast<uint8_t>(sim.generator() & 1u);
-        float energy[2][k_header_slots][k_header_slots];
-        for (uint8_t d = 0; d < 2; ++d) {
-            for (uint8_t j = 0; j < k_header_slots; ++j) {
-                for (uint8_t h = 0; h < k_header_slots; ++h) {
-                    double a = 0.0;
-                    if (kind == HeaderCase::header && d == side && h == header_symbol(word, j)) a = amplitude;
-                    if (kind == HeaderCase::misaligned && d == side && j > 0 && h == header_symbol(word, j - 1)) a = amplitude;
-                    if (kind == HeaderCase::carrier && d == 0 && h == interferer_tone) a = amplitude;
-                    if (kind == HeaderCase::chirp && d == 0 && h == j) a = amplitude;
-                    if (kind == HeaderCase::header_carrier_leak && d == 0 && h == header_symbol(word, j)) a = amplitude;
-                    double leak = 0.0;
-                    if ((kind == HeaderCase::carrier_leak || kind == HeaderCase::header_carrier_leak) && d == 0) {
-                        const double leak_db =
-                            level_db + k_leak_over_header_db - k_leak_db_per_tone * std::fabs(h - k_leak_centre);
-                        leak = std::sqrt(std::pow(10.0, leak_db / 10.0));
-                    }
-                    energy[d][j][h] = static_cast<float>(sim.bin(a, leak));
-                }
-            }
-        }
-        const HeaderDecision decision = decide_header(energy);
-        if (!decision.accepted) continue;
-        const bool header = kind == HeaderCase::header || kind == HeaderCase::header_carrier_leak;
-        const uint8_t sent_side = kind == HeaderCase::header_carrier_leak ? 0 : side;
-        const bool correct = header && decision.word == word && decision.side == (sent_side == 0 ? 1 : -1);
-        if (correct) {
-            ++right_count;
-        } else {
-            ++wrong_count;
-        }
-    }
-    wrong = static_cast<double>(wrong_count) / trials;
-    right = static_cast<double>(right_count) / trials;
+// Feeds grid indices to a learner; returns the step of the last one.
+LearnStep feed(PackageLearner& learner, const std::vector<int32_t>& markers) {
+    LearnStep step = LearnStep::train;
+    for (std::size_t i = 0; i < markers.size(); ++i) step = learner.push(markers[i]);
+    return step;
 }
 
 }  // namespace
 
-// U26: the streaming slot bank against a double-precision matched filter; window sums; full scale; late opening.
-TEST(dsp_slot_bank) {
-    std::mt19937 generator(26);
-    const std::size_t lengths[] = {48, 256, 1024};
-    for (std::size_t l = 0; l < test::count_of(lengths); ++l) {
-        const std::size_t length = lengths[l];
-        const double bin_hz = 8000.0 / length;
-        GridBank bank;
-        bank.reset();
-        const uint16_t bins = 16;
-        bank.set_bins(bins);
-        for (uint16_t b = 0; b < bins; ++b) bank.set_frequency(b, static_cast<float>(1000.0 + 1.1428571 * bin_hz * b));
-        const double hz = 1000.0 + 1.1428571 * bin_hz * 5;
-        const std::vector<int16_t> x = tone_slot(length, hz, 8000.0, 0.7, 300.0, generator);
-        run_bank(bank, x);
-        CHECK(!bank.active());
-        double peak = 0.0;
-        double worst = 0.0;
-        for (uint16_t b = 0; b < bins; ++b) peak = std::max(peak, reference_energy(x, 1000.0 + 1.1428571 * bin_hz * b));
-        for (uint16_t b = 0; b < bins; ++b) {
-            const double expected = reference_energy(x, 1000.0 + 1.1428571 * bin_hz * b);
-            worst = std::max(worst, std::fabs(bank.energy(b) - expected) / peak);
+// U26: synthetic marker index sequences (spec 3.8).
+TEST(dsp_package_learner) {
+    const int32_t train_end = 7;  // a train of markers 0..7, the last the first START
+    for (int32_t n = 1; n <= static_cast<int32_t>(k_max_bits_per_package); ++n) {
+        const int32_t span = n + 1;
+        // Clean: confirmed at the second STOP, package 0 on L.
+        {
+            PackageLearner learner;
+            learner.reset(train_end, 7);
+            CHECK(learner.push(train_end + span) == LearnStep::candidate);
+            CHECK_EQ(int(learner.bits()), int(n));
+            CHECK_EQ(int(learner.faded_bits()), int(n >= 2 ? n - 1 : 0));
+            CHECK(learner.push(train_end + 2 * span) == LearnStep::confirmed);
+            CHECK_EQ(int(learner.bits()), int(n));
+            CHECK(!learner.faded_start());
+            CHECK_EQ(learner.first_start(), train_end);
+            CHECK_EQ(learner.candidate_start(), train_end);
+            CHECK(learner.start_exact());
         }
-        NOTE("L = %zu: worst bank error %.2e of the peak bin", length, worst);
-        CHECK(worst <= 1e-3);
-        CHECK_NEAR(bank.window_sum(), k_peak_window_mean * length, 1e-3 * length);
-        CHECK_NEAR(bank.window_square_sum(), k_peak_energy * length, 1e-3 * length);
-    }
-
-    // Full scale at T = 128 ms on the bank's edge frequencies: no overflow, still the reference energy.
-    const std::size_t length = 1024;
-    const double edges[] = {100.0, 300.0, 2700.0, 3900.0};
-    for (std::size_t e = 0; e < test::count_of(edges); ++e) {
-        std::vector<int16_t> x(length);
-        for (std::size_t n = 0; n < length; ++n) {
-            x[n] = static_cast<int16_t>(std::lround(32767.0 * std::cos(k_two_pi * edges[e] * n / k_rate)));
+        // A train marker in the middle faded: a gap of 2 and then gaps of 1 drop the candidate.
+        {
+            PackageLearner learner;
+            learner.reset(3, 3);
+            CHECK(learner.push(5) == LearnStep::candidate);
+            CHECK(learner.push(6) == LearnStep::train);
+            CHECK_EQ(int(learner.bits()), 0);
+            CHECK(learner.push(train_end) == LearnStep::train);
+            CHECK_EQ(learner.train_index(), train_end);
+            CHECK(learner.push(train_end + span) == LearnStep::candidate);
+            CHECK(learner.push(train_end + 2 * span) == LearnStep::confirmed);
+            CHECK_EQ(learner.first_start(), train_end);
         }
-        HeaderBank bank;
-        bank.reset();
-        bank.set_bins(1);
-        bank.set_frequency(0, static_cast<float>(edges[e]));
-        run_bank(bank, x);
-        const double expected = reference_energy(x, edges[e]);
-        NOTE("full scale at %.0f Hz: %.4e vs %.4e", edges[e], bank.energy(0), expected);
-        CHECK_NEAR(bank.energy(0) / expected, 1.0, 1e-3);
+        // The last train marker (the first START) faded: reading B confirms, package 0 starts one slot after L.
+        if (n + 1 <= static_cast<int32_t>(k_max_bits_per_package)) {
+            PackageLearner learner;
+            learner.reset(train_end - 1, 6);
+            CHECK(learner.push(train_end + span) == LearnStep::candidate);
+            CHECK_EQ(int(learner.bits()), int(n + 1));
+            CHECK_EQ(int(learner.faded_bits()), int(n));
+            CHECK(learner.push(train_end + 2 * span) == LearnStep::confirmed);
+            CHECK(learner.faded_start());
+            CHECK_EQ(int(learner.bits()), int(n));
+            CHECK_EQ(learner.first_start(), train_end);
+            CHECK_EQ(learner.candidate_start(), train_end);
+            CHECK(learner.start_exact());
+        }
+        // The last two train markers faded: a rejection, then N from the next spans; package 0 still on the START.
+        if (n + 2 <= static_cast<int32_t>(k_max_bits_per_package)) {
+            PackageLearner learner;
+            learner.reset(train_end - 2, 5);
+            CHECK(learner.push(train_end + span) == LearnStep::candidate);
+            CHECK(learner.push(train_end + 2 * span) == LearnStep::candidate);  // rejects N + 2, forms N
+            CHECK(learner.push(train_end + 3 * span) == LearnStep::confirmed);
+            CHECK_EQ(int(learner.bits()), int(n));
+            CHECK_EQ(int(learner.rejections()), 1);
+            CHECK(learner.start_exact());  // N = 1: g1 - L = 4, left to the carrier check of the decoder
+            if (n >= 2) CHECK_EQ(learner.first_start(), train_end);
+        }
+        // The first STOP faded: packages 0 and 1 are lost, N learnt from the next spans.
+        if (2 * n + 1 <= static_cast<int32_t>(k_max_bits_per_package)) {
+            PackageLearner learner;
+            learner.reset(train_end, 7);
+            CHECK(learner.push(train_end + 2 * span) == LearnStep::candidate);
+            CHECK(learner.push(train_end + 3 * span) == LearnStep::candidate);
+            CHECK(learner.push(train_end + 4 * span) == LearnStep::confirmed);
+            CHECK_EQ(int(learner.bits()), int(n));
+            CHECK_EQ(learner.candidate_start(), train_end + 2 * span);
+            CHECK_EQ(learner.first_start(), train_end);
+            CHECK(learner.start_exact());  // N = 1: g1 - L = 4, left to the carrier check of the decoder
+        }
+        // The START and the first STOP faded.
+        if (2 * n + 2 <= static_cast<int32_t>(k_max_bits_per_package)) {
+            PackageLearner learner;
+            learner.reset(train_end - 1, 6);
+            CHECK(learner.push(train_end + 2 * span) == LearnStep::candidate);
+            CHECK(learner.push(train_end + 3 * span) == LearnStep::candidate);
+            CHECK(learner.push(train_end + 4 * span) == LearnStep::confirmed);
+            CHECK_EQ(int(learner.bits()), int(n));
+            if (n >= 2) CHECK_EQ(learner.first_start(), train_end);
+        }
+        // A gap of 1 after a candidate drops it: the train goes on.
+        {
+            PackageLearner learner;
+            learner.reset(train_end, 7);
+            CHECK(learner.push(train_end + span) == LearnStep::candidate);
+            CHECK(learner.push(train_end + span + 1) == LearnStep::train);
+            CHECK_EQ(int(learner.bits()), 0);
+            CHECK_EQ(learner.train_index(), train_end + span + 1);
+        }
     }
-
-    // HeaderBank and GridBank agree on a shared bin; a late window (skip) is the window with zeros in front.
-    const std::vector<int16_t> x = tone_slot(256, 1210.0, 5000.0, 0.2, 100.0, generator);
-    HeaderBank header;
-    header.reset();
-    header.set_bins(1);
-    header.set_frequency(0, 1210.0f);
-    GridBank grid;
-    grid.reset();
-    grid.set_bins(1);
-    grid.set_frequency(0, 1210.0f);
-    run_bank(header, x);
-    run_bank(grid, x);
-    CHECK_EQ(header.energy(0), grid.energy(0));
-    const std::size_t skip = 40;
-    std::vector<int16_t> zeroed = x;
-    for (std::size_t n = 0; n < skip; ++n) zeroed[n] = 0;
-    run_bank(header, zeroed);
-    const float full = header.energy(0);
-    run_bank(grid, x, static_cast<float>(skip));
-    CHECK_NEAR(grid.energy(0) / full, 1.0, 1e-4);
-    // Idle: pushes are ignored.
-    CHECK(!grid.push(1000));
+    // N = 1 whose first marker came 5 slots after L is refused.
+    PackageLearner one;
+    one.reset(train_end, 7);
+    const std::vector<int32_t> far = {train_end + 5, train_end + 7, train_end + 9};
+    CHECK(feed(one, far) == LearnStep::confirmed);
+    CHECK_EQ(int(one.bits()), 1);
+    CHECK(!one.start_exact());
+    // A sub-rate reading (gaps of 2 and no gap of 1) would read as N = 1: the learner reports no train gaps of one, and
+    // the decoder's sub-rate check (train_ones() < 3) takes it for a train read at T / 2 first.
+    PackageLearner sub_rate;
+    sub_rate.reset(0, 0);
+    CHECK(sub_rate.push(2) == LearnStep::candidate);
+    CHECK_EQ(int(sub_rate.train_ones()), 0);
+    // Gaps above the cap: nothing on the first, unsupported on the second equal one.
+    const int32_t long_gap = static_cast<int32_t>(k_max_bits_per_package) + 2;
+    PackageLearner above;
+    above.reset(train_end, 7);
+    CHECK(above.push(train_end + long_gap) == LearnStep::rejected);
+    CHECK_EQ(int(above.bits()), 0);
+    CHECK(above.push(train_end + 2 * long_gap) == LearnStep::unsupported);
+    // Contradicting spans are counted.
+    PackageLearner noisy;
+    noisy.reset(train_end, 7);
+    const std::vector<int32_t> contradictions = {train_end + 5, train_end + 8, train_end + 12, train_end + 18};
+    feed(noisy, contradictions);
+    CHECK_EQ(int(noisy.rejections()), 3);
 }
 
-// U27: per-bin background. A steady carrier in one bin is learnt within 32 slots; N_bin is the median; on AWGN
-// the background-subtracted decision costs nothing against plain argmax.
-TEST(dsp_bin_background) {
-    BinBackground background;
-    const uint16_t bins = 32;
-    background.reset(bins, 100.0f);
-    CHECK_NEAR(background.mean(0), 100.0, 1.0);
-    CHECK_NEAR(background.noise(), 100.0, 1.0);
-
-    std::mt19937 generator(27);
-    std::exponential_distribution<double> exponential(1.0);
-    const double noise = 100.0;
-    const double carrier = 1000.0 * noise;  // 30 dB over the bin noise
-    const uint16_t carrier_bin = 3;
-    int learnt_at = -1;
-    double noise_sum = 0.0;
-    int noise_count = 0;
-    const int slots = 400;
-    for (int slot = 0; slot < slots; ++slot) {
-        for (uint16_t b = 0; b < bins; ++b) {
-            const double energy = noise * exponential(generator) + (b == carrier_bin ? carrier : 0.0);
-            background.push(b, static_cast<float>(energy));
+// U13: the search looks only inside search_range(): a strong tone just outside it is not a candidate.
+TEST(dsp_tone_search_stays_inside_range) {
+    const double tones[] = {310.0, 340.0, 2660.0, 2690.0};
+    const bool inside[] = {false, true, true, false};
+    for (std::size_t t = 0; t < test::count_of(tones); ++t) {
+        ToneSearch search;
+        search.configure(335, 2665);
+        std::mt19937 generator(static_cast<std::uint32_t>(50 + t));
+        std::normal_distribution<double> noise(0.0, 100.0);
+        float estimate = 0.0f;
+        bool locked = false;
+        for (int n = 0; n < 80 * ToneSearch::k_block_samples && !locked; ++n) {
+            double value = noise(generator);
+            if (n >= 20 * ToneSearch::k_block_samples) value += 8000.0 * std::sin(k_two_pi * tones[t] * n / k_rate);
+            if (search.push(static_cast<int16_t>(std::lround(value)))) locked = search.candidate(estimate);
         }
-        if (learnt_at < 0 && background.mean(carrier_bin) >= carrier) learnt_at = slot + 1;
-        if (slot < slots / 2) continue;
-        noise_sum += background.noise();
-        ++noise_count;
-    }
-    // The mean assumes exponential energies (mean = 25 % quantile x 3.48): a steady carrier reads up to 3.5 times
-    // its energy, so it is fully suppressed (and so is a peak on its tone less than 2.5 times as strong).
-    // N_bin of one slot is the median of the bins' trackers, each spread by its steps: it is averaged here (the
-    // decoder's TRACK noise averages it too).
-    const double mean_noise = noise_sum / noise_count;
-    NOTE("carrier 30 dB over the noise suppressed after %d slots (mean %.2f x carrier); N_bin %.3f x noise",
-         learnt_at, background.mean(carrier_bin) / carrier, mean_noise / noise);
-    CHECK(learnt_at > 0 && learnt_at <= 32);
-    CHECK(background.mean(carrier_bin) >= carrier && background.mean(carrier_bin) <= 4.0 * carrier);
-    CHECK_NEAR(mean_noise / noise, 1.0, 0.1);
-
-    // Symbol decisions with background subtraction against plain argmax, M = 32 at the threshold (per-slot Es/N0
-    // about 12 dB), 3000 slots: the background learns the noise, so the argmax does not change.
-    const std::size_t length = 256;
-    const uint8_t k = 5;
-    const uint16_t tones = 32;
-    const double spacing = 8.0 / 7.0 * 8000.0 / length;
-    GridBank bank;
-    bank.reset();
-    bank.set_bins(tones);
-    for (uint16_t t = 0; t < tones; ++t) bank.set_frequency(t, static_cast<float>(2000.0 - (5.0 * 8000.0 / length + t * spacing)));
-    BinBackground tracked;
-    const double sigma = 1000.0;
-    tracked.reset(tones, static_cast<float>(sigma * sigma * k_peak_energy * length));
-    // Per-slot Es/N0 = |X|^2 / (sigma^2 sum w^2) = A^2 L (0.875^2 / 4) / (0.84375 sigma^2): 9 dB.
-    const double es_n0 = std::pow(10.0, 0.9);
-    const double amplitude = sigma * std::sqrt(es_n0 * 4.0 * k_peak_energy / (k_peak_window_mean * k_peak_window_mean * length));
-    std::uniform_int_distribution<int> pick(0, tones - 1);
-    int errors_background = 0;
-    int errors_argmax = 0;
-    for (int slot = 0; slot < 3000; ++slot) {
-        const int tone = pick(generator);
-        const std::vector<int16_t> x =
-            tone_slot(length, 2000.0 - (5.0 * 8000.0 / length + tone * spacing), amplitude, 0.3 * slot, sigma, generator);
-        run_bank(bank, x);
-        const SlotDecision d = decide_slot(bank, tracked, k, 0);
-        uint16_t best = 0;
-        for (uint16_t t = 1; t < tones; ++t) {
-            if (bank.energy(t) > bank.energy(best)) best = t;
-        }
-        for (uint16_t t = 0; t < tones; ++t) tracked.push(t, bank.energy(t));
-        errors_background += d.tone != tone ? 1 : 0;
-        errors_argmax += best != tone ? 1 : 0;
-    }
-    NOTE("symbol errors: background %d, plain argmax %d (of 3000)", errors_background, errors_argmax);
-    CHECK(errors_argmax > 100);
-    CHECK(errors_background <= 1.05 * errors_argmax + 5);
-}
-
-// U28: LLR signs carry the decision; ln I0 table.
-TEST(dsp_llr) {
-    double worst_absolute = 0.0;
-    double worst_relative = 0.0;
-    for (int i = 1; i <= 4000; ++i) {
-        const double x = 0.005 * i;
-        double i0 = 0.0;
-        double term = 1.0;
-        for (int m = 1; m < 400 && term > 1e-18 * i0; ++m) {
-            i0 += term;
-            term *= (x / 2.0) * (x / 2.0) / (m * m);
-        }
-        const double error = std::fabs(ln_i0(static_cast<float>(x)) - std::log(i0));
-        worst_absolute = std::max(worst_absolute, error);
-        if (x >= 3.0) worst_relative = std::max(worst_relative, error / std::log(i0));
-    }
-    NOTE("ln I0: worst error %.4f nat, %.2f %% for x >= 3", worst_absolute, 100.0 * worst_relative);
-    CHECK(worst_absolute <= 0.02);
-    CHECK(worst_relative <= 0.01);
-    CHECK_EQ(ln_i0(0.0f), 0.0f);
-
-    std::mt19937 generator(28);
-    const std::size_t length = 128;
-    const uint8_t bits[] = {1, 3, 5, 7};
-    for (std::size_t b = 0; b < test::count_of(bits); ++b) {
-        const uint8_t k = bits[b];
-        const uint16_t tones = static_cast<uint16_t>(1u << k);
-        const uint16_t opened = tones > k_min_grid_bins ? tones : k_min_grid_bins;
-        const double spacing = 8000.0 / length;
-        GridBank bank;
-        bank.reset();
-        bank.set_bins(opened);
-        for (uint16_t t = 0; t < opened; ++t) bank.set_frequency(t, static_cast<float>(400.0 + t * spacing * 0.3));
-        BinBackground background;
-        background.reset(opened, static_cast<float>(400.0 * 400.0 * k_peak_energy * length));
-        int mismatches = 0;
-        for (int slot = 0; slot < 200; ++slot) {
-            const int tone = slot % tones;
-            const std::vector<int16_t> x = tone_slot(length, 400.0 + tone * spacing * 0.3, 1500.0, 0.1 * slot, 400.0, generator);
-            run_bank(bank, x);
-            const SlotDecision d = decide_slot(bank, background, k, static_cast<uint8_t>(slot % 32));
-            CHECK_EQ(+d.symbol, +peak_symbol(d.tone, static_cast<uint8_t>(slot % 32), k));
-            for (uint8_t i = 0; i < k; ++i) {
-                const bool one = ((d.symbol >> (k - 1 - i)) & 1u) != 0;
-                if ((d.soft[i] > 0) != one || d.soft[i] == 0 || std::abs(d.soft[i]) > k_llr_q4_max) ++mismatches;
-            }
-            for (uint16_t t = 0; t < opened; ++t) background.push(t, bank.energy(t));
-        }
-        CHECK_EQ(mismatches, 0);
-    }
-}
-
-// A clean full-scale peak at T = 128 ms over a near-silent background: the max-log metrics pass the int32 range, and
-// every bit still reads the largest LLR (the float was converted before it was clamped: undefined, and on x86 the
-// strongest bits came out at +-1).
-TEST(dsp_llr_saturates_at_high_snr) {
-    std::mt19937 generator(31);
-    const std::size_t length = 1024;
-    const uint8_t k = 7;
-    const uint16_t tones = static_cast<uint16_t>(1u << k);
-    const double spacing = 8.0 / 7.0 * 8000.0 / length;
-    GridBank bank;
-    bank.reset();
-    bank.set_bins(tones);
-    for (uint16_t t = 0; t < tones; ++t) bank.set_frequency(t, static_cast<float>(2087.0 - (5.0 * 8000.0 / length + t * spacing)));
-    const double sigma = 0.5;
-    BinBackground background;
-    background.reset(tones, static_cast<float>(sigma * sigma * k_peak_energy * length));
-    int saturated = 0;
-    int bits = 0;
-    const int slots = 16;
-    for (int slot = 0; slot < slots; ++slot) {
-        const int tone = (37 * slot + 5) % tones;
-        const std::vector<int16_t> x =
-            tone_slot(length, 2087.0 - (5.0 * 8000.0 / length + tone * spacing), 23197.0, 0.7 * slot, sigma, generator);
-        run_bank(bank, x);
-        const SlotDecision d = decide_slot(bank, background, k, static_cast<uint8_t>(slot));
-        CHECK_EQ(+d.tone, tone);
-        for (uint8_t i = 0; i < k; ++i) {
-            const bool one = ((d.symbol >> (k - 1 - i)) & 1u) != 0;
-            saturated += d.soft[i] == (one ? k_llr_q4_max : -k_llr_q4_max) ? 1 : 0;
-            ++bits;
-        }
-    }
-    NOTE("%d of %d bits at |LLR| = %d", saturated, bits, k_llr_q4_max);
-    CHECK_EQ(saturated, bits);
-}
-
-// Slot decision fields on a clean peak and on noise: presence, erasure, confidence, crest.
-TEST(dsp_slot_decision) {
-    std::mt19937 generator(29);
-    const std::size_t length = 256;
-    const uint8_t k = 4;
-    const uint16_t tones = 16;
-    const double spacing = 8.0 / 7.0 * 8000.0 / length;
-    GridBank bank;
-    bank.reset();
-    bank.set_bins(tones);
-    for (uint16_t t = 0; t < tones; ++t) bank.set_frequency(t, static_cast<float>(800.0 + t * spacing));
-    const double sigma = 50.0;
-    BinBackground background;
-    background.reset(tones, static_cast<float>(sigma * sigma * k_peak_energy * length));
-    const std::vector<int16_t> peak = tone_slot(length, 800.0 + 9 * spacing, 10000.0, 0.4, sigma, generator);
-    run_bank(bank, peak);
-    const SlotDecision strong = decide_slot(bank, background, k, 2);
-    CHECK_EQ(+strong.tone, 9);
-    CHECK(strong.confident);
-    CHECK(!strong.erasure);
-    CHECK(strong.confidence > 40);  // > 20 dB over the runner-up
-    CHECK_NEAR(strong.crest / 10000.0, 1.0, 0.02);
-    int confident = 0;
-    int erasures = 0;
-    double noise = 0.0;
-    const int slots = 400;
-    for (int slot = 0; slot < slots; ++slot) {
-        const std::vector<int16_t> x = tone_slot(length, 800.0, 0.0, 0.0, sigma, generator);
-        run_bank(bank, x);
-        const SlotDecision d = decide_slot(bank, background, k, 0);
-        confident += d.confident ? 1 : 0;
-        erasures += d.erasure ? 1 : 0;
-        noise += d.noise / slots;
-        for (uint16_t t = 0; t < tones; ++t) background.push(t, bank.energy(t));
-    }
-    // The slot's own noise (bins 3+ tones from the winner), averaged.
-    NOTE("noise %.3f of sigma^2 sum w^2", noise / (sigma * sigma * k_peak_energy * length));
-    CHECK_NEAR(noise / (sigma * sigma * k_peak_energy * length), 1.0, 0.1);
-    // max / mean of the others >= 2 H_M: iid exponentials pass it 6 % of the time at M = 16 (14 % at M = 8).
-    NOTE("noise only: %d of 400 slots confident, %d erasures", confident, erasures);
-    CHECK(confident <= 60);
-    CHECK(erasures >= 200);
-}
-
-// U30: the slot-path impulse blanker.
-TEST(dsp_slot_blanker) {
-    SlotBlanker blanker;
-    std::mt19937 generator(30);
-    std::uniform_real_distribution<double> uniform(-1732.0, 1732.0);  // RMS 1000, never above 4 RMS
-    std::vector<int16_t> in(20000);
-    for (std::size_t n = 0; n < in.size(); ++n) in[n] = static_cast<int16_t>(std::lround(uniform(generator)));
-    const std::size_t impulse = 12000;
-    std::vector<int16_t> with_impulse = in;
-    with_impulse[impulse] = 20000;  // 20 x RMS
-    std::vector<int16_t> out(in.size());
-    int zeroed = 0;
-    for (std::size_t n = 0; n < in.size(); ++n) {
-        out[n] = blanker.push(with_impulse[n]);
-        if (blanker.blanked()) ++zeroed;
-    }
-    CHECK_EQ(zeroed, 2 * k_slot_blank_hold + 1);
-    bool unchanged = true;
-    for (std::size_t n = k_slot_blank_delay; n < in.size(); ++n) {
-        const std::size_t source = n - k_slot_blank_delay;
-        const bool span = source + k_slot_blank_hold >= impulse && source <= impulse + k_slot_blank_hold;
-        if (span) {
-            unchanged = unchanged && out[n] == 0;
-        } else {
-            unchanged = unchanged && out[n] == with_impulse[source];
-        }
-    }
-    CHECK(unchanged);
-
-    // A tone starting after digital silence is a level change: blanking stops within a few ms.
-    SlotBlanker step;
-    int blanked_step = 0;
-    for (int n = 0; n < 4000; ++n) {
-        const double value = n < 1000 ? 0.0 : 20000.0 * std::sin(k_two_pi * 1000.0 * n / k_rate);
-        step.push(static_cast<int16_t>(std::lround(value)));
-        if (step.blanked() && n > 1000 + 80) ++blanked_step;
-    }
-    CHECK_EQ(blanked_step, 0);
-
-    // Peaks 15 dB over the running RMS (a flat FM transmitter into a de-emphasised receiver puts the header's low
-    // tones that far over the train): tones, not impulses. The first one rises from the noise as steeply as an impulse
-    // does and may lose its onset; the ones after it are not zeroed (the RMS alone would blank all of them).
-    SlotBlanker loud;
-    std::mt19937 noise_generator(31);
-    std::normal_distribution<double> noise(0.0, 1000.0);
-    const int k_peak_samples = 48;  // T = 6 ms
-    const int k_ramp_samples = 6;   // Tukey alpha 0.25
-    const double k_peak_amplitude = 8000.0;
-    int blanked_peaks = 0;
-    for (int n = 0; n < 4000 + 20 * k_peak_samples; ++n) {
-        double value = noise(noise_generator);
-        if (n >= 4000) {
-            const int m = (n - 4000) % k_peak_samples;
-            const int edge = std::min(m, k_peak_samples - 1 - m);
-            const double ramp = edge < k_ramp_samples ? std::pow(std::sin(k_two_pi * 0.25 * (edge + 0.5) / k_ramp_samples), 2) : 1.0;
-            const double hz = 500.0 + 190.0 * ((n - 4000) / k_peak_samples % 7);
-            value += k_peak_amplitude * ramp * std::sin(k_two_pi * hz * n / k_rate);
-        }
-        loud.push(static_cast<int16_t>(std::lround(value)));
-        if (loud.blanked() && n >= 4000 + k_peak_samples + k_slot_blank_delay) ++blanked_peaks;
-    }
-    CHECK_EQ(blanked_peaks, 0);
-}
-
-// Header ML (spec 3.8) on clean energies: every test vector word and both sides.
-TEST(dsp_header_decision_clean) {
-    const uint16_t words[] = {0x032, 0x002, 0x003, 0x004, 0x005, 0x006, 0x084, 0x103, 0x047, 0x1FF};
-    for (std::size_t w = 0; w < test::count_of(words); ++w) {
-        for (uint8_t side = 0; side < 2; ++side) {
-            float energy[2][k_header_slots][k_header_slots];
-            for (uint8_t d = 0; d < 2; ++d) {
-                for (uint8_t j = 0; j < k_header_slots; ++j) {
-                    for (uint8_t h = 0; h < k_header_slots; ++h) {
-                        energy[d][j][h] = (d == side && h == header_symbol(words[w], j)) ? 1000.0f : 1.0f + 0.01f * (h + j);
-                    }
-                }
-            }
-            const HeaderDecision decision = decide_header(energy);
-            CHECK(decision.accepted);
-            CHECK_EQ(decision.word, words[w]);
-            CHECK_EQ(+decision.side, side == 0 ? 1 : -1);
-            CHECK_EQ(+decision.agreement, +k_header_slots);
-        }
-    }
-    float silence[2][k_header_slots][k_header_slots] = {};
-    CHECK(!decide_header(silence).accepted);
-}
-
-// U22: header decoder Monte Carlo on square-law bins (per-slot Es/N0 in a bin, noise CN(0, 1)). The carrier leak cases
-// model C8' (a carrier +10 dB over the peaks between two header tones) with a random carrier phase in every slot, which
-// is harsher than the channel: 84 % detected here (70 % with one scale for the whole side) against 99 % in C8'.
-const double k_carrier_leak_detection = 0.8;
-TEST(dsp_header_decision_monte_carlo) {
-    struct Case {
-        HeaderCase kind;
-        double level_db;
-        int trials;
-        const char* name;
-    };
-    const Case cases[] = {
-        {HeaderCase::noise, 0.0, 100000, "noise"},        {HeaderCase::carrier, 20.0, 20000, "carrier +20 dB"},
-        {HeaderCase::chirp, 20.0, 20000, "chirp +20 dB"},  {HeaderCase::misaligned, 20.0, 20000, "misaligned 20 dB"},
-        {HeaderCase::header, 9.0, 20000, "header 9 dB"},   {HeaderCase::header, 12.0, 20000, "header 12 dB"},
-        {HeaderCase::carrier_leak, 30.0, 20000, "carrier +40 dB between tones 3 and 4, leaking into side 0"},
-        {HeaderCase::header_carrier_leak, 29.0, 20000, "header 29 dB under a carrier 10 dB over it"},
-    };
-    for (std::size_t c = 0; c < test::count_of(cases); ++c) {
-        double wrong = 0.0;
-        double right = 0.0;
-        header_monte_carlo(cases[c].kind, cases[c].level_db, cases[c].trials, 2200 + c, wrong, right);
-        NOTE("%s: accepted wrong %.2e, right %.4f (%d trials)", cases[c].name, wrong, right, cases[c].trials);
-        switch (cases[c].kind) {
-        case HeaderCase::noise:
-        case HeaderCase::chirp:
-        case HeaderCase::misaligned:
-            CHECK(wrong <= 1e-4);
-            break;
-        case HeaderCase::carrier:
-        case HeaderCase::carrier_leak:
-            CHECK(wrong <= 1e-3);
-            break;
-        case HeaderCase::header_carrier_leak:
-            CHECK(wrong <= 1e-3);
-            CHECK(right >= k_carrier_leak_detection);
-            break;
-        case HeaderCase::header:
-            CHECK(wrong <= 1e-4);
-            CHECK(right >= (cases[c].level_db < 10.0 ? 0.97 : 0.999));
-            break;
-        }
-    }
-}
-
-TEST(dsp_log2_q8) {
-    CHECK_EQ(log2_q8(1.0f), 0);
-    CHECK_EQ(log2_q8(2.0f), 256);
-    CHECK_EQ(log2_q8(0.5f), -256);
-    CHECK_EQ(log2_q8(0.0f), -32768);
-    CHECK_NEAR(log2_q8(1e30f), 256.0 * std::log2(1e30), 1.0);
-    const float values[] = {1e-6f, 0.3f, 7.0f, 12345.6f, 3e12f};
-    for (std::size_t i = 0; i < test::count_of(values); ++i) {
-        CHECK_NEAR(exp2_q8(log2_q8(values[i])) / values[i], 1.0, 0.003);
+        CHECK_EQ(locked, inside[t]);
+        if (locked) CHECK_NEAR(estimate, tones[t], 5.0);
+        if (locked) CHECK(estimate >= 335.0f && estimate <= 2665.0f);
     }
 }

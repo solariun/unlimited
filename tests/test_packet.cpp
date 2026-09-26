@@ -92,13 +92,21 @@ Bytes concat(const Bytes& a, const Bytes& b) {
     return out;
 }
 
-Event event_of(EventType type, uint8_t value = 0, uint8_t flags = 0) {
+Event event_of(EventType type, uint8_t value = 0, uint8_t flags = 0, uint32_t byte_index = 0) {
     Event event;
     std::memset(&event, 0, sizeof(event));
     event.type = type;
     event.value = value;
     event.flags = flags;
+    event.byte_index = byte_index;
     return event;
+}
+
+// Byte events for `bytes`, byte_index counting from `first`.
+void send(PacketReader& reader, const Bytes& bytes, uint32_t first, uint8_t flags = 0) {
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        reader.on_event(event_of(EventType::byte, bytes[i], flags, first + static_cast<uint32_t>(i)));
+    }
 }
 
 uint16_t stored_crc(const Bytes& packet) {
@@ -329,37 +337,98 @@ TEST(packet_events_forward_flags_and_reset) {
     Collector collector;
     PacketReader reader(&Collector::on_packet, &collector);
     const Bytes packet = build(payload_of(6, 12));
-    const uint8_t erasure = unlimited::event_flag_erasure;
-    const uint8_t memory = unlimited::event_flag_mode_memory;
+    const uint8_t weak = unlimited::event_flag_weak;
+    const uint8_t late = unlimited::event_flag_late_join;
     const uint8_t flywheel = unlimited::event_flag_flywheel_stop;
 
     // Half a packet, then the transmission ends: nothing is delivered and the parser starts clean.
-    for (size_t i = 0; i < packet.size() / 2; ++i) reader.on_event(event_of(EventType::byte, packet[i], erasure));
+    uint32_t index = 0;
+    for (size_t i = 0; i < packet.size() / 2; ++i) reader.on_event(event_of(EventType::byte, packet[i], weak, index++));
     reader.on_event(event_of(EventType::end));
-    for (size_t i = packet.size() / 2; i < packet.size(); ++i) reader.on_event(event_of(EventType::byte, packet[i]));
+    for (size_t i = packet.size() / 2; i < packet.size(); ++i) reader.on_event(event_of(EventType::byte, packet[i], 0, index++));
     CHECK(collector.packets.empty());
 
-    for (size_t i = 0; i < packet.size() / 2; ++i) reader.on_event(event_of(EventType::byte, packet[i]));
+    index = 0;
+    for (size_t i = 0; i < packet.size() / 2; ++i) reader.on_event(event_of(EventType::byte, packet[i], 0, index++));
     reader.on_event(event_of(EventType::lost));
     CHECK(collector.packets.empty());
 
-    // Slot events (telemetry) carry symbols, not bytes: interleaved with the bytes, they change nothing.
-    reader.on_event(event_of(EventType::locked, 0, memory));
+    // slot and package events (telemetry) interleaved with the bytes change nothing.
+    reader.on_event(event_of(EventType::locked, 0, late));
     reader.on_event(event_of(EventType::state));
+    index = 40;
     for (size_t i = 0; i < packet.size(); ++i) {
-        reader.on_event(event_of(EventType::slot, sync_0, erasure));
-        reader.on_event(event_of(EventType::byte, packet[i], i == 4 ? erasure : (i == 7 ? flywheel | memory : 0)));
+        reader.on_event(event_of(EventType::slot, sync_0, weak));
+        reader.on_event(event_of(EventType::byte, packet[i], i == 4 ? weak : (i == 7 ? flywheel | late : 0), index++));
+        reader.on_event(event_of(EventType::package, 8));
         reader.on_event(event_of(EventType::slot, sync_1));
     }
     REQUIRE(collector.packets.size() == 1u);
     CHECK(collector.packets[0].payload == payload_of(6, 12));
-    CHECK_EQ(collector.packets[0].flags, erasure | flywheel | memory);
+    CHECK_EQ(collector.packets[0].flags, weak | flywheel | late);
     CHECK_EQ(reader.crc_errors(), 0u);
 
     // Flags do not leak into the next packet.
     feed(reader, packet);
     REQUIRE(collector.packets.size() == 2u);
     CHECK_EQ(collector.packets[1].flags, 0);
+}
+
+// Spec 2.6: a byte_index gap (the bytes of a lost package are missing) ends the candidate as an end would: the packet
+// that lost bytes is not delivered, the one behind it is, and nothing is mixed across the gap.
+TEST(packet_byte_index_gap_rescans_like_end) {
+    const Bytes a = build(payload_of(10, 30));
+    const Bytes b = build(payload_of(12, 31));
+    const Bytes c = build(payload_of(9, 32));
+    {
+        // a whole, b with 3 bytes missing in its middle, c whole: a and c come out.
+        Collector collector;
+        PacketReader reader(&Collector::on_packet, &collector);
+        uint32_t index = 0;
+        send(reader, a, index);
+        index += static_cast<uint32_t>(a.size());
+        const Bytes b_head(b.begin(), b.begin() + 6);
+        const Bytes b_tail(b.begin() + 9, b.end());
+        send(reader, b_head, index);
+        send(reader, b_tail, index + 9);  // bytes 6..8 of b missing
+        index += static_cast<uint32_t>(b.size());
+        send(reader, c, index);
+        REQUIRE(collector.packets.size() == 2u);
+        CHECK(collector.packets[0].payload == payload_of(10, 30));
+        CHECK(collector.packets[1].payload == payload_of(9, 32));
+    }
+    {
+        // A corrupted LEN waits for bytes; a gap behind it rescans what was buffered: the intact packet behind the
+        // corrupted one comes out, then the packet after the gap.
+        Bytes corrupted(a);
+        corrupted[length_at] = static_cast<uint8_t>(corrupted[length_at] ^ 0x02);
+        Collector collector;
+        PacketReader reader(&Collector::on_packet, &collector);
+        send(reader, concat(corrupted, b), 0);
+        CHECK(collector.packets.empty());
+        send(reader, c, static_cast<uint32_t>(corrupted.size() + b.size() + 5));
+        REQUIRE(collector.packets.size() == 2u);
+        CHECK(collector.packets[0].payload == payload_of(12, 31));
+        CHECK(collector.packets[1].payload == payload_of(9, 32));
+    }
+    {
+        // After a reset (end, lost) the next byte_index is free: a new transmission starts at 0 again.
+        Collector collector;
+        PacketReader reader(&Collector::on_packet, &collector);
+        send(reader, a, 100);
+        reader.on_event(event_of(EventType::end));
+        send(reader, b, 0);
+        CHECK_EQ(collector.packets.size(), 2u);
+    }
+}
+
+// U3: "Hi" -> 2D D4 00 02 48 69 93 4A.
+TEST(packet_hi_example) {
+    const Bytes hi = {0x48, 0x69};
+    const Bytes packet = build(hi);
+    const Bytes expected = {0x2D, 0xD4, 0x00, 0x02, 0x48, 0x69, 0x93, 0x4A};
+    CHECK(packet == expected);
+    CHECK_EQ(crc16_ccitt(packet.data() + length_at, 4), 0x934Au);
 }
 
 TEST(packet_reader_without_handler) {

@@ -5,8 +5,11 @@
 #include "unlimited/packet.hpp"
 
 #include <cmath>
+#include <complex>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <random>
 #include <set>
 
@@ -15,6 +18,7 @@ namespace regression {
 
 using loopback::Capture;
 using loopback::Recording;
+using loopback::Score;
 using loopback::Transmission;
 
 namespace {
@@ -25,36 +29,46 @@ const double k_int16_max = 32767.0;
 const double k_ms_per_s = 1000.0;
 const double k_us_per_ms = 1000.0;
 const double k_ppm = 1e-6;
-const double k_pi = 3.141592653589793;
-const double k_two_pi = 2.0 * k_pi;
+const double k_two_pi = 6.283185307179586;
 const double k_reference_bandwidth_hz = 2500.0;
 const double k_receiver_bandwidth_hz = 2400.0;
 const double k_noise_peak_sigmas = 5.0;
 const double k_headroom = 0.9;
+const double k_db_per_decade = 20.0;
+const double k_infinite_ratio = 1e9;
 const int k_byte_bits = 8;
-const std::size_t k_min_tune_slots = 6;
-const std::uint32_t k_band_centre = k_band_centre_hz;
-const std::uint32_t k_sevenths = k_standard_spacing_den;
-const std::uint32_t k_header_top_sevenths = (k_header_slots - 1) * k_standard_spacing_num;
-const std::size_t k_header_frame_slots = k_header_slots + 1;  // 8 header peaks and the STOP
+const unsigned k_byte_values = 256;
+const unsigned k_msb = 7;
 
-// Scoring: a frame is released at least 2 T after its STOP centre (the late step runs at STOP + 2.35 T).
-const double k_release_margin_slots = 2.0;
-const double k_lock_slot_tolerance_ms = 0.25;  // a `locked` counts when its T is the sent whole-ms T
+// Spec 4.1 release gates and the receiver windows.
+const double k_gate_4_ms = 8.0;
+const double k_gate_128_ms = -6.5;
+const double k_gate_16_ms = 1.5;
+const double k_gate_reference_ms = 16.0;
+const double k_db_per_decade_power = 10.0;
+const double k_fast_slot_ms = 8.0;        // below it only the fm profile hears T
+const double k_ssb_max_slot_ms = 64.0;    // ssb window 8..64 ms
+const std::uint8_t k_slow_min_slot_ms = 16;  // window 16..128 ms
+
+// Scoring.
+const double k_lock_slot_tolerance = 0.03;  // a `locked` counts when its T is within 3 % and its N is the sent N
 const double k_lock_window_slots = 4.0;     // ... and it arrives before the end of the transmission + 4 T
 const double k_open_interval_end = 1e18;    // a lock still open at the end of the recording
-const long k_offset_search = 4;             // frames around the release-time estimate of a segment's offset
 
 // Jobs.
 const double k_job_audio_s = 360.0;
 const std::size_t k_min_jobs = 8;
 const std::uint32_t k_data_seed_stride = 31;
+const std::uint32_t k_test_stride = 1000003u;
+const std::uint32_t k_point_stride = 10007u;
 
 // Scheduling cost per second of audio, relative to the usb channel.
 const double k_cost_clean = 0.05;
 const double k_cost_usb = 1.0;
 const double k_cost_am = 4.0;
 const double k_cost_fm = 5.5;
+const double k_cost_resample = 1.0;
+const double k_cost_decoder = 0.05;
 const double k_cost_genie = 0.3;
 
 // Packets of the F5 checks.
@@ -62,16 +76,35 @@ const std::size_t k_packet_min_payload = 16;
 const std::size_t k_packet_max_test_payload = 64;
 const std::size_t k_packet_slack = 16;
 
-// Genie receiver: Tukey alpha 0.25 window (spec 1.1).
-const double k_peak_ramp = 0.125;
-const double k_ramp_turns = 4.0;  // sin^2(4 pi u) over the ramp
-const std::size_t k_envelope_samples = 8;  // 1 ms energy average for the delay search
-const std::size_t k_delay_search = 400;
+// Genie receiver (spec 3.10 formulas with known timing and tone).
+const double k_marker_half = 0.35;
+const double k_slot_window = 0.75;
+const double k_gap_window = 0.15;
+const double k_slot_centre = 0.5;
+const double k_g_slot = 0.9394;
+const double k_g_marker = 0.8355;
+const double k_rho_min = 0.50;
+const double k_rho_max = 0.75;
+const double k_rho_seed = 0.6;
+const int k_rho_iterations = 3;
+const double k_floor_sigma = 2.6;
+const double k_data_noise_scale = 4.0;    // N_a = 4 sigma^2 / (n_d g_s^2)
+const double k_marker_noise_scale = 2.0;  // N_m = 2 sigma^2 / (n_W g_m^2)
 
 // Confidence bound helpers.
 const double k_zero_error_bound = 3.0;  // 95 % upper bound of a Poisson mean after 0 events
 const double k_z95 = 1.96;
 const double k_percent = 100.0;
+const std::size_t k_max_wrong_run = 8;  // F6
+// A lock segment is misplaced when at least half of its bytes (and twice as many as at its own numbering) match
+// the sent data at another byte offset; segments shorter than this are not judged.
+const std::size_t k_misplaced_min_bytes = 4;
+const std::size_t k_misplaced_ratio = 2;
+
+std::mutex& lines_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
 
 std::vector<std::string>& lines() {
     static std::vector<std::string> all;
@@ -89,6 +122,8 @@ struct RunEntry {
     std::string where;
     std::size_t max_run;
     bool qualifies;
+    std::size_t misplaced_segments;
+    std::size_t misplaced_bytes;
 };
 
 std::vector<PacketEntry>& packet_ledger() {
@@ -107,104 +142,63 @@ int popcount(unsigned value) {
     return count;
 }
 
-std::uint32_t slot_ms_of(const EncoderConfig& config) {
-    return config.slot_us / static_cast<std::uint32_t>(k_us_per_ms);
-}
-
-// Distance from f_ref to the farthest data or header tone, in sevenths of 1/T.
-std::uint32_t span_sevenths(const EncoderConfig& config) {
-    const std::uint32_t spacing = config.spacing == Spacing::standard ? k_standard_spacing_num : k_sevenths;
-    const std::uint32_t data = ((1u << config.bits_per_peak) - 1u) * spacing;
-    return k_grid_guard * k_sevenths + std::max(data, k_header_top_sevenths);
-}
-
-double spacing_of(const EncoderConfig& config) {
-    return config.spacing == Spacing::standard
-               ? static_cast<double>(k_standard_spacing_num) / k_standard_spacing_den
-               : 1.0;
-}
-
-double side_of(const EncoderConfig& config) {
-    return config.side == GridSide::above ? 1.0 : -1.0;
-}
-
-std::size_t tune_slots(const EncoderConfig& config) {
-    const std::size_t tune_us = static_cast<std::size_t>(config.tune_ms) * static_cast<std::size_t>(k_us_per_ms);
-    return std::max<std::size_t>((tune_us + config.slot_us - 1) / config.slot_us, k_min_tune_slots);
-}
-
-std::size_t peak_slots(std::size_t bytes, std::size_t bits_per_peak) {
-    return (bytes * k_byte_bits + bits_per_peak - 1) / bits_per_peak;
-}
-
-// Slot layout of one transmission as the decoder receives it (spec 2.1), stretched by the clock errors.
+// Where one transmission lies in the received audio: the recording's layout stretched by the clock errors and
+// delayed by the channel.
 class Layout {
 public:
-    Layout(const Transmission& tx, double stretch) : config_(tx.config), data_(&tx.data) {
-        begin_ = static_cast<double>(tx.start_sample) * stretch;
-        length_ = static_cast<double>(tx.length) * stretch;
-        slot_ = static_cast<double>(config_.slot_us) * config_.sample_rate_hz / (k_us_per_ms * k_ms_per_s) * stretch;
-        first_slot_ = begin_ + static_cast<double>(config_.lead_in_ms) * config_.sample_rate_hz / k_ms_per_s * stretch;
-        header_start_ = tune_slots(config_) + config_.sync_markers - 1;
-        frame_bytes_ = config_.frame_bytes();
-        frames_ = (data_->size() + frame_bytes_ - 1) / frame_bytes_;
-    }
+    Layout(const Transmission& tx, double stretch, double delay)
+        : tx_(&tx),
+          stretch_(stretch),
+          delay_(delay),
+          slot_(loopback::slot_samples(tx.config) * stretch),
+          packages_(loopback::package_count(tx)) {}
 
     const EncoderConfig& config() const {
-        return config_;
+        return tx_->config;
+    }
+    const Transmission& tx() const {
+        return *tx_;
     }
     const std::vector<std::uint8_t>& data() const {
-        return *data_;
+        return tx_->data;
     }
     double begin() const {
-        return begin_;
+        return stretch_ * static_cast<double>(tx_->start_sample) + delay_;
     }
     double end() const {
-        return begin_ + length_;
+        return stretch_ * static_cast<double>(tx_->start_sample + tx_->length) + delay_;
     }
-    double slot_samples() const {
+    double slot() const {
         return slot_;
     }
-    std::size_t frames() const {
-        return frames_;
+    double slot_ms() const {
+        return slot_ms_of(tx_->config) * stretch_;
     }
-    std::size_t frame_bytes() const {
-        return frame_bytes_;
-    }
-    std::size_t bytes_in_frame(std::size_t frame) const {
-        return std::min(frame_bytes_, data_->size() - frame * frame_bytes_);
-    }
-    std::size_t frame_peaks(std::size_t frame) const {
-        return peak_slots(bytes_in_frame(frame), config_.bits_per_peak);
+    std::size_t packages() const {
+        return packages_;
     }
     double slot_start(std::size_t slot) const {
-        return first_slot_ + static_cast<double>(slot) * slot_;
+        return stretch_ * loopback::slot_start_sample(*tx_, slot) + delay_;
     }
-    std::size_t frame_start_slot(std::size_t frame) const {  // START marker of data frame `frame`
-        return header_start_ + k_header_frame_slots + frame * (config_.data_slots + 1u);
+    // End of the STOP slot of the package that holds the byte's last bit: no receiver can release it earlier.
+    double byte_ready(std::size_t byte) const {
+        const std::size_t last_bit = byte * k_byte_bits + k_msb;
+        const std::size_t package = last_bit / tx_->config.bits_per_package;
+        return slot_start(loopback::stop_slot(*tx_, package) + 1);
     }
-    double stop_centre(std::size_t frame) const {
-        return slot_start(frame_start_slot(frame) + frame_peaks(frame) + 1) + 0.5 * slot_;
+    double airtime_begin() const {
+        return slot_start(loopback::first_start_slot(tx_->config));
     }
-    long latest_frame(double sample) const {  // last frame released by `sample`, or -1
-        long latest = -1;
-        for (std::size_t f = 0; f < frames_; ++f) {
-            if (stop_centre(f) + k_release_margin_slots * slot_ > sample) break;
-            latest = static_cast<long>(f);
-        }
-        return latest;
+    double airtime_end() const {
+        return packages_ == 0 ? airtime_begin() : slot_start(loopback::stop_slot(*tx_, packages_ - 1) + 1);
     }
 
 private:
-    EncoderConfig config_;
-    const std::vector<std::uint8_t>* data_;
-    double begin_ = 0.0;
-    double length_ = 0.0;
-    double slot_ = 0.0;
-    double first_slot_ = 0.0;
-    std::size_t header_start_ = 0;
-    std::size_t frame_bytes_ = 1;
-    std::size_t frames_ = 0;
+    const Transmission* tx_;
+    double stretch_;
+    double delay_;
+    double slot_;
+    std::size_t packages_;
 };
 
 long transmission_at(const std::vector<Layout>& sent, double sample) {
@@ -215,115 +209,154 @@ long transmission_at(const std::vector<Layout>& sent, double sample) {
     return found;
 }
 
+// A cold join counts byte_index from the join (spec 3.12 rule 5): the offset where most of its bytes match, the
+// smallest one on a tie. Votes per offset from the positions of each received value in the sent data.
+long best_offset(const std::vector<std::uint8_t>& data, const Capture& capture,
+                 const std::vector<std::size_t>& segment) {
+    const long size = static_cast<long>(data.size());
+    std::vector<std::vector<long> > where(k_byte_values);
+    for (long k = 0; k < size; ++k) where[data[static_cast<std::size_t>(k)]].push_back(k);
+    std::vector<std::size_t> votes(static_cast<std::size_t>(size + 1 + size), 0);  // offsets -size..size
+    for (std::size_t i = 0; i < segment.size(); ++i) {
+        const Event& e = capture.events[segment[i]];
+        const std::vector<long>& positions = where[e.value];
+        for (std::size_t p = 0; p < positions.size(); ++p) {
+            const long offset = positions[p] - static_cast<long>(e.byte_index);
+            if (offset < -size || offset > size) continue;
+            ++votes[static_cast<std::size_t>(offset + size)];
+        }
+    }
+    long best = 0;
+    std::size_t best_votes = votes[static_cast<std::size_t>(size)];
+    for (long offset = -size; offset <= size; ++offset) {
+        const std::size_t v = votes[static_cast<std::size_t>(offset + size)];
+        if (v > best_votes || (v == best_votes && std::labs(offset) < std::labs(best))) {
+            best = offset;
+            best_votes = v;
+        }
+    }
+    return best;
+}
+
 struct Scored {
     Score score;
-    std::vector<bool> correct;       // per event: a byte event that maps to a sent byte of the same value
-    std::vector<long> transmission;  // per event: the transmission and frame it maps to, -1 when unmapped
-    std::vector<long> frame;
-    std::vector<std::vector<bool> > taken;  // per transmission and byte
+    std::size_t cold_joins = 0;
+    std::size_t acausal = 0;
+    std::size_t misplaced_segments = 0;  // bytes at a wrong byte_index: they match far better at another offset
+    std::size_t misplaced_bytes = 0;
+    std::vector<char> correct;       // per event: a byte event mapped to a sent byte of the same value
+    std::vector<long> transmission;  // per event: the transmission and byte it maps to, -1 when unmapped
+    std::vector<long> byte;
 };
 
-// Maps every byte event to a sent byte, byte = (frame_index + shift) * B + index, one shift per lock segment.
-// The release times give a first estimate: a frame is released after its STOP, so `latest_frame - frame_index`
-// is the shift plus the release latency in frames; the most frequent value is taken. The shift within
-// +-k_offset_search frames of it that matches the most bytes is then used (late joins number frames from the
-// lock, not from the header), so the scoring does not depend on the decoder's latency.
+// How a lock numbers its packages and bytes (spec 3.12, 3.13).
+enum class Numbering {
+    absolute,  // a lock from the preamble: byte_index 0 is the transmission's first byte
+    joined,    // a cold join (late_join, package_index 0): counted from the join
+    inherited  // a relock from the station memory: continues the numbering of the lock it remembers
+};
+
+// Maps every byte event to a sent byte. The bytes between a `locked` and its `end`/`lost` belong to the
+// transmission on air when the first of them came, at their byte_index plus the offset of their numbering: 0 for a
+// lock from the preamble; for a cold join the offset where most of its bytes match; a relock keeps the offset of the
+// previous lock in the same transmission (it continues that numbering), or is matched like a cold join when there is
+// none. A byte is acausal when it was released before the STOP of its package was received (a misplaced offset).
 Scored score_capture(const std::vector<Layout>& sent, const Capture& capture) {
     Scored scored;
     Score& s = scored.score;
-    scored.correct.assign(capture.events.size(), false);
-    scored.transmission.assign(capture.events.size(), -1);
-    scored.frame.assign(capture.events.size(), -1);
-    scored.taken.resize(sent.size());
+    const std::size_t events = capture.events.size();
+    scored.correct.assign(events, 0);
+    scored.transmission.assign(events, -1);
+    scored.byte.assign(events, -1);
+    std::vector<std::vector<char> > taken(sent.size());
     for (std::size_t t = 0; t < sent.size(); ++t) {
-        scored.taken[t].assign(sent[t].data().size(), false);
+        taken[t].assign(sent[t].data().size(), 0);
         s.bytes_sent += sent[t].data().size();
     }
     std::vector<std::size_t> segment;
+    Numbering numbering = Numbering::absolute;
+    long numbered_transmission = -1;  // the transmission and offset of the newest numbering with bytes
+    long numbered_offset = 0;
     const auto close_segment = [&]() {
         if (segment.empty()) return;
         const long t = transmission_at(sent, static_cast<double>(capture.event_sample[segment.front()]));
-        long shift = 0;
-        const auto position = [&](const Event& e, long frame_shift) {
-            const long frame = static_cast<long>(e.frame_index) + frame_shift;
-            if (t < 0 || frame < 0 || frame >= static_cast<long>(sent[t].frames())) return -1L;
-            if (e.index >= sent[t].bytes_in_frame(static_cast<std::size_t>(frame))) return -1L;
-            return frame * static_cast<long>(sent[t].frame_bytes()) + e.index;
-        };
-        if (t >= 0) {
-            std::vector<long> candidates;
+        long offset = 0;
+        if (t >= 0 && numbering != Numbering::absolute) {
+            if (numbering == Numbering::inherited && numbered_transmission == t) {
+                offset = numbered_offset;
+            } else {
+                offset = best_offset(sent[static_cast<std::size_t>(t)].data(), capture, segment);
+            }
+            if (offset != 0) ++s.shifted_segments;
+        }
+        numbered_transmission = t;
+        numbered_offset = offset;
+        if (t >= 0 && segment.size() >= k_misplaced_min_bytes) {
+            // Where the numbering puts the bytes against where they really are (spec 3.13: never a shift).
+            const std::vector<std::uint8_t>& data = sent[static_cast<std::size_t>(t)].data();
+            const long best = best_offset(data, capture, segment);
+            std::size_t at_offset = 0;
+            std::size_t at_best = 0;
             for (std::size_t i = 0; i < segment.size(); ++i) {
-                const long f = sent[t].latest_frame(static_cast<double>(capture.event_sample[segment[i]]));
-                candidates.push_back(f - static_cast<long>(capture.events[segment[i]].frame_index));
+                const Event& e = capture.events[segment[i]];
+                const long k = static_cast<long>(e.byte_index) + offset;
+                const long b = static_cast<long>(e.byte_index) + best;
+                if (k >= 0 && k < static_cast<long>(data.size()) && data[static_cast<std::size_t>(k)] == e.value) {
+                    ++at_offset;
+                }
+                if (b >= 0 && b < static_cast<long>(data.size()) && data[static_cast<std::size_t>(b)] == e.value) ++at_best;
             }
-            std::sort(candidates.begin(), candidates.end());
-            std::size_t best_count = 0;
-            for (std::size_t i = 0; i < candidates.size();) {
-                std::size_t j = i;
-                while (j < candidates.size() && candidates[j] == candidates[i]) ++j;
-                if (j - i > best_count) {
-                    best_count = j - i;
-                    shift = candidates[i];
-                }
-                i = j;
-            }
-            const std::vector<std::uint8_t>& data = sent[t].data();
-            const auto matches = [&](long frame_shift) {
-                std::size_t count = 0;
-                for (std::size_t i = 0; i < segment.size(); ++i) {
-                    const Event& e = capture.events[segment[i]];
-                    const long k = position(e, frame_shift);
-                    if (k >= 0 && data[static_cast<std::size_t>(k)] == e.value) ++count;
-                }
-                return count;
-            };
-            const long estimate = shift;
-            std::size_t best_matches = matches(estimate);
-            for (long candidate = estimate - k_offset_search; candidate <= estimate + k_offset_search; ++candidate) {
-                const std::size_t count = matches(candidate);
-                if (count > best_matches) {
-                    best_matches = count;
-                    shift = candidate;
-                }
+            if (best != offset && at_best * k_misplaced_ratio >= segment.size() &&
+                at_best >= k_misplaced_ratio * at_offset) {
+                ++scored.misplaced_segments;
+                scored.misplaced_bytes += segment.size();
             }
         }
         for (std::size_t i = 0; i < segment.size(); ++i) {
             const Event& e = capture.events[segment[i]];
-            const long k = position(e, shift);
-            if (k < 0 || scored.taken[t][static_cast<std::size_t>(k)]) {
+            const long k = static_cast<long>(e.byte_index) + offset;
+            if (t < 0 || k < 0 || k >= static_cast<long>(sent[static_cast<std::size_t>(t)].data().size()) ||
+                taken[static_cast<std::size_t>(t)][static_cast<std::size_t>(k)] != 0) {
                 ++s.extra_bytes;
                 continue;
             }
-            scored.taken[t][static_cast<std::size_t>(k)] = true;
+            const Layout& layout = sent[static_cast<std::size_t>(t)];
+            taken[static_cast<std::size_t>(t)][static_cast<std::size_t>(k)] = 1;
             ++s.matched;
-            const std::uint8_t value = sent[t].data()[static_cast<std::size_t>(k)];
-            const int errors = popcount(static_cast<unsigned>(e.value ^ value));
+            const int errors = popcount(static_cast<unsigned>(e.value ^ layout.data()[static_cast<std::size_t>(k)]));
             s.bit_errors += static_cast<std::size_t>(errors);
             if (errors != 0) ++s.wrong_bytes;
-            scored.correct[segment[i]] = errors == 0;
+            scored.correct[segment[i]] = errors == 0 ? 1 : 0;
             scored.transmission[segment[i]] = t;
-            scored.frame[segment[i]] = static_cast<long>(e.frame_index) + shift;
+            scored.byte[segment[i]] = k;
+            if (static_cast<double>(capture.event_sample[segment[i]]) < layout.byte_ready(static_cast<std::size_t>(k))) {
+                ++scored.acausal;
+            }
         }
         segment.clear();
     };
-    for (std::size_t i = 0; i < capture.events.size(); ++i) {
+    for (std::size_t i = 0; i < events; ++i) {
         const Event& e = capture.events[i];
         switch (e.type) {
         case EventType::byte:
             ++s.bytes_released;
             if ((e.flags & (event_flag_flywheel_start | event_flag_flywheel_stop)) != 0) ++s.flywheel_bytes;
-            if ((e.flags & event_flag_erasure) != 0) ++s.erasure_bytes;
-            if ((e.flags & event_flag_mode_memory) != 0) ++s.mode_memory_bytes;
             segment.push_back(i);
             break;
-        case EventType::locked:
+        case EventType::locked: {
             close_segment();
             ++s.locks;
-            if ((e.flags & event_flag_late_join) != 0) ++s.late_joins;
+            const bool late = (e.flags & event_flag_late_join) != 0;
+            if (late) ++s.late_joins;
+            numbering = !late ? Numbering::absolute
+                              : (e.package_index == 0 ? Numbering::joined : Numbering::inherited);
+            if (numbering == Numbering::joined) ++scored.cold_joins;
             break;
+        }
         case EventType::lost:
             close_segment();
             ++s.lost_events;
+            if (e.reason == LostReason::alias) ++s.alias_losts;
             break;
         case EventType::end:
             close_segment();
@@ -331,12 +364,13 @@ Scored score_capture(const std::vector<Layout>& sent, const Capture& capture) {
             break;
         case EventType::state:
         case EventType::slot:
+        case EventType::package:
             break;
         }
     }
     close_segment();
-    for (std::size_t t = 0; t < scored.taken.size(); ++t) {
-        for (std::size_t k = 0; k < scored.taken[t].size(); ++k) s.lost_bytes += scored.taken[t][k] ? 0 : 1;
+    for (std::size_t t = 0; t < taken.size(); ++t) {
+        for (std::size_t k = 0; k < taken[t].size(); ++k) s.lost_bytes += taken[t][k] != 0 ? 0 : 1;
     }
     return scored;
 }
@@ -347,9 +381,7 @@ struct PacketSink {
     std::size_t bad;
 };
 
-// Deduces the size type of PacketHandler, so this compiles for 8- and 16-bit LEN alike.
-template <typename Size>
-void on_packet(const std::uint8_t* payload, Size size, std::uint8_t flags, void* context) {
+void on_packet(const std::uint8_t* payload, std::uint16_t size, std::uint8_t flags, void* context) {
     (void)flags;
     PacketSink* sink = static_cast<PacketSink*>(context);
     const std::vector<std::uint8_t> packet(payload, payload + size);
@@ -360,88 +392,120 @@ void on_packet(const std::uint8_t* payload, Size size, std::uint8_t flags, void*
     }
 }
 
-bool inverted(const JobPlan& job) {
-    return job.use_channel && job.channel.mode == sim::Mode::lsb;
+double equal_likelihood_ratio(double a2) {
+    if (a2 <= 0.0 || k_two_pi * a2 * k_rho_max <= 1.0) return k_rho_max;
+    double rho = k_rho_seed;
+    for (int i = 0; i < k_rho_iterations; ++i) {
+        rho = 0.5 + std::log(k_two_pi * a2 * rho) / (2.0 * a2);
+        rho = std::max(k_rho_min, std::min(k_rho_max, rho));
+    }
+    return rho;
 }
 
-bool mode_matches(const Event& e, const EncoderConfig& config, bool lsb) {
-    const double true_ms = static_cast<double>(slot_ms_of(config));
-    const int side = static_cast<int>(side_of(config)) * (lsb ? -1 : 1);
-    return e.bits_per_peak == config.bits_per_peak && e.data_slots == config.data_slots &&
-           e.spacing == config.spacing && e.side == side &&
-           std::fabs(e.slot_ms - true_ms) <= k_lock_slot_tolerance_ms;
+bool stream_bit(const std::vector<std::uint8_t>& data, std::size_t bit) {
+    return ((data[bit / k_byte_bits] >> (k_msb - bit % k_byte_bits)) & 1u) != 0;
 }
 
-double peak_window(double u) {
-    if (u < k_peak_ramp) return std::pow(std::sin(k_ramp_turns * k_pi * u), 2);
-    if (u > 1.0 - k_peak_ramp) return std::pow(std::sin(k_ramp_turns * k_pi * (1.0 - u)), 2);
-    return 1.0;
-}
-
-// Genie receiver (A5, spec 4.1 bench): known slot timing and channel delay, received f_ref and orientation;
-// matched Tukey alpha 0.25 window, argmax over the M grid tones, spec 1.5 mapping, every data byte counted.
-void genie_count(const std::vector<Layout>& sent, const std::vector<std::int16_t>& samples, const JobPlan& job,
+// Known timing and tone (spec 4.2 ablation): slot levels over the central 0.75 T, START/STOP crests by the
+// flip-compensated matched filter, the noise from the slot edges between two data zeros, then the smart line of
+// spec 3.10 against three references: the START-STOP line, the START crest alone and one fixed level (the RMS
+// crest of the transmission).
+void genie_count(const std::vector<Layout>& sent, const std::vector<std::int16_t>& samples, double tone_hz,
                  Outcome& outcome) {
-    const bool lsb = inverted(job);
-    const double delay = static_cast<double>(ssb_delay_samples(job.channel.mode));
+    typedef std::complex<double> Complex;
     for (std::size_t t = 0; t < sent.size(); ++t) {
         const Layout& layout = sent[t];
-        const EncoderConfig& config = layout.config();
-        const std::size_t k = config.bits_per_peak;
-        const std::size_t tones = std::size_t(1) << k;
-        const double ref = lsb ? job.channel.lsb_pivot_hz - config.tone_hz + job.channel.freq_offset_hz
-                               : config.tone_hz + job.channel.freq_offset_hz;
-        const double side = side_of(config) * (lsb ? -1.0 : 1.0);
-        const double unit_hz = k_ms_per_s / static_cast<double>(slot_ms_of(config));
-        std::vector<double> coefficient(tones);
-        for (std::size_t n = 0; n < tones; ++n) {
-            const double hz = ref + side * (k_grid_guard + static_cast<double>(n) * spacing_of(config)) * unit_hz;
-            coefficient[n] = 2.0 * std::cos(k_two_pi * hz / k_decoder_rate_hz);
+        const Transmission& tx = layout.tx();
+        const std::size_t n = tx.config.bits_per_package;
+        const std::size_t packages = layout.packages();
+        if (packages == 0) continue;
+        const double slot = layout.slot();
+        const std::size_t first = loopback::first_start_slot(tx.config);
+        const std::size_t last = loopback::stop_slot(tx, packages - 1);
+        const long begin = std::max(0L, static_cast<long>(std::floor(layout.slot_start(first))));
+        const long end = std::min(static_cast<long>(samples.size()),
+                                  static_cast<long>(std::ceil(layout.slot_start(last + 1))) + 1);
+        if (end <= begin) continue;
+        std::vector<Complex> prefix(static_cast<std::size_t>(end - begin + 1), Complex(0.0, 0.0));
+        const double step = k_two_pi * tone_hz / k_decoder_rate_hz;
+        for (long i = begin; i < end; ++i) {
+            const double phase = step * static_cast<double>(i);
+            prefix[static_cast<std::size_t>(i - begin + 1)] =
+                prefix[static_cast<std::size_t>(i - begin)] +
+                static_cast<double>(samples[static_cast<std::size_t>(i)]) * Complex(std::cos(phase), -std::sin(phase));
         }
-        const std::size_t length = static_cast<std::size_t>(std::lround(layout.slot_samples()));
-        std::vector<double> weight(length);
-        for (std::size_t m = 0; m < length; ++m) weight[m] = peak_window(static_cast<double>(m) / length);
-        std::vector<double> windowed(length);
-        for (std::size_t f = 0; f < layout.frames(); ++f) {
-            std::vector<std::uint8_t> bytes;
-            std::uint32_t accumulator = 0;
-            std::size_t pending = 0;
-            for (std::size_t i = 1; i <= layout.frame_peaks(f); ++i) {
-                const long start = std::lround(layout.slot_start(layout.frame_start_slot(f) + i) + delay);
-                for (std::size_t m = 0; m < length; ++m) {
-                    const long n = start + static_cast<long>(m);
-                    const bool inside = n >= 0 && n < static_cast<long>(samples.size());
-                    windowed[m] = inside ? weight[m] * samples[static_cast<std::size_t>(n)] : 0.0;
-                }
-                std::size_t best = 0;
-                double best_energy = -1.0;
-                for (std::size_t n = 0; n < tones; ++n) {
-                    double s1 = 0.0;
-                    double s2 = 0.0;
-                    for (std::size_t m = 0; m < length; ++m) {
-                        const double s0 = windowed[m] + coefficient[n] * s1 - s2;
-                        s2 = s1;
-                        s1 = s0;
-                    }
-                    const double energy = s1 * s1 + s2 * s2 - coefficient[n] * s1 * s2;
-                    if (energy > best_energy) {
-                        best_energy = energy;
-                        best = n;
-                    }
-                }
-                accumulator = (accumulator << k) | peak_symbol(static_cast<std::uint8_t>(best),
-                                                               static_cast<std::uint8_t>(i - 1),
-                                                               static_cast<std::uint8_t>(k));
-                pending += k;
-                while (pending >= static_cast<std::size_t>(k_byte_bits)) {
-                    pending -= k_byte_bits;
-                    bytes.push_back(static_cast<std::uint8_t>(accumulator >> pending));
-                }
+        const double span = static_cast<double>(end - begin);
+        const auto index = [&](double position) {
+            const double local = position - static_cast<double>(begin);
+            return static_cast<std::size_t>(std::max(0.0, std::min(span, std::floor(local + 0.5))));
+        };
+        const auto window = [&](double from, double to, double& count) {
+            const std::size_t a = index(from);
+            const std::size_t b = index(to);
+            count = static_cast<double>(b - a);
+            return prefix[b] - prefix[a];
+        };
+        const auto crest_at = [&](std::size_t marker_slot) {
+            const double centre = layout.slot_start(marker_slot) + k_slot_centre * slot;
+            double n_before = 0.0;
+            double n_after = 0.0;
+            const Complex before = window(centre - k_marker_half * slot, centre, n_before);
+            const Complex after = window(centre, centre + k_marker_half * slot, n_after);
+            const double count = 0.5 * (n_before + n_after);
+            return count > 0.0 ? std::abs(before - after) / (count * k_g_marker) : 0.0;
+        };
+        const auto bit_of = [&](std::size_t package, std::size_t i) {  // i = 1..d
+            return stream_bit(tx.data, package * n + i - 1);
+        };
+
+        std::vector<double> crest(packages + 1);
+        for (std::size_t k = 0; k < packages; ++k) crest[k] = crest_at(loopback::package_start_slot(tx, k));
+        crest[packages] = crest_at(last);
+        double noise_sum = 0.0;
+        std::size_t noise_windows = 0;
+        for (std::size_t k = 0; k < packages; ++k) {
+            const std::size_t d = loopback::package_bits(tx, k);
+            for (std::size_t i = 1; i < d; ++i) {
+                if (bit_of(k, i) || bit_of(k, i + 1)) continue;
+                const double edge = layout.slot_start(loopback::package_start_slot(tx, k) + i + 1);
+                double count = 0.0;
+                const Complex s = window(edge - k_slot_centre * k_gap_window * slot,
+                                         edge + k_slot_centre * k_gap_window * slot, count);
+                if (count <= 0.0) continue;
+                noise_sum += std::norm(s) / count;
+                ++noise_windows;
             }
-            for (std::size_t b = 0; b < layout.bytes_in_frame(f); ++b) {
-                const std::uint8_t sent_byte = layout.data()[f * layout.frame_bytes() + b];
-                outcome.genie_errors += static_cast<std::size_t>(popcount(static_cast<unsigned>(bytes[b] ^ sent_byte)));
-                outcome.genie_bits += k_byte_bits;
+        }
+        if (noise_windows == 0) continue;
+        const double sigma2 = noise_sum / static_cast<double>(noise_windows);
+        const double data_samples = k_slot_window * slot;
+        const double marker_samples = k_marker_half * slot;
+        const double noise_data = k_data_noise_scale * sigma2 / (data_samples * k_g_slot * k_g_slot);
+        const double noise_marker = k_marker_noise_scale * sigma2 / (marker_samples * k_g_marker * k_g_marker);
+        double crest_power = 0.0;
+        for (std::size_t k = 0; k <= packages; ++k) crest_power += crest[k] * crest[k];
+        const double fixed_level = std::sqrt(crest_power / static_cast<double>(packages + 1));
+
+        for (std::size_t k = 0; k < packages; ++k) {
+            const std::size_t d = loopback::package_bits(tx, k);
+            for (std::size_t i = 1; i <= d; ++i) {
+                const double centre =
+                    layout.slot_start(loopback::package_start_slot(tx, k) + i) + k_slot_centre * slot;
+                double count = 0.0;
+                const Complex s =
+                    window(centre - k_slot_centre * data_samples, centre + k_slot_centre * data_samples, count);
+                const double level = count > 0.0 ? 2.0 * std::abs(s) / (count * k_g_slot) : 0.0;
+                const double position = static_cast<double>(i) / static_cast<double>(d + 1);
+                const double references[genie_rules] = {crest[k] + (crest[k + 1] - crest[k]) * position, crest[k],
+                                                        fixed_level};
+                for (int rule = 0; rule < genie_rules; ++rule) {
+                    const double reference = references[rule];
+                    const double a2 = 2.0 * std::max(reference * reference - noise_marker, 0.0) / noise_data;
+                    const double threshold =
+                        std::max(equal_likelihood_ratio(a2) * reference, k_floor_sigma * std::sqrt(noise_data));
+                    if ((level >= threshold) != bit_of(k, i)) ++outcome.genie_errors[rule];
+                }
+                ++outcome.genie_bits;
             }
         }
     }
@@ -451,17 +515,11 @@ Outcome evaluate(const std::vector<Layout>& sent, const Capture& capture, const 
     Outcome outcome;
     const Scored scored = score_capture(sent, capture);
     outcome.score = scored.score;
+    outcome.cold_joins = scored.cold_joins;
+    outcome.acausal_bytes = scored.acausal;
+    outcome.misplaced_segments = scored.misplaced_segments;
+    outcome.misplaced_bytes = scored.misplaced_bytes;
     outcome.transmissions = sent.size();
-    for (std::size_t t = 0; t < sent.size(); ++t) {
-        for (std::size_t f = 0; f < sent[t].frames(); ++f) {
-            bool all = true;
-            for (std::size_t b = 0; b < sent[t].bytes_in_frame(f); ++b) {
-                all = all && scored.taken[t][f * sent[t].frame_bytes() + b];
-            }
-            ++outcome.frames_sent;
-            outcome.frames_delivered += all ? 1 : 0;
-        }
-    }
 
     // F6: longest run of wrong or unmapped bytes in release order (a correct byte or `end` breaks it).
     std::size_t run = 0;
@@ -469,23 +527,13 @@ Outcome evaluate(const std::vector<Layout>& sent, const Capture& capture, const 
         const Event& e = capture.events[i];
         if (e.type == EventType::end) run = 0;
         if (e.type != EventType::byte) continue;
-        run = scored.correct[i] ? 0 : run + 1;
+        run = scored.correct[i] != 0 ? 0 : run + 1;
         outcome.max_wrong_run = std::max(outcome.max_wrong_run, run);
     }
 
-    // A3': a `locked` with the sent mode during each transmission; locked airtime; release latency; A4 SNR.
-    const bool lsb = inverted(job);
+    // A3: a `locked` with the sent T and N for each transmission (the one on air when it came; later than 4 T after
+    // its end it is also counted late); C3: locked airtime; L5: T accuracy; A4: SNR.
     std::vector<bool> locked(sent.size(), false);
-    std::vector<bool> header(sent.size(), false);
-    std::vector<bool> wrong_header(sent.size(), false);
-    const auto during = [&](double sample) {
-        long found = -1;
-        for (std::size_t t = 0; t < sent.size(); ++t) {
-            const double to = sent[t].end() + k_lock_window_slots * sent[t].slot_samples();
-            if (sample >= sent[t].begin() && sample <= to) found = static_cast<long>(t);
-        }
-        return found;
-    };
     long open_from = -1;
     std::vector<std::pair<double, double> > intervals;
     for (std::size_t i = 0; i < capture.events.size(); ++i) {
@@ -494,23 +542,18 @@ Outcome evaluate(const std::vector<Layout>& sent, const Capture& capture, const 
         switch (e.type) {
         case EventType::locked: {
             if (open_from < 0) open_from = static_cast<long>(capture.event_sample[i]);
-            const long t = during(sample);
+            const long t = transmission_at(sent, sample);
             if (t < 0) {
                 ++outcome.stray_locks;
-            } else if (mode_matches(e, job.transmissions[static_cast<std::size_t>(t)].config, lsb)) {
-                locked[static_cast<std::size_t>(t)] = true;
-            } else {
-                ++outcome.wrong_mode_locks;
+                break;
             }
-            break;
-        }
-        case EventType::slot: {
-            const long t = during(sample);
-            if (t < 0) break;
-            if (mode_matches(e, job.transmissions[static_cast<std::size_t>(t)].config, lsb)) {
-                header[static_cast<std::size_t>(t)] = true;
+            const Layout& layout = sent[static_cast<std::size_t>(t)];
+            const bool slot_ok = std::fabs(e.slot_ms / layout.slot_ms() - 1.0) <= k_lock_slot_tolerance;
+            if (slot_ok && e.bits_per_package == layout.config().bits_per_package) {
+                locked[static_cast<std::size_t>(t)] = true;
+                if (sample > layout.end() + k_lock_window_slots * layout.slot()) ++outcome.late_locks;
             } else {
-                wrong_header[static_cast<std::size_t>(t)] = true;
+                ++outcome.wrong_locks;
             }
             break;
         }
@@ -525,27 +568,30 @@ Outcome evaluate(const std::vector<Layout>& sent, const Capture& capture, const 
             break;
         case EventType::byte:
             outcome.snr_db.push_back(e.snr_db);
-            if (scored.correct[i]) {
+            if (scored.correct[i] != 0) {
                 const Layout& layout = sent[static_cast<std::size_t>(scored.transmission[i])];
-                const std::size_t frame = static_cast<std::size_t>(scored.frame[i]);
-                const double latency = (sample - layout.stop_centre(frame)) / layout.slot_samples();
+                const double error = std::fabs(e.slot_ms / layout.slot_ms() - 1.0);
+                outcome.slot_error_sum += error;
+                outcome.worst_slot_error = std::max(outcome.worst_slot_error, error);
+                ++outcome.slot_events;
+                const double latency =
+                    (sample - layout.byte_ready(static_cast<std::size_t>(scored.byte[i]))) / layout.slot();
                 outcome.latency_sum += latency;
                 outcome.latency_max = std::max(outcome.latency_max, latency);
-                ++outcome.latency_events;
             }
             break;
         case EventType::state:
+        case EventType::slot:
+        case EventType::package:
             break;
         }
     }
     if (open_from >= 0) intervals.push_back(std::make_pair(static_cast<double>(open_from), k_open_interval_end));
     for (std::size_t t = 0; t < sent.size(); ++t) {
         outcome.locked_transmissions += locked[t] ? 1 : 0;
-        outcome.header_transmissions += header[t] ? 1 : 0;
-        outcome.wrong_header_transmissions += wrong_header[t] ? 1 : 0;
-        if (sent[t].frames() == 0) continue;
-        const double from = sent[t].slot_start(sent[t].frame_start_slot(0));
-        const double to = sent[t].stop_centre(sent[t].frames() - 1);
+        if (sent[t].packages() == 0) continue;
+        const double from = sent[t].airtime_begin();
+        const double to = sent[t].airtime_end();
         outcome.airtime += to - from;
         for (std::size_t n = 0; n < intervals.size(); ++n) {
             const double overlap = std::min(to, intervals[n].second) - std::max(from, intervals[n].first);
@@ -574,42 +620,18 @@ std::string rule_line(const std::string& id, const std::string& condition, const
     return "RESULT | " + id + " | " + condition + " | " + measured + " | " + gate + " | " + verdict;
 }
 
-std::size_t measure_delay(sim::Mode mode) {
-    const EncoderConfig config = EncoderConfig::from_preset(Preset::hf, k_decoder_rate_hz);
-    Recording recording;
-    loopback::append_silence(recording, k_quiet_ms / 4.0);
-    loopback::append_transmission(recording, loopback::random_bytes(config.frame_bytes(), 1), config);
-    loopback::append_silence(recording, k_quiet_ms / 4.0);
-    sim::ChannelConfig channel;
-    channel.mode = mode;
-    channel.noise = false;
-    const std::vector<std::int16_t> out = apply_channel(recording.samples, channel, config.amplitude, 1.0);
-    const auto envelope = [](const std::vector<std::int16_t>& x) {
-        std::vector<double> e(x.size(), 0.0);
-        double sum = 0.0;
-        for (std::size_t n = 0; n < x.size(); ++n) {
-            sum += static_cast<double>(x[n]) * x[n];
-            if (n >= k_envelope_samples) {
-                const double old = x[n - k_envelope_samples];
-                sum -= old * old;
-            }
-            e[n] = sum;
-        }
-        return e;
-    };
-    const std::vector<double> ex = envelope(recording.samples);
-    const std::vector<double> ey = envelope(out);
-    std::size_t best = 0;
-    double best_value = -1.0;
-    for (std::size_t d = 0; d < k_delay_search; ++d) {
-        double value = 0.0;
-        for (std::size_t n = d; n < ey.size(); ++n) value += ey[n] * ex[n - d];
-        if (value > best_value) {
-            best_value = value;
-            best = d;
-        }
+// The columns are separated by '|': a text may never hold one.
+std::string column(std::string text) {
+    std::replace(text.begin(), text.end(), '|', '/');
+    return text;
+}
+
+double received_tone(const JobPlan& job, const EncoderConfig& config) {
+    if (!job.use_channel || job.channel.mode == sim::Mode::clean) return config.tone_hz;
+    if (job.channel.mode == sim::Mode::lsb) {
+        return job.channel.lsb_pivot_hz - config.tone_hz + job.channel.freq_offset_hz;
     }
-    return best;
+    return config.tone_hz + job.channel.freq_offset_hz;
 }
 
 }  // namespace
@@ -619,24 +641,68 @@ std::size_t worker_count() {
     return cores == 0 ? 1 : cores;
 }
 
-double Score::ber() const {
-    return matched == 0 ? 0.0 : static_cast<double>(bit_errors) / (k_byte_bits * static_cast<double>(matched));
+EncoderConfig preset(Preset p) {
+    return EncoderConfig::from_preset(p, k_decoder_rate_hz);
 }
 
-double Score::loss() const {
-    return bytes_sent == 0 ? 0.0 : static_cast<double>(lost_bytes) / static_cast<double>(bytes_sent);
+EncoderConfig slot_preset(double slot_ms, std::uint8_t bits) {
+    return loopback::slot_config(slot_ms, bits);
 }
 
-double Outcome::frames_ratio() const {
-    return frames_sent == 0 ? 0.0 : static_cast<double>(frames_delivered) / static_cast<double>(frames_sent);
+double slot_ms_of(const EncoderConfig& config) {
+    return static_cast<double>(config.slot_us) / k_us_per_ms;
 }
 
-bool delivered(const Outcome& outcome) {
-    return outcome.frames_ratio() >= k_min_delivered;
+DecoderConfig receiver_for(const EncoderConfig& config) {
+    const double slot_ms = slot_ms_of(config);
+    if (slot_ms < k_fast_slot_ms) return DecoderConfig::for_profile(Profile::fm);
+    DecoderConfig receiver = DecoderConfig::for_profile(Profile::ssb);
+    if (slot_ms > k_ssb_max_slot_ms) receiver.min_slot_ms = k_slow_min_slot_ms;
+    return receiver;
 }
 
-double Outcome::genie_ber() const {
-    return genie_bits == 0 ? 0.0 : static_cast<double>(genie_errors) / static_cast<double>(genie_bits);
+double gate_db(double slot_ms) {
+    const double k_tolerance_ms = 1e-6;
+    if (std::fabs(slot_ms - k_fast_slot_ms / 2.0) < k_tolerance_ms) return k_gate_4_ms;
+    if (std::fabs(slot_ms - 2.0 * k_ssb_max_slot_ms) < k_tolerance_ms) return k_gate_128_ms;
+    return k_gate_16_ms - k_db_per_decade_power * std::log10(slot_ms / k_gate_reference_ms);
+}
+
+std::string preset_name(Preset p) {
+    switch (p) {
+    case Preset::hf_slow:
+        return "hf_slow";
+    case Preset::hf:
+        return "hf";
+    case Preset::hf_fast:
+        return "hf_fast";
+    case Preset::am:
+        return "am";
+    case Preset::fm:
+        return "fm";
+    }
+    return "?";
+}
+
+std::string config_text(const EncoderConfig& config) {
+    return format("T=%g ms N=%u %u Hz", slot_ms_of(config), config.bits_per_package, config.tone_hz);
+}
+
+std::string receiver_text(const DecoderConfig& config) {
+    return format("receiver %u..%u ms, %u-%u Hz%s", config.min_slot_ms, config.max_slot_ms(), config.passband.low_hz,
+                  config.passband.high_hz, config.decision_mode == DecisionMode::fixed_ratio ? ", fixed line" : "");
+}
+
+std::string profile_name(Profile profile) {
+    switch (profile) {
+    case Profile::ssb:
+        return "ssb";
+    case Profile::am:
+        return "am";
+    case Profile::fm:
+        return "fm";
+    }
+    return "?";
 }
 
 double JobPlan::cost() const {
@@ -660,9 +726,33 @@ double JobPlan::cost() const {
         case sim::Mode::clean:
             break;
         }
+        if (channel.clock_ppm != 0.0) factor += k_cost_resample;
     }
-    const double decoding = k_cost_clean * static_cast<double>(decoders.size()) + (genie ? k_cost_genie : 0.0);
+    if (rx_ppm != 0.0) factor += k_cost_resample;
+    const double decoding = k_cost_decoder * static_cast<double>(decoders.size()) + (genie ? k_cost_genie : 0.0);
     return seconds * (factor + decoding);
+}
+
+double Outcome::delivered() const {
+    return score.bytes_sent == 0 ? 0.0 : static_cast<double>(score.matched) / static_cast<double>(score.bytes_sent);
+}
+
+double Outcome::correct() const {
+    return score.bytes_sent == 0 ? 0.0
+                                 : static_cast<double>(score.matched - score.wrong_bytes) /
+                                       static_cast<double>(score.bytes_sent);
+}
+
+double Outcome::mean_slot_error() const {
+    return slot_events == 0 ? 1.0 : slot_error_sum / static_cast<double>(slot_events);
+}
+
+double Outcome::genie_ber(GenieRule rule) const {
+    return genie_bits == 0 ? 0.0 : static_cast<double>(genie_errors[rule]) / static_cast<double>(genie_bits);
+}
+
+bool delivered(const Outcome& outcome) {
+    return outcome.delivered() >= k_min_delivered;
 }
 
 void merge(Outcome& into, const Outcome& from) {
@@ -678,31 +768,34 @@ void merge(Outcome& into, const Outcome& from) {
     a.locks += b.locks;
     a.late_joins += b.late_joins;
     a.lost_events += b.lost_events;
+    a.alias_losts += b.alias_losts;
     a.ends += b.ends;
     a.flywheel_bytes += b.flywheel_bytes;
-    a.erasure_bytes += b.erasure_bytes;
-    a.mode_memory_bytes += b.mode_memory_bytes;
-    into.frames_sent += from.frames_sent;
-    into.frames_delivered += from.frames_delivered;
+    a.shifted_segments += b.shifted_segments;
+    into.cold_joins += from.cold_joins;
+    into.acausal_bytes += from.acausal_bytes;
+    into.misplaced_segments += from.misplaced_segments;
+    into.misplaced_bytes += from.misplaced_bytes;
+    for (std::size_t r = 0; r < k_lost_reasons; ++r) into.lost_reasons[r] += from.lost_reasons[r];
     into.max_wrong_run = std::max(into.max_wrong_run, from.max_wrong_run);
     into.transmissions += from.transmissions;
     into.locked_transmissions += from.locked_transmissions;
-    into.wrong_mode_locks += from.wrong_mode_locks;
+    into.wrong_locks += from.wrong_locks;
     into.stray_locks += from.stray_locks;
-    into.header_transmissions += from.header_transmissions;
-    into.wrong_header_transmissions += from.wrong_header_transmissions;
-    for (std::size_t r = 0; r < k_lost_reasons; ++r) into.lost_reasons[r] += from.lost_reasons[r];
+    into.late_locks += from.late_locks;
     into.packets_sent += from.packets_sent;
     into.packets_ok += from.packets_ok;
     into.packets_bad += from.packets_bad;
     into.snr_db.insert(into.snr_db.end(), from.snr_db.begin(), from.snr_db.end());
     into.airtime += from.airtime;
     into.locked_airtime += from.locked_airtime;
-    into.latency_events += from.latency_events;
+    into.slot_error_sum += from.slot_error_sum;
+    into.worst_slot_error = std::max(into.worst_slot_error, from.worst_slot_error);
+    into.slot_events += from.slot_events;
     into.latency_sum += from.latency_sum;
     into.latency_max = std::max(into.latency_max, from.latency_max);
     into.genie_bits += from.genie_bits;
-    into.genie_errors += from.genie_errors;
+    for (int rule = 0; rule < genie_rules; ++rule) into.genie_errors[rule] += from.genie_errors[rule];
 }
 
 TxPlan random_tx(const EncoderConfig& config, std::size_t bytes, std::uint32_t seed) {
@@ -731,49 +824,14 @@ TxPlan packet_tx(const EncoderConfig& config, std::size_t bytes, std::uint32_t s
     return tx;
 }
 
-EncoderConfig mode_config(Preset base, std::uint32_t slot_ms, std::uint8_t bits_per_peak, std::uint8_t data_slots,
-                          Spacing spacing, GridSide side) {
-    EncoderConfig config = EncoderConfig::from_preset(base, k_decoder_rate_hz);
-    config.slot_us = slot_ms * static_cast<std::uint32_t>(k_us_per_ms);
-    config.bits_per_peak = bits_per_peak;
-    config.data_slots = data_slots;
-    config.spacing = spacing;
-    config.side = side;
-    // W / 2 = span_sevenths * 1000 / (14 T_ms), rounded away from the band centre.
-    const std::uint32_t numerator = span_sevenths(config) * static_cast<std::uint32_t>(k_ms_per_s);
-    const std::uint32_t denominator = 2u * k_sevenths * slot_ms;
-    const std::uint32_t half = (numerator + denominator - 1) / denominator;
-    config.tone_hz = static_cast<std::uint16_t>(side == GridSide::below ? k_band_centre + half : k_band_centre - half);
-    return config;
-}
-
-std::string mode_name(const EncoderConfig& config) {
-    return format("T%u k%u N%u %s %s f_ref %u", slot_ms_of(config), config.bits_per_peak, config.data_slots,
-                  config.spacing == Spacing::standard ? "std" : "dense",
-                  config.side == GridSide::below ? "below" : "above", config.tone_hz);
-}
-
-double data_tone_hz(const EncoderConfig& config, double tone) {
-    return config.tone_hz + side_of(config) * (k_grid_guard + tone * spacing_of(config)) * k_ms_per_s /
-                                slot_ms_of(config);
-}
-
-double header_tone_hz(const EncoderConfig& config, double tone) {
-    const double spacing = static_cast<double>(k_standard_spacing_num) / k_standard_spacing_den;
-    return config.tone_hz + side_of(config) * (k_grid_guard + tone * spacing) * k_ms_per_s / slot_ms_of(config);
-}
-
-double span_hz(const EncoderConfig& config) {
-    return static_cast<double>(span_sevenths(config)) * k_ms_per_s / (k_sevenths * slot_ms_of(config));
-}
-
 std::vector<std::int16_t> apply_channel(const std::vector<std::int16_t>& samples, sim::ChannelConfig config,
                                         std::int16_t amplitude, double peak_factor) {
     config.signal_level = amplitude / k_full_scale;
     double sigma = 0.0;
     if (config.noise) {
         const double tone_power = 0.5 * config.signal_level * config.signal_level;
-        const double density = tone_power / (std::pow(10.0, config.snr_db / 10.0) * k_reference_bandwidth_hz);
+        const double density =
+            tone_power / (std::pow(10.0, config.snr_db / k_db_per_decade_power) * k_reference_bandwidth_hz);
         sigma = std::sqrt(density * k_receiver_bandwidth_hz);
     }
     const double peak = peak_factor * config.signal_level + k_noise_peak_sigmas * sigma;
@@ -790,23 +848,44 @@ std::vector<std::int16_t> apply_channel(const std::vector<std::int16_t>& samples
     return result;
 }
 
-std::size_t ssb_delay_samples(sim::Mode mode) {
-    static const std::size_t usb = measure_delay(sim::Mode::usb);
-    static const std::size_t lsb = measure_delay(sim::Mode::lsb);
-    return mode == sim::Mode::lsb ? lsb : usb;
+double channel_delay(sim::Mode mode) {
+    static const double usb = loopback::channel_delay_samples(sim::Mode::usb);
+    static const double lsb = loopback::channel_delay_samples(sim::Mode::lsb);
+    static const double am = loopback::channel_delay_samples(sim::Mode::am);
+    static const double fm = loopback::channel_delay_samples(sim::Mode::fm);
+    switch (mode) {
+    case sim::Mode::usb:
+        return usb;
+    case sim::Mode::lsb:
+        return lsb;
+    case sim::Mode::am:
+        return am;
+    case sim::Mode::fm:
+        return fm;
+    case sim::Mode::clean:
+        break;
+    }
+    return 0.0;
 }
 
 double snr_for_fm_cnr(double cnr_db, const sim::ChannelConfig& config) {
-    return cnr_db + 10.0 * std::log10(config.fm_if_bandwidth_hz / k_reference_bandwidth_hz);
+    return cnr_db + k_db_per_decade_power * std::log10(config.fm_if_bandwidth_hz / k_reference_bandwidth_hz);
 }
 
 double snr_for_am_cnr(double cnr_db, const sim::ChannelConfig& config) {
-    return cnr_db + 10.0 * std::log10(config.am_if_bandwidth_hz / k_reference_bandwidth_hz);
+    return cnr_db + k_db_per_decade_power * std::log10(config.am_if_bandwidth_hz / k_reference_bandwidth_hz);
+}
+
+double amplitude_of_db(double db) {
+    return std::pow(10.0, db / k_db_per_decade);
+}
+
+double ratio(double a, double b) {
+    if (b > 0.0) return a / b;
+    return a > 0.0 ? k_infinite_ratio : 1.0;
 }
 
 std::uint32_t seed_of(std::uint32_t test, std::uint32_t point, std::uint32_t job) {
-    const std::uint32_t k_test_stride = 1000003u;
-    const std::uint32_t k_point_stride = 10007u;
     return test * k_test_stride + point * k_point_stride + job + 1u;
 }
 
@@ -833,24 +912,35 @@ std::vector<Outcome> run_job(const JobPlan& job) {
         }
     }
 
-    // Clock errors stretch the received time line by (1 + rx) / (1 + tx): score against a stretched layout.
+    // Clock errors stretch the received time line by (1 + rx) / (1 + tx); the channel delays it.
     const double tx_ppm = job.use_channel ? job.channel.clock_ppm : 0.0;
     const double stretch = (1.0 + job.rx_ppm * k_ppm) / (1.0 + tx_ppm * k_ppm);
+    const double delay = job.use_channel ? channel_delay(job.channel.mode) : 0.0;
     std::vector<Layout> sent;
     for (std::size_t t = 0; t < recording.transmissions.size(); ++t) {
-        sent.push_back(Layout(recording.transmissions[t], stretch));
+        sent.push_back(Layout(recording.transmissions[t], stretch, delay));
     }
 
     Outcome genie;
-    if (job.genie) genie_count(sent, samples, job, genie);
+    if (job.genie && !job.transmissions.empty()) {
+        genie_count(sent, samples, received_tone(job, job.transmissions[0].config), genie);
+    }
     std::vector<Outcome> outcomes;
     for (std::size_t d = 0; d < job.decoders.size(); ++d) {
         const Capture capture = loopback::run_decoder(samples, job.decoders[d], 0);
         outcomes.push_back(evaluate(sent, capture, job));
         outcomes.back().genie_bits = genie.genie_bits;
-        outcomes.back().genie_errors = genie.genie_errors;
+        for (int rule = 0; rule < genie_rules; ++rule) outcomes.back().genie_errors[rule] = genie.genie_errors[rule];
     }
     return outcomes;
+}
+
+Outcome evaluate_recording(const Recording& recording, const Capture& capture, double shift) {
+    std::vector<Layout> sent;
+    for (std::size_t t = 0; t < recording.transmissions.size(); ++t) {
+        sent.push_back(Layout(recording.transmissions[t], 1.0, shift));
+    }
+    return evaluate(sent, capture, JobPlan());
 }
 
 std::vector<std::vector<Outcome> > run_points(const std::vector<JobPlan>& jobs, const std::vector<std::size_t>& point,
@@ -876,13 +966,9 @@ std::size_t transmissions_for(double bits, std::size_t bytes) {
 }
 
 double transmission_seconds(const EncoderConfig& config, std::size_t bytes, double gap_ms) {
-    const std::size_t peaks = peak_slots(bytes, config.bits_per_peak);
-    const std::size_t frames = (peaks + config.data_slots - 1) / config.data_slots;
-    const std::size_t eot = bytes == 0 ? 0 : k_eot_markers;
-    const std::size_t slots =
-        tune_slots(config) + config.sync_markers + k_header_frame_slots + peaks + frames + eot;
-    const double slot_s = static_cast<double>(config.slot_us) / (k_us_per_ms * k_ms_per_s);
-    return (config.lead_in_ms + config.tail_ms + gap_ms) / k_ms_per_s + static_cast<double>(slots) * slot_s;
+    Encoder encoder(config);
+    const double samples = static_cast<double>(encoder.duration_samples(bytes));
+    return samples / config.sample_rate_hz + gap_ms / k_ms_per_s;
 }
 
 std::size_t transmissions_per_job(double transmission_s, std::size_t count) {
@@ -894,25 +980,16 @@ std::uint32_t data_seed(std::uint32_t job_seed, std::size_t transmission) {
     return job_seed * k_data_seed_stride + static_cast<std::uint32_t>(transmission);
 }
 
-std::string profile_name(Profile profile) {
-    switch (profile) {
-    case Profile::ssb:
-        return "ssb";
-    case Profile::am:
-        return "am";
-    case Profile::fm:
-        return "fm";
-    }
-    return "?";
-}
-
 bool result(const std::string& id, const std::string& condition, const std::string& measured,
             const std::string& gate, bool pass, Kind kind) {
     const char* verdict = kind == Kind::report ? "REPORT" : (pass ? "PASS" : "FAIL");
-    const std::string text = rule_line(id, condition, measured, gate, verdict);
-    std::printf("%s\n", text.c_str());
-    std::fflush(stdout);
-    lines().push_back(text);
+    const std::string text = rule_line(column(id), column(condition), column(measured), column(gate), verdict);
+    {
+        std::lock_guard<std::mutex> lock(lines_mutex());
+        std::printf("%s\n", text.c_str());
+        std::fflush(stdout);
+        lines().push_back(text);
+    }
     if (kind == Kind::gate && !pass) test::fail(__FILE__, __LINE__, id + " failed: " + condition);
     return pass;
 }
@@ -923,38 +1000,44 @@ void note(const std::string& text) {
 }
 
 std::string format(const char* pattern, ...) {
-    const std::size_t k_buffer = 1024;
-    char buffer[k_buffer];
     va_list arguments;
     va_start(arguments, pattern);
-    std::vsnprintf(buffer, sizeof(buffer), pattern, arguments);
+    va_list copy;
+    va_copy(copy, arguments);
+    const int length = std::vsnprintf(0, 0, pattern, copy);
+    va_end(copy);
+    std::string text(static_cast<std::size_t>(std::max(length, 0)) + 1, '\0');
+    std::vsnprintf(&text[0], text.size(), pattern, arguments);
     va_end(arguments);
-    return std::string(buffer);
+    text.resize(static_cast<std::size_t>(std::max(length, 0)));
+    return text;
 }
 
 std::string lost_text(const Outcome& o) {
     const std::size_t* r = o.lost_reasons;
-    return format("lost-ev %zu (gone %zu, alias %zu, no_header %zu, unsupported %zu, preamble %zu)",
-                  o.score.lost_events, r[static_cast<std::size_t>(LostReason::signal_gone)],
-                  r[static_cast<std::size_t>(LostReason::alias)], r[static_cast<std::size_t>(LostReason::no_header)],
-                  r[static_cast<std::size_t>(LostReason::unsupported_mode)],
-                  r[static_cast<std::size_t>(LostReason::preamble_timeout)]);
+    return format("lost-ev %zu (gone %zu, alias %zu, preamble %zu, unsupported %zu)", o.score.lost_events,
+                  r[static_cast<std::size_t>(LostReason::signal_gone)], r[static_cast<std::size_t>(LostReason::alias)],
+                  r[static_cast<std::size_t>(LostReason::preamble_timeout)],
+                  r[static_cast<std::size_t>(LostReason::unsupported)]);
+}
+
+std::string lock_text(const Outcome& o) {
+    std::string text = format("locks %zu/%zu tx", o.locked_transmissions, o.transmissions);
+    if (o.late_locks != 0) text += format(" (%zu later than end + 4 T)", o.late_locks);
+    if (o.wrong_locks + o.stray_locks != 0) text += format(" (+%zu wrong T/N, %zu stray)", o.wrong_locks, o.stray_locks);
+    if (o.score.late_joins != 0) text += format(", late joins %zu (cold %zu)", o.score.late_joins, o.cold_joins);
+    return text;
 }
 
 std::string ber_text(const Outcome& o) {
     const Score& s = o.score;
-    std::string text = format("BER %.2e (%zu bits), frames %.2f%% (%zu/%zu), loss %.2f%%, wrong %zu, extra %zu, "
-                              "headers %zu/%zu tx, locks %zu/%zu tx",
-                              s.ber(), s.matched * k_byte_bits, k_percent * o.frames_ratio(), o.frames_delivered,
-                              o.frames_sent, k_percent * s.loss(), s.wrong_bytes, s.extra_bytes,
-                              o.header_transmissions, o.transmissions, o.locked_transmissions, o.transmissions);
-    if (o.wrong_mode_locks + o.stray_locks != 0) {
-        text += format(" (+%zu wrong-mode, %zu stray)", o.wrong_mode_locks, o.stray_locks);
+    std::string text = format("BER %.2e (%zu bits), delivered %.2f%%, loss %.2f%%, wrong %zu, extra %zu, ", s.ber(),
+                              s.matched * k_byte_bits, k_percent * o.delivered(), k_percent * s.loss(), s.wrong_bytes,
+                              s.extra_bytes);
+    if (o.misplaced_segments != 0) {
+        text += format("SHIFTED %zu bytes in %zu lock(s), ", o.misplaced_bytes, o.misplaced_segments);
     }
-    if (s.late_joins + s.mode_memory_bytes != 0) {
-        text += format(", late joins %zu, mode-memory bytes %zu", s.late_joins, s.mode_memory_bytes);
-    }
-    return text + ", " + lost_text(o);
+    return text + lock_text(o) + ", " + lost_text(o);
 }
 
 double upper_95(std::size_t errors, double trials) {
@@ -969,7 +1052,8 @@ void ledger_packets(const std::string& where, const Outcome& outcome) {
 }
 
 void ledger_runs(const std::string& where, const Outcome& outcome, bool at_gate_plus_3) {
-    run_ledger().push_back(RunEntry{where, outcome.max_wrong_run, at_gate_plus_3});
+    run_ledger().push_back(RunEntry{where, outcome.max_wrong_run, at_gate_plus_3, outcome.misplaced_segments,
+                                    outcome.misplaced_bytes});
 }
 
 void test_f5_packets() {
@@ -985,7 +1069,7 @@ void test_f5_packets() {
         if (ledger[i].bad == 0) continue;
         note(format("F5: %s: %zu CRC-valid wrong packets", ledger[i].where.c_str(), ledger[i].bad));
     }
-    result("F5", format("F1-F4 and every C point (%zu runs)", ledger.size()),
+    result("F5", format("F1-F4 (all seeds) and every C point (%zu runs)", ledger.size()),
            format("%zu CRC-valid wrong packets; %zu of %zu sent packets delivered", bad, ok, sent),
            "0 CRC-valid wrong packets", bad == 0);
 }
@@ -1004,16 +1088,49 @@ void test_f6_runs() {
             where[group] = ledger[i].where;
         }
     }
-    const std::size_t k_max_run = 8;
+    std::size_t over[2] = {0, 0};
+    for (std::size_t i = 0; i < ledger.size(); ++i) {
+        if (ledger[i].max_run <= k_max_wrong_run) continue;
+        ++over[ledger[i].qualifies ? 0 : 1];
+        note(format("F6 (%s): %s: longest wrong run %zu", ledger[i].qualifies ? "gated" : "report",
+                    ledger[i].where.c_str(), ledger[i].max_run));
+    }
     result("F6", format("%zu points of L5/A/C at >= gate + 3 dB", count[0]),
-           format("longest run of wrong bytes %zu (%s)", worst[0], where[0].c_str()), "<= 8", worst[0] <= k_max_run);
+           format("longest run of wrong bytes %zu (%s); %zu points above 8", worst[0], where[0].c_str(), over[0]),
+           "<= 8", worst[0] <= k_max_wrong_run);
     result("F6", format("%zu points below gate + 3 dB", count[1]),
-           format("longest run of wrong bytes %zu (%s)", worst[1], where[1].c_str()), "report only", true,
-           Kind::report);
+           format("longest run of wrong bytes %zu (%s); %zu points above 8", worst[1], where[1].c_str(), over[1]),
+           "report only", true, Kind::report);
+    // The promise behind F6 (spec 3.13, V5): bytes are never shifted. Every lock whose bytes sit at a wrong
+    // byte_index, at any SNR.
+    std::size_t segments = 0;
+    std::size_t bytes = 0;
+    std::size_t points = 0;
+    for (std::size_t i = 0; i < ledger.size(); ++i) {
+        if (ledger[i].misplaced_segments == 0) continue;
+        segments += ledger[i].misplaced_segments;
+        bytes += ledger[i].misplaced_bytes;
+        ++points;
+        note(format("shifted bytes: %s: %zu bytes in %zu lock(s)", ledger[i].where.c_str(), ledger[i].misplaced_bytes,
+                    ledger[i].misplaced_segments));
+    }
+    result("F6", format("every lock of the %zu L5/A/C points, any SNR: bytes released at a wrong byte_index", ledger.size()),
+           format("%zu shifted bytes in %zu lock(s) at %zu point(s)", bytes, segments, points),
+           "report (spec 3.13 and V5: never a shifted byte)", true, Kind::report);
 }
 
 void print_summary() {
-    std::printf("\n==== long regression summary (%zu result lines) ====\n", lines().size());
+    std::size_t pass = 0;
+    std::size_t fail = 0;
+    std::size_t report = 0;
+    for (std::size_t i = 0; i < lines().size(); ++i) {
+        const std::string& line = lines()[i];
+        if (line.size() >= 4 && line.compare(line.size() - 4, 4, "PASS") == 0) ++pass;
+        if (line.size() >= 4 && line.compare(line.size() - 4, 4, "FAIL") == 0) ++fail;
+        if (line.size() >= 6 && line.compare(line.size() - 6, 6, "REPORT") == 0) ++report;
+    }
+    std::printf("\n==== long regression summary (%zu result lines: %zu PASS, %zu FAIL, %zu REPORT) ====\n",
+                lines().size(), pass, fail, report);
     for (std::size_t i = 0; i < lines().size(); ++i) std::printf("%s\n", lines()[i].c_str());
 }
 

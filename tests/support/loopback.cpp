@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
+#include <cstdlib>
 #include <random>
 
 namespace unlimited {
@@ -16,28 +16,16 @@ const double k_us_per_ms = 1e3;
 const double k_full_scale = 32768.0;
 const double k_int16_max = 32767.0;
 const double k_int16_min = -32768.0;
-const std::size_t k_render_chunk = 32;        // shorter than any frame, so the queue never runs dry
-const std::uint8_t k_min_tune_slots = 6;
-const double k_release_margin_slots = 2.0;    // a frame is released at least 2 T after its STOP centre
+const std::size_t k_render_chunk = 32;        // shorter than any package, so the queue never runs dry
+const std::size_t k_min_tune_slots = 6;
 const double k_trailing_slots = 4.0;          // single(): silence after a transmission, at least 4 T
 const double k_reference_bandwidth_hz = 2500.0;
 const double k_receiver_bandwidth_hz = 2400.0;
 const double k_noise_peak_sigmas = 5.0;
 const double k_headroom = 0.9;
 const int k_byte_bits = 8;
-const unsigned k_byte_mask = 0xFFu;
 const double k_pi = 3.14159265358979323846;
-
-// slot_config(): bits per peak by T, as the presets.
-const double k_k3_below_ms = 12.0;
-const double k_k4_below_ms = 24.0;
-const double k_k5_below_ms = 48.0;
-const double k_k6_below_ms = 96.0;
-
-// channel_delay(): energy envelopes over 16 samples, lags up to 600 samples.
-const std::size_t k_envelope_samples = 16;
-const long k_max_delay = 600;
-const std::size_t k_delay_stride = 3;
+const unsigned k_byte_mask = 0xFFu;
 
 struct Sink {
     Capture* capture;
@@ -56,29 +44,12 @@ int popcount(unsigned value) {
     return count;
 }
 
-std::size_t tune_slots(const EncoderConfig& config) {
-    const std::size_t slots =
-        static_cast<std::size_t>(std::ceil(config.tune_ms * (k_us_per_s / k_ms_per_s) / config.slot_us - 1e-9));
-    return std::max<std::size_t>(slots, k_min_tune_slots);
+double lead_in_samples(const EncoderConfig& config) {
+    return static_cast<double>(config.lead_in_ms) * config.sample_rate_hz / k_ms_per_s;
 }
 
-std::size_t lead_in_samples(const EncoderConfig& config) {
-    return static_cast<std::size_t>(config.lead_in_ms) * config.sample_rate_hz / static_cast<std::size_t>(k_ms_per_s);
-}
-
-std::size_t frame_bytes(const Transmission& transmission) {
-    return transmission.config.frame_bytes();
-}
-
-// Latest frame whose release time (STOP + margin) is not after `sample`, or -1.
-long latest_frame(const Transmission& transmission, std::size_t sample) {
-    const double margin = k_release_margin_slots * slot_samples(transmission.config);
-    long latest = -1;
-    for (std::size_t f = 0; f < frame_count(transmission); ++f) {
-        if (stop_centre_sample(transmission, f) + margin > static_cast<double>(sample)) break;
-        latest = static_cast<long>(f);
-    }
-    return latest;
+std::size_t data_bits(const Transmission& transmission) {
+    return transmission.data.size() * static_cast<std::size_t>(k_byte_bits);
 }
 
 long transmission_at(const Recording& recording, std::size_t sample) {
@@ -87,25 +58,6 @@ long transmission_at(const Recording& recording, std::size_t sample) {
         if (recording.transmissions[t].start_sample <= sample) found = static_cast<long>(t);
     }
     return found;
-}
-
-// Offset of the farthest tone from f_ref, Hz (spec 1.3).
-double span_hz(const EncoderConfig& config) {
-    const double tones = std::pow(2.0, config.bits_per_peak);
-    const double c = config.spacing == Spacing::standard
-                         ? static_cast<double>(k_standard_spacing_num) / k_standard_spacing_den
-                         : 1.0;
-    const double units = std::max(k_grid_guard + (tones - 1.0) * c, k_grid_guard + static_cast<double>(k_header_slots));
-    return units * k_us_per_s / config.slot_us;
-}
-
-// Tukey alpha 0.25 at u in [0, 1).
-double peak_weight(double u) {
-    const double ramp = k_data_ramp;
-    if (u < 0.0 || u >= 1.0) return 0.0;
-    if (u < ramp) return std::pow(std::sin(k_pi * u / (2.0 * ramp)), 2.0);
-    if (u > 1.0 - ramp) return std::pow(std::sin(k_pi * (1.0 - u) / (2.0 * ramp)), 2.0);
-    return 1.0;
 }
 
 }  // namespace
@@ -136,42 +88,15 @@ EncoderConfig preset_config(Preset preset) {
     return EncoderConfig::from_preset(preset, k_decoder_rate_hz);
 }
 
-EncoderConfig mode_config(std::uint32_t slot_ms, std::uint8_t bits_per_peak, std::uint8_t data_slots, Spacing spacing,
-                          GridSide side, std::uint16_t tone_hz) {
+EncoderConfig slot_config(double slot_ms, std::uint8_t bits, std::uint16_t tone_hz) {
     EncoderConfig config = EncoderConfig::from_preset(Preset::hf, k_decoder_rate_hz);
-    config.slot_us = static_cast<std::uint32_t>(slot_ms * k_us_per_ms);
-    config.bits_per_peak = bits_per_peak;
-    config.data_slots = data_slots;
-    config.spacing = spacing;
-    config.side = side;
-    const double half = 0.5 * span_hz(config);
-    if (tone_hz != 0) {
-        config.tone_hz = tone_hz;
-        return config;
+    config.slot_us = static_cast<std::uint32_t>(std::lround(slot_ms * k_us_per_ms));
+    config.bits_per_package = bits;
+    config.tone_hz = tone_hz;
+    if (!passband_fit(config).fits) {
+        config.passband.low_hz = k_am_passband_low_hz;
+        config.passband.high_hz = k_am_passband_high_hz;
     }
-    // A band wider than 3000 Hz puts f_ref below 0 (or above 3000 Hz): kept in uint16 range, valid() refuses it.
-    const double centred =
-        side == GridSide::below ? std::ceil(k_band_centre_hz + half) : std::floor(k_band_centre_hz - half);
-    const double top = static_cast<double>(std::numeric_limits<std::uint16_t>::max());
-    config.tone_hz = static_cast<std::uint16_t>(std::max(0.0, std::min(centred, top)));
-    return config;
-}
-
-EncoderConfig slot_config(double slot_ms, std::uint16_t tone_hz) {
-    const std::uint32_t ms = static_cast<std::uint32_t>(std::lround(slot_ms));
-    std::uint8_t k = 7;
-    if (ms < k_k3_below_ms) {
-        k = 3;
-    } else if (ms < k_k4_below_ms) {
-        k = 4;
-    } else if (ms < k_k5_below_ms) {
-        k = 5;
-    } else if (ms < k_k6_below_ms) {
-        k = 6;
-    }
-    const GridSide side = tone_hz >= k_band_centre_hz ? GridSide::below : GridSide::above;
-    EncoderConfig config = mode_config(ms, k, k_default_data_slots, Spacing::standard, side, tone_hz);
-    while (!config.valid() && config.bits_per_peak > 1) --config.bits_per_peak;
     return config;
 }
 
@@ -205,42 +130,41 @@ double slot_samples(const EncoderConfig& config) {
 }
 
 double slot_start_sample(const Transmission& transmission, std::size_t slot) {
-    return static_cast<double>(transmission.start_sample + lead_in_samples(transmission.config)) +
+    return static_cast<double>(transmission.start_sample) + lead_in_samples(transmission.config) +
            static_cast<double>(slot) * slot_samples(transmission.config);
 }
 
-std::size_t header_start_slot(const EncoderConfig& config) {
+std::size_t tune_slots(const EncoderConfig& config) {
+    const std::size_t slots =
+        static_cast<std::size_t>(std::ceil(config.tune_ms * (k_us_per_s / k_ms_per_s) / config.slot_us - 1e-9));
+    return std::max<std::size_t>(slots, k_min_tune_slots);
+}
+
+std::size_t first_start_slot(const EncoderConfig& config) {
     return tune_slots(config) + config.sync_markers - 1;
 }
 
-std::size_t first_frame_slot(const EncoderConfig& config) {
-    return header_start_slot(config) + k_header_slots + 1;
+std::size_t package_count(const Transmission& transmission) {
+    const std::size_t n = transmission.config.bits_per_package;
+    return (data_bits(transmission) + n - 1) / n;
 }
 
-std::size_t frame_count(const Transmission& transmission) {
-    const std::size_t bytes = frame_bytes(transmission);
-    return (transmission.data.size() + bytes - 1) / bytes;
+std::size_t package_bits(const Transmission& transmission, std::size_t package) {
+    const std::size_t n = transmission.config.bits_per_package;
+    const std::size_t left = data_bits(transmission) - package * n;
+    return left < n ? left : n;
 }
 
-std::size_t frame_peaks(const Transmission& transmission, std::size_t frame) {
-    const std::size_t bytes = frame_bytes(transmission);
-    const std::size_t left = transmission.data.size() - frame * bytes;
-    if (left >= bytes) return transmission.config.data_slots;
-    const std::size_t k = transmission.config.bits_per_peak;
-    return (k_byte_bits * left + k - 1) / k;
+std::size_t package_start_slot(const Transmission& transmission, std::size_t package) {
+    return first_start_slot(transmission.config) + package * (transmission.config.bits_per_package + 1u);
 }
 
-std::size_t frame_start_slot(const Transmission& transmission, std::size_t frame) {
-    return first_frame_slot(transmission.config) + frame * (transmission.config.data_slots + 1u);
+std::size_t stop_slot(const Transmission& transmission, std::size_t package) {
+    return package_start_slot(transmission, package) + package_bits(transmission, package) + 1u;
 }
 
-std::size_t frame_of_byte(const Transmission& transmission, std::size_t byte_index) {
-    return byte_index / frame_bytes(transmission);
-}
-
-double stop_centre_sample(const Transmission& transmission, std::size_t frame) {
-    const std::size_t slot = frame_start_slot(transmission, frame) + frame_peaks(transmission, frame) + 1;
-    return slot_start_sample(transmission, slot) + 0.5 * slot_samples(transmission.config);
+std::size_t end_slot(const Transmission& transmission) {
+    return stop_slot(transmission, package_count(transmission) - 1u) + 1u;
 }
 
 void scale_slot(Recording& recording, std::size_t transmission, std::size_t slot, double gain) {
@@ -276,40 +200,45 @@ std::vector<std::int16_t> through_channel(const std::vector<std::int16_t>& sampl
     return result;
 }
 
-long channel_delay(const std::vector<std::int16_t>& samples, sim::ChannelConfig config, std::int16_t amplitude) {
+double channel_delay_samples(sim::Mode mode) {
+    const std::size_t length = 8192;
+    const std::size_t at = 2048;
+    const std::size_t width = 128;
+    const double amplitude = 10000.0;
+    const double tone_hz = 1500.0;
+    std::vector<std::int16_t> burst(length, 0);
+    for (std::size_t n = 0; n < width; ++n) {
+        const double envelope = std::pow(std::sin(k_pi * n / width), 2.0);
+        burst[at + n] = static_cast<std::int16_t>(
+            std::lround(amplitude * envelope * std::sin(2.0 * k_pi * tone_hz * n / k_decoder_rate_hz)));
+    }
+    sim::ChannelConfig config;
+    config.mode = mode;
     config.noise = false;
-    config.fading = false;
-    config.impulse_rate_hz = 0.0;
-    config.agc = false;
-    const std::vector<std::int16_t> out = through_channel(samples, config, amplitude);
-    const std::size_t n = std::min(samples.size(), out.size());
-    std::vector<double> a(n, 0.0);
-    std::vector<double> b(n, 0.0);
-    double sum_a = 0.0;
-    double sum_b = 0.0;
-    for (std::size_t i = 0; i < n; ++i) {
-        sum_a += static_cast<double>(samples[i]) * samples[i];
-        sum_b += static_cast<double>(out[i]) * out[i];
-        if (i >= k_envelope_samples) {
-            sum_a -= static_cast<double>(samples[i - k_envelope_samples]) * samples[i - k_envelope_samples];
-            sum_b -= static_cast<double>(out[i - k_envelope_samples]) * out[i - k_envelope_samples];
-        }
-        a[i] = sum_a;
-        b[i] = sum_b;
+    const std::vector<std::int16_t> out = through_channel(burst, config, static_cast<std::int16_t>(amplitude));
+    double in_moment = 0.0;
+    double in_energy = 0.0;
+    double out_moment = 0.0;
+    double out_energy = 0.0;
+    for (std::size_t i = 0; i < length && i < out.size(); ++i) {
+        const double a = double(burst[i]) * burst[i];
+        const double b = double(out[i]) * out[i];
+        in_moment += a * i;
+        in_energy += a;
+        out_moment += b * i;
+        out_energy += b;
     }
-    long best = 0;
-    double best_correlation = -1.0;
-    for (long lag = 0; lag < k_max_delay; ++lag) {
-        double correlation = 0.0;
-        for (std::size_t i = 0; i + static_cast<std::size_t>(lag) < n; i += k_delay_stride) {
-            correlation += a[i] * b[i + static_cast<std::size_t>(lag)];
-        }
-        if (correlation > best_correlation) {
-            best_correlation = correlation;
-            best = lag;
-        }
-    }
-    return best;
+    return out_moment / out_energy - in_moment / in_energy;
+}
+
+std::vector<std::int16_t> usb(const std::vector<std::int16_t>& samples, double snr_db, std::uint32_t seed,
+                              std::int16_t amplitude, double offset_hz) {
+    sim::ChannelConfig config;
+    config.mode = sim::Mode::usb;
+    config.snr_db = snr_db;
+    config.seed = seed;
+    config.freq_offset_hz = offset_hz;
+    return through_channel(samples, config, amplitude);
 }
 
 Capture run_decoder(const std::vector<std::int16_t>& samples, const DecoderConfig& config, std::size_t chunk) {
@@ -345,42 +274,40 @@ Mapping map_events(const Recording& recording, const Capture& capture) {
     Score& s = mapping.score;
     for (std::size_t t = 0; t < recording.transmissions.size(); ++t) {
         s.bytes_sent += recording.transmissions[t].data.size();
-        s.frames_sent += frame_count(recording.transmissions[t]);
         mapping.received.push_back(std::vector<int>(recording.transmissions[t].data.size(), -1));
         mapping.byte_events.push_back(std::vector<Event>(recording.transmissions[t].data.size()));
     }
 
     std::vector<std::size_t> segment;  // indices of the byte events of the current lock
+    bool late = false;
     const auto close_segment = [&]() {
         if (segment.empty()) return;
-        // Frames are released promptly, held ones later: each frame's release time gives an upper bound of the
-        // offset; the most common bound (ties: the smaller) is the offset of the lock.
         const long t = transmission_at(recording, capture.event_sample[segment.front()]);
         long offset = 0;
-        if (t >= 0) {
-            std::vector<long> candidates;
-            for (std::size_t i = 0; i < segment.size(); ++i) {
-                const Event& e = capture.events[segment[i]];
-                const long f = latest_frame(recording.transmissions[t], capture.event_sample[segment[i]]);
-                candidates.push_back(f - static_cast<long>(e.frame_index));
-            }
-            std::sort(candidates.begin(), candidates.end());
-            std::size_t best_count = 0;
-            for (std::size_t i = 0; i < candidates.size();) {
-                std::size_t j = i;
-                while (j < candidates.size() && candidates[j] == candidates[i]) ++j;
-                if (j - i > best_count) {
-                    best_count = j - i;
-                    offset = candidates[i];
+        if (t >= 0 && late) {
+            // A cold join counts bytes from the join: the offset where most of them match.
+            const std::vector<std::uint8_t>& data = recording.transmissions[t].data;
+            const long size = static_cast<long>(data.size());
+            std::size_t best = 0;
+            for (long o = -size; o < size; ++o) {
+                std::size_t matches = 0;
+                for (std::size_t i = 0; i < segment.size(); ++i) {
+                    const Event& e = capture.events[segment[i]];
+                    const long k = static_cast<long>(e.byte_index) + o;
+                    if (k >= 0 && k < size && data[k] == e.value) ++matches;
                 }
-                i = j;
+                if (matches > best || (matches == best && std::labs(o) < std::labs(offset))) {
+                    best = matches;
+                    offset = o;
+                }
             }
+            if (offset != 0) ++s.shifted_segments;
         }
+        mapping.offsets.push_back(offset);
         for (std::size_t i = 0; i < segment.size(); ++i) {
             const Event& e = capture.events[segment[i]];
-            const long frame = static_cast<long>(e.frame_index) + offset;
-            const long k = t < 0 ? -1 : frame * static_cast<long>(frame_bytes(recording.transmissions[t])) + e.index;
-            if (t < 0 || frame < 0 || k < 0 || k >= static_cast<long>(recording.transmissions[t].data.size()) ||
+            const long k = t < 0 ? -1 : static_cast<long>(e.byte_index) + offset;
+            if (t < 0 || k < 0 || k >= static_cast<long>(recording.transmissions[t].data.size()) ||
                 mapping.received[t][k] >= 0) {
                 ++s.extra_bytes;
                 continue;
@@ -401,7 +328,8 @@ Mapping map_events(const Recording& recording, const Capture& capture) {
         case EventType::locked:
             close_segment();
             ++s.locks;
-            if ((e.flags & event_flag_late_join) != 0) ++s.late_joins;
+            late = (e.flags & event_flag_late_join) != 0;
+            if (late) ++s.late_joins;
             break;
         case EventType::byte:
             ++s.bytes_released;
@@ -419,21 +347,14 @@ Mapping map_events(const Recording& recording, const Capture& capture) {
             break;
         case EventType::state:
         case EventType::slot:
+        case EventType::package:
             break;
         }
     }
     close_segment();
     for (std::size_t t = 0; t < mapping.received.size(); ++t) {
-        const Transmission& transmission = recording.transmissions[t];
         for (std::size_t k = 0; k < mapping.received[t].size(); ++k) {
             if (mapping.received[t][k] < 0) ++s.lost_bytes;
-        }
-        for (std::size_t f = 0; f < frame_count(transmission); ++f) {
-            const std::size_t first = f * frame_bytes(transmission);
-            const std::size_t last = std::min(first + frame_bytes(transmission), transmission.data.size());
-            bool delivered = true;
-            for (std::size_t k = first; k < last; ++k) delivered = delivered && mapping.received[t][k] >= 0;
-            if (delivered) ++s.frames_delivered;
         }
     }
     return mapping;
@@ -449,63 +370,6 @@ std::size_t count_events(const Capture& capture, EventType type) {
         if (capture.events[i].type == type) ++count;
     }
     return count;
-}
-
-// Double-precision matched Goertzel per peak slot at the sent grid; argmax.
-std::vector<std::uint8_t> genie_bytes(const std::vector<std::int16_t>& received, const Transmission& transmission,
-                                      double tone_hz, int side, long delay) {
-    const EncoderConfig& config = transmission.config;
-    const double length = slot_samples(config);
-    const double slot_s = config.slot_us / k_us_per_s;
-    const double spacing = config.spacing == Spacing::standard
-                               ? static_cast<double>(k_standard_spacing_num) / k_standard_spacing_den
-                               : 1.0;
-    const std::size_t tones = static_cast<std::size_t>(1u) << config.bits_per_peak;
-    const std::size_t k = config.bits_per_peak;
-    std::vector<double> coefficient(tones);
-    for (std::size_t t = 0; t < tones; ++t) {
-        const double hz = tone_hz + side * (k_grid_guard + t * spacing) / slot_s;
-        coefficient[t] = 2.0 * std::cos(2.0 * k_pi * hz / config.sample_rate_hz);
-    }
-    std::vector<std::uint8_t> bytes;
-    for (std::size_t f = 0; f < frame_count(transmission); ++f) {
-        unsigned accumulator = 0;
-        std::size_t bits = 0;
-        std::size_t produced = 0;
-        const std::size_t wanted = std::min<std::size_t>(frame_bytes(transmission), transmission.data.size() - bytes.size());
-        for (std::size_t i = 1; i <= frame_peaks(transmission, f); ++i) {
-            const double start = slot_start_sample(transmission, frame_start_slot(transmission, f) + i) + delay;
-            const long first = static_cast<long>(std::ceil(start));
-            const long last = static_cast<long>(std::ceil(start + length));
-            std::size_t best = 0;
-            double best_energy = -1.0;
-            for (std::size_t t = 0; t < tones; ++t) {
-                double s1 = 0.0;
-                double s2 = 0.0;
-                for (long n = first; n < last; ++n) {
-                    const double x = n >= 0 && n < static_cast<long>(received.size()) ? received[n] : 0.0;
-                    const double s0 = x * peak_weight((n - start) / length) + coefficient[t] * s1 - s2;
-                    s2 = s1;
-                    s1 = s0;
-                }
-                const double energy = s1 * s1 + s2 * s2 - coefficient[t] * s1 * s2;
-                if (energy > best_energy) {
-                    best_energy = energy;
-                    best = t;
-                }
-            }
-            const unsigned symbol = peak_symbol(static_cast<std::uint8_t>(best), static_cast<std::uint8_t>(i - 1), config.bits_per_peak);
-            for (std::size_t b = 0; b < k && produced < wanted; ++b) {
-                accumulator = (accumulator << 1) | ((symbol >> (k - 1 - b)) & 1u);
-                if (++bits < static_cast<std::size_t>(k_byte_bits)) continue;
-                bytes.push_back(static_cast<std::uint8_t>(accumulator & k_byte_mask));
-                ++produced;
-                accumulator = 0;
-                bits = 0;
-            }
-        }
-    }
-    return bytes;
 }
 
 }  // namespace loopback

@@ -26,11 +26,14 @@ using std::uint8_t;
 using unlimited::Decoder;
 using unlimited::DecoderConfig;
 using unlimited::DecoderState;
+using unlimited::DecisionMode;
 using unlimited::Event;
 using unlimited::EventType;
 using unlimited::LostReason;
+using unlimited::Passband;
 using unlimited::SampleSink;
 using unlimited::cli::Arguments;
+using unlimited::cli::Console;
 using unlimited::cli::UsageError;
 using unlimited::cli::find_name;
 using unlimited::cli::fixed;
@@ -38,51 +41,66 @@ using unlimited::cli::k_exit_io;
 using unlimited::cli::k_exit_ok;
 using unlimited::cli::k_exit_usage;
 using unlimited::cli::k_profiles;
-using unlimited::cli::mode_text;
-using unlimited::cli::side_name;
-using unlimited::cli::to_fields;
-using unlimited::cli::to_integer;
+using unlimited::cli::k_rules;
+using unlimited::cli::to_clamped;
 using unlimited::cli::to_number;
+using unlimited::cli::to_passband;
 
 namespace pc = unlimited::pc;
 
 const char* const k_program = "unlimited_decode";
 const char* const k_default_in_spec = "rx.wav";
+const char* const k_default_profile = "ssb";
 
 const int k_exit_nothing = 1;  // nothing decoded, or (--expect) not an exact match
 
 const double k_rate_hz = unlimited::k_decoder_rate_hz;
-const double k_ms_per_s = 1e3;
 const int k_bits_per_byte = unlimited::k_bits_per_byte;
-const double k_confidence_step_db = 0.5;  // Event::confidence unit
 const size_t k_clock_step = 8;      // samples per decoder call: events are timed to 1 ms
-const size_t k_drain_slots = 4;     // silence after the input, in the longest slots, so the last frame completes
+const size_t k_drain_slots = 8;     // silence after the input, in the longest slots: the last package and END complete
 const size_t k_offset_probe = 64;   // bytes of a late-join lock used to find its place in the expected data
 const uint8_t k_first_printable = 0x20;
 const uint8_t k_last_printable = 0x7E;
+const double k_percent = 100.0;
 
 const int k_seconds_decimals = 3;
 const int k_hz_decimals = 1;
 const int k_ms_decimals = 2;
 const int k_db_decimals = 1;
+const int k_rate_decimals = 1;
 const int k_ber_digits = 2;
 
 const char* const k_usage =
-    "usage: unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--tone-range LO:HI]\n"
-    "    [--no-blanker] [--packet] [--events] [--expect FILE] [--tui] [--realtime]\n"
+    "usage: unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband LO:HI]\n"
+    "    [--rule adaptive|fixed] [--ratio 0.70] [--no-blanker] [--packet] [--events] [--expect FILE]\n"
+    "    [--tui] [--realtime]\n"
     "\n"
-    "Decodes Unlimited transmissions from an audio input (any rate; resampled to 8 kHz). The sender's header\n"
-    "gives the mode (T, bits per peak, data slots, spacing, grid side): nothing else is configured. The grid\n"
-    "side is reported as received: an inverted path (LSB against a USB sender) mirrors it.\n"
-    "  --in SPEC               wav:<path>, <path>.wav or null (default rx.wav)\n"
-    "  --profile               ssb: T 16..128 ms, am: 8..64 ms, fm: 4..32 ms (f_ref 1000..2700 Hz)\n"
-    "  --min-slot-ms, --tone-range, --no-blanker   override the profile (f_ref search range)\n"
-    "  --packet                print the CRC-valid packets found in the bytes\n"
-    "  --events                print every decoder event, slot decisions included\n"
-    "  --expect FILE           compare with the data that was sent: BER, loss, wrong bytes, locks, mode\n"
-    "  --tui                   terminal view of the reception; --realtime paces file input to audio time\n"
-    "output: one 'rx' line (mode, SNR, slot confidence, erasures, flags) and one 'text' line per reception\n"
-    "        (lock to end, loss or end of input)\n"
+    "Receives Unlimited transmissions from audio (any sample rate; resampled to 8000 Hz). It finds the pitch,\n"
+    "measures the slot length T and counts the bits per package N by itself: tell it only the range of slot\n"
+    "lengths to listen to and the audio passband of the radio.\n"
+    "\n"
+    "Receiver\n"
+    "  --in SPEC               the audio: wav:<path>, <path>.wav or null (default rx.wav)\n"
+    "  --profile NAME          ssb (default): slots of 8..64 ms, passband 300..2700 Hz, HF SSB (USB or LSB);\n"
+    "                          am: 8..64 ms, 100..3000 Hz; fm: 4..32 ms, 300..3000 Hz, pitches from 1000 Hz\n"
+    "  --min-slot-ms N         the shortest slot to hear, 4..32 ms: the receiver then hears N..8N ms\n"
+    "  --passband LO:HI        the radio's audio filter; the pitch search stays inside it\n"
+    "  --rule adaptive|fixed   the decision line between a 0 and a 1: adaptive (the smart line, default)\n"
+    "                          sits at 50..75 % of the START-STOP reference line, about 70 % on weak signals;\n"
+    "                          fixed sits at --ratio of it\n"
+    "  --ratio R               the fixed decision line, a fraction of the reference line (0.70; implies fixed)\n"
+    "  --no-blanker            turn off the impulse (static crash) blanker\n"
+    "\n"
+    "Output\n"
+    "  --packet                print the CRC-checked packets found in the bytes\n"
+    "  --events                print every receiver event, each decided bit included\n"
+    "  --expect FILE           compare with the data that was sent: bit errors, lost, wrong and extra bytes\n"
+    "  --tui                   live view: each package's bars against its reference and decision lines,\n"
+    "                          scope, spectrum and status\n"
+    "  --realtime              pace file input to audio time\n"
+    "\n"
+    "On each lock it prints the pitch, T, N, the bit rate, the SNR and the received signal's band against the\n"
+    "passband; when a transmission ends, its text.\n"
     "exit codes: 0 decoded (and matches --expect), 1 nothing decoded or no match, 2 usage error,\n"
     "            3 input/output error\n";
 
@@ -130,12 +148,14 @@ int bit_count(unsigned value) {
 struct Options {
     bool help = false;
     std::string in_spec = k_default_in_spec;
-    std::string profile = "ssb";
+    std::string profile = k_default_profile;
     bool has_min_slot = false;
     double min_slot_ms = 0.0;
-    bool has_tone_range = false;
-    double min_tone_hz = 0.0;
-    double max_tone_hz = 0.0;
+    bool has_passband = false;
+    Passband passband = Passband();
+    std::string rule;  // empty: the profile's
+    bool has_ratio = false;
+    double ratio = 0.0;
     bool no_blanker = false;
     bool packet = false;
     bool events = false;
@@ -159,11 +179,15 @@ Options parse_options(int argc, char** argv) {
         } else if (option == "--min-slot-ms") {
             o.has_min_slot = true;
             o.min_slot_ms = to_number(option, args.value(option));
-        } else if (option == "--tone-range") {
-            const std::vector<double> range = to_fields(option, args.value(option), 2, 2);
-            o.has_tone_range = true;
-            o.min_tone_hz = range[0];
-            o.max_tone_hz = range[1];
+        } else if (option == "--passband") {
+            o.has_passband = true;
+            o.passband = to_passband(option, args.value(option));
+        } else if (option == "--rule") {
+            o.rule = args.value(option);
+            find_name(k_rules, option, o.rule);
+        } else if (option == "--ratio") {
+            o.has_ratio = true;
+            o.ratio = to_number(option, args.value(option));
         } else if (option == "--no-blanker") {
             o.no_blanker = true;
         } else if (option == "--packet") {
@@ -183,18 +207,36 @@ Options parse_options(int argc, char** argv) {
     return o;
 }
 
+bool changed_receiver(const Options& o) {
+    return o.has_min_slot || o.has_passband || !o.rule.empty() || o.has_ratio || o.no_blanker;
+}
+
 DecoderConfig decoder_config(const Options& o) {
-    DecoderConfig config = DecoderConfig::for_profile(find_name(k_profiles, "--profile", o.profile).profile);
-    if (o.has_min_slot) config.min_slot_ms = to_integer<uint8_t>("--min-slot-ms", o.min_slot_ms);
-    if (o.has_tone_range) {
-        config.min_tone_hz = to_integer<uint16_t>("--tone-range", o.min_tone_hz);
-        config.max_tone_hz = to_integer<uint16_t>("--tone-range", o.max_tone_hz);
+    DecoderConfig config = DecoderConfig::for_profile(find_name(k_profiles, "--profile", o.profile).value);
+    if (o.has_min_slot) config.min_slot_ms = to_clamped<uint8_t>(o.min_slot_ms);
+    if (o.has_passband) config.passband = o.passband;
+    if (!o.rule.empty()) config.decision_mode = find_name(k_rules, "--rule", o.rule).value;
+    if (o.has_ratio) {
+        if (config.decision_mode == DecisionMode::adaptive && !o.rule.empty())
+            throw UsageError("--ratio sets the fixed decision line: use it with --rule fixed");
+        config.decision_mode = DecisionMode::fixed_ratio;
+        config.fixed_ratio = static_cast<float>(o.ratio);
     }
     if (o.no_blanker) config.impulse_blanker = false;
-    if (!config.valid())
-        throw UsageError("invalid decoder settings: needs min slot 4..32 ms, 300 <= LO < HI <= 2700 Hz "
-                         "(LO >= 1000 Hz below 8 ms)");
+    const std::string problem = unlimited::cli::decoder_problem(config);
+    if (!problem.empty()) throw UsageError("refused: " + problem);
     return config;
+}
+
+// "profile ssb: slots 8-64 ms, passband 300-2700 Hz, pitch search 335-2665 Hz, smart decision line, impulse
+// blanker on"
+std::string receiver_text(const Options& o, const DecoderConfig& config) {
+    const Passband search = config.search_range();
+    return "profile " + o.profile + (changed_receiver(o) ? " (changed)" : "") + ": slots " +
+           std::to_string(config.min_slot_ms) + "-" + std::to_string(config.max_slot_ms()) + " ms, passband " +
+           unlimited::cli::passband_text(config.passband) + ", pitch search " +
+           unlimited::cli::passband_text(search) + ", " + unlimited::cli::rule_text(config) + ", impulse blanker " +
+           (config.impulse_blanker ? "on" : "off");
 }
 
 // ---------------------------------------------------------------------------
@@ -227,10 +269,8 @@ const char* reason_name(LostReason reason) {
         return "preamble_timeout";
     case LostReason::reset:
         return "reset";
-    case LostReason::no_header:
-        return "no_header";
-    case LostReason::unsupported_mode:
-        return "unsupported_mode";
+    case LostReason::unsupported:
+        return "unsupported";
     }
     return "?";
 }
@@ -244,9 +284,7 @@ const FlagName k_flags[] = {{unlimited::event_flag_late_join, "late_join"},
                             {unlimited::event_flag_flywheel_start, "flywheel_start"},
                             {unlimited::event_flag_flywheel_stop, "flywheel_stop"},
                             {unlimited::event_flag_blanked, "blanked"},
-                            {unlimited::event_flag_erasure, "erasure"},
-                            {unlimited::event_flag_mode_memory, "mode_memory"},
-                            {unlimited::event_flag_blind_mode, "blind_mode"}};
+                            {unlimited::event_flag_weak, "weak"}};
 
 std::string flag_names(uint8_t flags) {
     std::string names;
@@ -255,17 +293,19 @@ std::string flag_names(uint8_t flags) {
     return names;
 }
 
-bool has_mode(const Event& event) {
-    return event.bits_per_peak > 0 && event.data_slots > 0;
+std::string with_flags(const std::string& text, uint8_t flags) {
+    const std::string names = flag_names(flags);
+    return names.empty() ? text : text + "  " + names;
 }
 
-// "f_ref 2132.0 Hz  T 32 ms  k 5  N 8  standard  grid below  138.9 bit/s  snr 12.3 dB"
+// "pitch 1580.0 Hz, T 16.01 ms, N 8, 55.5 bit/s, SNR 10.3 dB"
 std::string signal_text(const Event& event) {
-    const std::string mode = has_mode(event) ? mode_text(event.slot_ms, event.bits_per_peak, event.data_slots,
-                                                         event.spacing, side_name(event.side))
-                                             : "T " + fixed(event.slot_ms, k_ms_decimals) + " ms";
-    return "f_ref " + fixed(event.tone_hz, k_hz_decimals) + " Hz  " + mode + "  snr " +
-           fixed(event.snr_db, k_db_decimals) + " dB";
+    std::string text = "pitch " + fixed(event.tone_hz, k_hz_decimals) + " Hz, T " +
+                       fixed(event.slot_ms, k_ms_decimals) + " ms";
+    if (event.bits_per_package > 0)
+        text += ", N " + std::to_string(event.bits_per_package) + " bits per package, " +
+                fixed(unlimited::cli::net_bit_rate(event.bits_per_package, event.slot_ms), k_rate_decimals) + " bit/s";
+    return text + ", SNR " + fixed(event.snr_db, k_db_decimals) + " dB";
 }
 
 std::string soft_list(const int8_t* soft, size_t count) {
@@ -274,89 +314,53 @@ std::string soft_list(const int8_t* soft, size_t count) {
     return text;
 }
 
-std::string with_flags(const std::string& text, uint8_t flags) {
-    const std::string names = flag_names(flags);
-    return names.empty() ? text : text + "  " + names;
-}
-
 std::string describe_event(const Event& event) {
     switch (event.type) {
     case EventType::state:
-        return std::string("state ") + state_name(event.state);
+        return std::string("state ") + state_name(event.state) +
+               (event.state == DecoderState::search ? " (DCD off)" : " (DCD on)");
     case EventType::locked:
-        return with_flags("locked  " + signal_text(event), event.flags);
+        return with_flags("locked  " + signal_text(event) + ", first package " + std::to_string(event.package_index),
+                          event.flags);
     case EventType::slot:
-        return with_flags("slot " + std::to_string(event.index) + "/" + std::to_string(event.data_slots) +
-                              "  frame " + std::to_string(event.frame_index) + "  tone " +
-                              std::to_string(event.tone) + "  symbol " + std::to_string(event.value) + "  level " +
-                              std::to_string(event.level_pct) + "%  conf " +
-                              fixed(event.confidence * k_confidence_step_db, k_db_decimals) + " dB  soft " +
-                              soft_list(event.soft, std::min<size_t>(event.bits_per_peak, k_bits_per_byte)),
+        return with_flags("slot " + std::to_string(event.slot) + "  package " + std::to_string(event.package_index) +
+                              "  bit " + std::to_string(event.value) + "  level " +
+                              std::to_string(event.level_pct) + "%  line " + std::to_string(event.threshold_pct) +
+                              "%  START " + std::to_string(event.start_pct) + "%  STOP " +
+                              std::to_string(event.stop_pct) + "%  soft " + std::to_string(event.soft[0]),
+                          event.flags);
+    case EventType::package:
+        return with_flags("package " + std::to_string(event.package_index) + "  " + std::to_string(event.value) +
+                              " bits  T " + fixed(event.slot_ms, k_ms_decimals) + " ms  START " +
+                              std::to_string(event.start_pct) + "%  STOP " + std::to_string(event.stop_pct) + "%",
                           event.flags);
     case EventType::byte: {
         const std::vector<uint8_t> value(1, event.value);
-        return with_flags("byte " + hex_byte(event.value) + " " + quoted(value) + "  frame " +
-                              std::to_string(event.frame_index) + "." + std::to_string(event.index) + "  snr " +
-                              fixed(event.snr_db, k_db_decimals) + " dB  soft " + soft_list(event.soft, k_bits_per_byte),
+        return with_flags("byte " + hex_byte(event.value) + " " + quoted(value) + "  index " +
+                              std::to_string(event.byte_index) + "  package " + std::to_string(event.package_index) +
+                              "  soft " + soft_list(event.soft, k_bits_per_byte),
                           event.flags);
     }
     case EventType::end:
-        return "end";
+        return "end  last package " + std::to_string(event.package_index);
     case EventType::lost:
         return std::string("lost ") + reason_name(event.reason);
     }
     return "?";
 }
 
-// Lines go to stdout at once, or wait while the TUI owns the screen.
-class Console {
-public:
-    Console() : held_(false) {}
-
-    void hold(bool held) {
-        held_ = held;
-        if (held_) return;
-        for (size_t i = 0; i < lines_.size(); ++i) std::printf("%s\n", lines_[i].c_str());
-        lines_.clear();
-    }
-
-    void line(const std::string& text) {
-        if (held_) {
-            lines_.push_back(text);
-        } else {
-            std::printf("%s\n", text.c_str());
-        }
-    }
-
-private:
-    bool held_;
-    std::vector<std::string> lines_;
-};
-
 struct Reception {  // one lock: from `locked` to end, lost or the end of the input
     bool late_join;
     std::vector<Event> bytes;
-    Event last;     // locked or the latest byte: f_ref, mode, T and SNR
+    Event last;     // locked or the latest byte: pitch, T, N and SNR
     uint8_t flags;  // every flag seen on its bytes
-};
-
-// Slot decisions since the last reception closed: they start before `locked` (spec 5.1).
-struct SlotTally {
-    size_t slots = 0;
-    size_t erasures = 0;
-    double confidence_db = 0.0;  // summed
-
-    std::string text() const {
-        if (slots == 0) return "slots 0";
-        return "slots " + std::to_string(slots) + "  conf " + fixed(confidence_db / slots, k_db_decimals) +
-               " dB  erasures " + std::to_string(erasures);
-    }
 };
 
 class Receiver {
 public:
-    Receiver(const Options& options, Console& console, pc::Tui* tui)
+    Receiver(const Options& options, const DecoderConfig& config, Console& console, pc::Tui* tui)
         : options_(options),
+          config_(config),
           console_(console),
           tui_(tui),
           packets_(&Receiver::on_packet, this),
@@ -370,7 +374,7 @@ public:
     double seconds() const { return samples_ / k_rate_hz; }
 
     void finish() {
-        if (open_) close("input ended");
+        if (open_) close("the input ended");
     }
 
     const std::vector<Reception>& receptions() const { return receptions_; }
@@ -390,10 +394,11 @@ private:
         const std::vector<uint8_t> bytes(payload, payload + size);
         receiver->payloads_.insert(receiver->payloads_.end(), bytes.begin(), bytes.end());
         ++receiver->packet_count_;
-        const std::string names = flag_names(flags);
-        receiver->console_.line("packet  " + std::to_string(size) + " bytes  " + quoted(bytes) +
-                                (names.empty() ? "" : "  " + names));
+        receiver->console_.item("packet",
+                                with_flags(std::to_string(size) + " bytes, CRC good: " + quoted(bytes), flags));
     }
+
+    std::string at() const { return "t " + fixed(seconds(), k_seconds_decimals) + " s"; }
 
     void handle(const Event& event) {
         if (options_.events) console_.line("t " + fixed(seconds(), k_seconds_decimals) + "  " + describe_event(event));
@@ -401,13 +406,8 @@ private:
         if (options_.packet) packets_.on_event(event);
         switch (event.type) {
         case EventType::locked:
-            if (open_) close("relocked");
+            if (open_) close("a new lock");
             open(event, (event.flags & unlimited::event_flag_late_join) != 0);
-            break;
-        case EventType::slot:
-            ++tally_.slots;
-            tally_.confidence_db += event.confidence * k_confidence_step_db;
-            if (event.flags & unlimited::event_flag_erasure) ++tally_.erasures;
             break;
         case EventType::byte:
             if (!open_) open(event, true);
@@ -417,13 +417,13 @@ private:
             break;
         case EventType::end:
             if (open_) close("end");
-            tally_ = SlotTally();
             break;
         case EventType::lost:
-            if (open_) close(std::string("lost ") + reason_name(event.reason));
-            tally_ = SlotTally();
+            if (open_) close(std::string("lost (") + reason_name(event.reason) + ")");
             break;
         case EventType::state:
+        case EventType::slot:
+        case EventType::package:
             break;
         }
     }
@@ -435,6 +435,9 @@ private:
         reception.flags = event.flags;
         receptions_.push_back(reception);
         open_ = true;
+        console_.item("locked", at() + ": " + signal_text(event) +
+                                    (late_join ? "; late join: the transmission was already running" : ""));
+        console_.item("bandwidth", unlimited::cli::bandwidth_line(config_, event.tone_hz, event.slot_ms));
     }
 
     void close(const std::string& ending) {
@@ -442,19 +445,18 @@ private:
         const Reception& r = receptions_.back();
         std::vector<uint8_t> text;
         for (size_t i = 0; i < r.bytes.size(); ++i) text.push_back(r.bytes[i].value);
-        console_.line(with_flags("rx      " + std::to_string(r.bytes.size()) + " bytes  " + signal_text(r.last) + "  " +
-                                     tally_.text() + "  " + ending + "  t " + fixed(seconds(), k_seconds_decimals) +
-                                     " s",
-                                 r.flags));
-        console_.line("text    " + quoted(text));
+        const std::string count = std::to_string(r.bytes.size()) + (r.bytes.size() == 1 ? " byte" : " bytes");
+        console_.item("rx", with_flags(count + ", " + ending + " at " + at() + " (" + signal_text(r.last) + ")",
+                                       r.flags));
+        console_.item("text", quoted(text));
     }
 
     const Options& options_;
+    const DecoderConfig& config_;
     Console& console_;
     pc::Tui* tui_;
     unlimited::PacketReader packets_;
     std::vector<Reception> receptions_;
-    SlotTally tally_;
     bool open_;
     uint64_t samples_;
     size_t packet_count_;
@@ -476,21 +478,16 @@ struct Comparison {
     size_t transmissions = 0;
     double snr_db = 0.0;
     double slot_ms = 0.0;
-    size_t measured = 0;  // byte events behind snr_db and slot_ms
-    Event mode = Event();  // the first byte event: the decoded mode
+    size_t measured = 0;               // byte events behind snr_db and slot_ms
+    unsigned bits_per_package = 0;     // N of the first byte
 };
 
-// Place of a byte in its transmission: frame_index B + index, B = N k / 8 bytes per frame (spec 5.1).
-size_t byte_position(const Event& event) {
-    const size_t frame_bytes = static_cast<size_t>(event.data_slots) * event.bits_per_peak / k_bits_per_byte;
-    return static_cast<size_t>(event.frame_index) * frame_bytes + event.index;
-}
-
 int mismatch_bits(const std::vector<uint8_t>& expected, size_t position, uint8_t value) {
-    return position < expected.size() ? bit_count(expected[position] ^ value) : k_bits_per_byte;
+    return position < expected.size() ? bit_count(static_cast<unsigned>(expected[position] ^ value)) : k_bits_per_byte;
 }
 
-// A late-join lock numbers its frames from the join: its place is where its first bytes fit best.
+// A late join counts its bytes from the join (spec 3.12): its place is where its first bytes fit best, the exact
+// byte_index (offset 0, a relock after a fade) first.
 size_t late_join_offset(const Reception& reception, const std::vector<uint8_t>& expected) {
     const size_t probe = std::min(k_offset_probe, reception.bytes.size());
     size_t best_offset = 0;
@@ -498,7 +495,8 @@ size_t late_join_offset(const Reception& reception, const std::vector<uint8_t>& 
     for (size_t offset = 0; offset < expected.size(); ++offset) {
         size_t errors = 0;
         for (size_t i = 0; i < probe && errors < best_errors; ++i)
-            errors += mismatch_bits(expected, offset + byte_position(reception.bytes[i]), reception.bytes[i].value);
+            errors += static_cast<size_t>(
+                mismatch_bits(expected, offset + reception.bytes[i].byte_index, reception.bytes[i].value));
         if (errors < best_errors) {
             best_errors = errors;
             best_offset = offset;
@@ -507,8 +505,8 @@ size_t late_join_offset(const Reception& reception, const std::vector<uint8_t>& 
     return best_offset;
 }
 
-// Every lock is placed on a copy of the expected data: a sync lock numbers frames from byte 0 and starts a new
-// transmission; a late join continues the current transmission where it fits, or starts a new one.
+// Every lock is placed on a copy of the expected data at its bytes' byte_index: a lock from the preamble starts a
+// new transmission; a late join continues the current one where it fits, or starts a new one.
 Comparison compare(const std::vector<Reception>& receptions, const std::vector<uint8_t>& expected) {
     const int k_empty = -1;
     Comparison c;
@@ -521,20 +519,20 @@ Comparison compare(const std::vector<Reception>& receptions, const std::vector<u
         const size_t offset = reception.late_join ? late_join_offset(reception, expected) : 0;
         bool fits = reception.late_join && !copies.empty();
         for (size_t i = 0; fits && i < reception.bytes.size(); ++i) {
-            const size_t position = offset + byte_position(reception.bytes[i]);
+            const size_t position = offset + reception.bytes[i].byte_index;
             fits = position >= expected.size() || copies.back()[position] == k_empty;
         }
         if (!fits) copies.push_back(std::vector<int>(expected.size(), k_empty));
         std::vector<int>& copy = copies.back();
         for (size_t i = 0; i < reception.bytes.size(); ++i) {
             const Event& event = reception.bytes[i];
-            const size_t position = offset + byte_position(event);
+            const size_t position = offset + event.byte_index;
             if (position >= expected.size() || copy[position] != k_empty) {
                 ++c.extra;
             } else {
                 copy[position] = event.value;
             }
-            if (c.measured == 0) c.mode = event;
+            if (c.measured == 0) c.bits_per_package = event.bits_per_package;
             c.snr_db += event.snr_db;
             c.slot_ms += event.slot_ms;
             ++c.measured;
@@ -550,7 +548,7 @@ Comparison compare(const std::vector<Reception>& receptions, const std::vector<u
             }
             ++c.received;
             const int errors = mismatch_bits(expected, i, static_cast<uint8_t>(copies[t][i]));
-            c.bit_errors += errors;
+            c.bit_errors += static_cast<size_t>(errors);
             if (errors > 0) ++c.wrong;
         }
     }
@@ -631,7 +629,13 @@ int run(const Options& o) {
     if (o.tui) {
         tui.reset(new pc::Tui(pc::TuiMode::decoder));
         if (tui->open()) {
-            tui->set_profile(o.profile);
+            tui->set_profile(o.profile + " " + std::to_string(config.min_slot_ms) + "-" +
+                             std::to_string(config.max_slot_ms()) + " ms");
+            tui->set_passband(config.passband);
+            tui->set_search_range(config.search_range());
+            tui->set_field("rule", config.decision_mode == DecisionMode::adaptive
+                                       ? std::string("smart")
+                                       : "fixed " + fixed(k_percent * config.fixed_ratio, 0) + "%");
             tui->set_field("rate", std::to_string(rate_hz) + " Hz");
             console.hold(true);
         } else {
@@ -639,8 +643,11 @@ int run(const Options& o) {
             tui.reset();
         }
     }
+    console.item("receiver", receiver_text(o, config));
+    console.item("input", o.in_spec + ": " + std::to_string(rate_hz) + " Hz" +
+                              (rate_hz == unlimited::k_decoder_rate_hz ? "" : ", resampled to 8000 Hz"));
 
-    Receiver receiver(o, console, tui.get());
+    Receiver receiver(o, config, console, tui.get());
     Decoder decoder(config, &Receiver::on_event, &receiver);
     unlimited::DecoderSink decoder_sink(decoder);
     ClockedSink clocked(decoder_sink, receiver);
@@ -650,7 +657,7 @@ int run(const Options& o) {
     const bool delivered = started && input->wait();
     resampling.flush();
     const std::vector<int16_t> drain(
-        static_cast<size_t>(k_drain_slots * config.max_slot_ms() * k_rate_hz / k_ms_per_s), 0);
+        static_cast<size_t>(k_drain_slots * config.max_slot_ms() * k_rate_hz / unlimited::cli::k_ms_per_s), 0);
     clocked.write(drain.data(), drain.size());
     receiver.finish();
 
@@ -662,7 +669,7 @@ int run(const Options& o) {
     }
 
     if (o.packet)
-        std::printf("packets %zu valid, %u crc errors\n", receiver.packet_count(),
+        std::printf("packets    %zu valid, %u CRC errors\n", receiver.packet_count(),
                     static_cast<unsigned>(receiver.crc_errors()));
     const bool decoded = o.packet ? receiver.packet_count() > 0 : receiver.byte_count() > 0;
     if (o.expect_path.empty()) {
@@ -674,21 +681,18 @@ int run(const Options& o) {
     if (o.packet) unlimited::cli::packetize(expected, sent);
     const Comparison c = compare(receiver.receptions(), sent);
     const size_t bits = c.received * k_bits_per_byte;
-    std::printf("expect  %zu bytes x %zu transmission%s  received %zu  lost %zu  wrong %zu  extra %zu  "
-                "bit errors %zu/%zu (BER %.*e)  locks %zu",
+    std::printf("expect     %zu bytes x %zu transmission%s: received %zu, lost %zu, wrong %zu, extra %zu, bit errors "
+                "%zu/%zu (BER %.*e), locks %zu",
                 c.expected, c.transmissions, c.transmissions == 1 ? "" : "s", c.received, c.lost, c.wrong, c.extra,
                 c.bit_errors, bits, k_ber_digits, bits > 0 ? static_cast<double>(c.bit_errors) / bits : 0.0,
                 c.locks);
     if (c.measured > 0)
-        std::printf("  snr %s dB  T %s ms  mode %s", fixed(c.snr_db, k_db_decimals).c_str(),
-                    fixed(c.slot_ms, k_ms_decimals).c_str(),
-                    mode_text(c.mode.slot_ms, c.mode.bits_per_peak, c.mode.data_slots, c.mode.spacing,
-                              side_name(c.mode.side))
-                        .c_str());
+        std::printf(", SNR %s dB, T %s ms, N %u", fixed(c.snr_db, k_db_decimals).c_str(),
+                    fixed(c.slot_ms, k_ms_decimals).c_str(), c.bits_per_package);
     std::printf("\n");
     const bool bytes_match = c.transmissions > 0 && c.lost == 0 && c.wrong == 0 && c.extra == 0;
     const bool match = o.packet ? receiver.packet_payloads() == expected && bytes_match : bytes_match;
-    std::printf("result  %s\n", match ? "match" : "mismatch");
+    std::printf("result     %s\n", match ? "match" : "mismatch");
     return match ? k_exit_ok : k_exit_nothing;
 }
 

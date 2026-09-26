@@ -1,7 +1,8 @@
-// Unlimited self-test on an ESP32, no radio and no wiring: a packet is encoded at every preset, fed
-// straight into a Decoder in RAM, decoded, printed and compared. For each preset it prints the CPU time
-// the encoder and the decoder spend per second of audio, i.e. the load of one core at real time.
-// Results go to Serial (115200 baud); send any character to run the test again.
+// Unlimited self-test on an ESP32, no radio and no wiring: a packet is encoded with every preset, fed
+// straight into a Decoder in RAM, decoded, printed and compared. The decoder is told nothing about the speed or
+// the bits per package: it learns T and N from the signal, and the test checks it learnt the sent ones. For each
+// preset it prints the CPU time the encoder and the decoder spend per second of audio, i.e. the load of one core
+// at real time. Results go to Serial (115200 baud); send any character to run the test again.
 #include <unlimited.h>
 
 namespace {
@@ -14,7 +15,9 @@ const uint32_t k_max_trailing_ms = 3000;  // END comes about 2.4 slots after the
 const uint32_t k_ms_per_s = 1000;
 const float k_us_per_s = 1e6f;
 const float k_us_per_ms = 1000.0f;
+const float k_ms_per_s_float = 1000.0f;
 const float k_percent = 100.0f;
+const float k_slot_tolerance = 0.005f;  // the learnt T within 0.5 % of the sent one
 
 const char k_message[] = "CQ CQ DE UNLIMITED ESP32 LOOPBACK 0123456789";
 const uint8_t k_message_size = sizeof(k_message) - 1;
@@ -22,16 +25,15 @@ const uint8_t k_message_size = sizeof(k_message) - 1;
 struct Case {
     const char* name;
     unlimited::Preset preset;
-    unlimited::Profile profile;  // a default profile whose slot range covers the preset
+    unlimited::Profile profile;  // a receiver profile whose window holds the preset's T
 };
 
 const Case k_cases[] = {
-    {"fm_fast", unlimited::Preset::fm_fast, unlimited::Profile::fm},
-    {"fm", unlimited::Preset::fm, unlimited::Profile::am},
-    {"hf_fast", unlimited::Preset::hf_fast, unlimited::Profile::ssb},
+    {"hf_slow", unlimited::Preset::hf_slow, unlimited::Profile::ssb},
     {"hf", unlimited::Preset::hf, unlimited::Profile::ssb},
-    {"hf_robust", unlimited::Preset::hf_robust, unlimited::Profile::ssb},
-    {"hf_weak", unlimited::Preset::hf_weak, unlimited::Profile::ssb},
+    {"hf_fast", unlimited::Preset::hf_fast, unlimited::Profile::ssb},
+    {"am", unlimited::Preset::am, unlimited::Profile::am},
+    {"fm", unlimited::Preset::fm, unlimited::Profile::fm},
 };
 
 struct Result {
@@ -41,8 +43,7 @@ struct Result {
     uint8_t locks;
     uint8_t ends;
     uint8_t losts;
-    uint8_t bits_per_peak;  // mode of the locked event, from the header
-    uint8_t data_slots;
+    uint8_t bits_per_package;  // N of the locked event, learnt from the signal
     float tone_hz;
     float slot_ms;
     float snr_db;
@@ -67,8 +68,7 @@ void on_event(const unlimited::Event& event, void*) {
     switch (event.type) {
         case unlimited::EventType::locked:
             ++g_result.locks;
-            g_result.bits_per_peak = event.bits_per_peak;
-            g_result.data_slots = event.data_slots;
+            g_result.bits_per_package = event.bits_per_package;
             g_result.tone_hz = event.tone_hz;
             g_result.slot_ms = event.slot_ms;
             g_result.snr_db = event.snr_db;
@@ -81,6 +81,7 @@ void on_event(const unlimited::Event& event, void*) {
             break;
         case unlimited::EventType::state:
         case unlimited::EventType::slot:
+        case unlimited::EventType::package:
         case unlimited::EventType::byte:
             break;
     }
@@ -147,17 +148,19 @@ bool run_case(const Case& test_case, size_t packet_size) {
         decoder.process(g_silence, k_chunk_samples);
     }
 
+    const float sent_slot_ms = config.slot_us / k_us_per_ms;
+    const bool slot_learnt = fabsf(g_result.slot_ms / sent_slot_ms - 1.0f) <= k_slot_tolerance;
     const bool pass = started && g_result.packets == 1 && g_result.size == k_message_size &&
                       memcmp(g_result.payload, k_message, k_message_size) == 0 && g_result.locks == 1 &&
                       g_result.ends == 1 && g_result.losts == 0 && g_packets.crc_errors() == 0 &&
-                      g_result.bits_per_peak == config.bits_per_peak && g_result.data_slots == config.data_slots;
+                      g_result.bits_per_package == config.bits_per_package && slot_learnt;
     const float audio_s = static_cast<float>(audio_samples) / k_sample_rate_hz;
-    Serial.printf("%-9s T %3.0f ms, %u bits per peak, %u peaks per frame, profile %s: %s\n", test_case.name,
-                  config.slot_us / k_us_per_ms, config.bits_per_peak, config.data_slots,
-                  profile_name(test_case.profile), pass ? "PASS" : "FAIL");
-    Serial.printf("  decoded \"%.*s\" (locked at %.1f Hz, T %.0f ms, k %u, N %u, SNR %.1f dB)\n", g_result.size,
-                  g_result.payload, g_result.tone_hz, g_result.slot_ms, g_result.bits_per_peak, g_result.data_slots,
-                  g_result.snr_db);
+    const float rate = config.bits_per_package * k_ms_per_s_float / ((config.bits_per_package + 1) * sent_slot_ms);
+    Serial.printf("%-8s sent T %.0f ms, N %u (%.1f bit/s) at %u Hz; receiver profile %s: %s\n", test_case.name,
+                  sent_slot_ms, config.bits_per_package, rate, config.tone_hz, profile_name(test_case.profile),
+                  pass ? "PASS" : "FAIL");
+    Serial.printf("  decoded \"%.*s\" (learnt pitch %.1f Hz, T %.2f ms, N %u, SNR %.1f dB)\n", g_result.size,
+                  g_result.payload, g_result.tone_hz, g_result.slot_ms, g_result.bits_per_package, g_result.snr_db);
     Serial.printf("  %.1f s of audio: encoder %.0f us/s (%.2f %%), decoder %.0f us/s (%.2f %%)\n", audio_s,
                   encode_us / audio_s, k_percent * encode_us / (audio_s * k_us_per_s), decode_us / audio_s,
                   k_percent * decode_us / (audio_s * k_us_per_s));

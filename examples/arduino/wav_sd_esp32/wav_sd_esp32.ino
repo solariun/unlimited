@@ -1,6 +1,8 @@
 // Unlimited WAV writer on an ESP32: a text packet is encoded and written to /unlimited.wav on an SD card
 // with the core WAV codec (the same RIFF writer the PC tools use). Play the file into a transmitter, or
-// decode it on a PC with `unlimited_decode --in unlimited.wav --packet`.
+// decode it on a PC with `unlimited_decode --in unlimited.wav --packet`: the decoder learns the pitch, the slot
+// length and the bits per package from the signal. Preset hf: 1500 Hz beeps, 16 ms slots, 8 bits per package,
+// 55.6 bit/s, 1362-1638 Hz (fits a 2.4 kHz SSB filter).
 //
 // The encoder renders chunks that go straight into a WavWriter; a small ByteSink adapter turns its bytes
 // into SD File writes. The exact length is known up front (Encoder::duration_samples), so the header is

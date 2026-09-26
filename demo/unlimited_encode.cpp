@@ -12,9 +12,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <iterator>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -30,36 +30,32 @@ using unlimited::DecoderConfig;
 using unlimited::Encoder;
 using unlimited::EncoderConfig;
 using unlimited::EncoderStatus;
-using unlimited::GridSide;
+using unlimited::Passband;
 using unlimited::Preset;
 using unlimited::SampleSource;
-using unlimited::Spacing;
 using unlimited::cli::Arguments;
+using unlimited::cli::Console;
 using unlimited::cli::UsageError;
-using unlimited::cli::find_name;
-using unlimited::cli::band_hz;
-using unlimited::cli::config_problem;
 using unlimited::cli::fixed;
+using unlimited::cli::find_name;
 using unlimited::cli::k_exit_io;
 using unlimited::cli::k_exit_ok;
 using unlimited::cli::k_exit_usage;
 using unlimited::cli::k_presets;
 using unlimited::cli::k_profiles;
-using unlimited::cli::k_sides;
-using unlimited::cli::k_spacings;
-using unlimited::cli::mode_text;
-using unlimited::cli::side_name;
-using unlimited::cli::span_hz;
-using unlimited::cli::tone_offset_hz;
+using unlimited::cli::ms_text;
+using unlimited::cli::to_clamped;
 using unlimited::cli::to_fields;
 using unlimited::cli::to_integer;
 using unlimited::cli::to_number;
+using unlimited::cli::to_passband;
 
 namespace pc = unlimited::pc;
 namespace sim = unlimited::sim;
 
 const char* const k_program = "unlimited_encode";
 const char* const k_default_out_spec = "tx.wav";
+const char* const k_default_preset = "hf";
 
 const uint32_t k_default_rate_hz = 8000;
 const double k_default_level_dbfs = -3.0;
@@ -68,50 +64,69 @@ const double k_int16_scale = 32768.0;     // int16 <-> float in [-1, 1)
 const double k_output_peak_dbfs = -1.0;   // a louder channel output is scaled down to this peak
 const double k_amplitude_db = 20.0;
 const double k_power_db = 10.0;
-const double k_us_per_ms = 1e3;
-const double k_ms_per_s = 1e3;
-const uint32_t k_us_per_ms_int = 1000;
+const double k_us_per_s = 1e6;
+const uint32_t k_us_per_ms = 1000;
+const uint32_t k_min_profile_slot_ms = 4;   // DecoderConfig::min_slot_ms range
+const uint32_t k_max_profile_slot_ms = 32;
 
 // Samples per Encoder::render() call. A slot has at least 32 samples, so the queue is refilled several
-// times per frame (it never runs dry while data remains) and every slot is seen by the TUI.
+// times per package (it never runs dry while data remains) and every slot is seen by the TUI.
 const size_t k_render_step = 16;
 
-const int k_us_decimals = 3;  // a T in ms, to the µs
 const int k_db_decimals = 1;
-const int k_hz_decimals = 0;
-const int k_tone_decimals = 1;
-const int k_power_decimals = 2;
 const int k_seconds_decimals = 3;
+const int k_rate_decimals = 1;
 
 const char* const k_usage =
     "usage: unlimited_encode (--text STR | --in FILE) [--out SPEC] [--packet]\n"
-    "    [--profile ssb|am|fm] [--preset hf|hf_fast|hf_robust|hf_weak|fm|fm_fast] [--slot-ms X | --baud B]\n"
-    "    [--bits-per-peak|-k K] [--data-slots|-N 8|16|32] [--spacing standard|dense] [--side above|below]\n"
-    "    [--tone HZ] [--rate 8000] [--level-dbfs -3] [--lead-in-ms N] [--tune-ms N] [--sync N]\n"
-    "    [--channel clean|usb|lsb|am|fm [--snr DB] [--offset HZ] [--pivot HZ]\n"
+    "    [--preset hf_slow|hf|hf_fast|am|fm] [--slot-ms X | --baud B] [--bits N]\n"
+    "    [--tone HZ] [--passband LO:HI] [--rate 8000] [--level-dbfs -3] [--lead-in-ms N] [--tune-ms N] [--sync N]\n"
+    "    [--channel clean|usb|lsb|am|fm [--snr DB] [--offset HZ] [--pivot HZ] [--rx-passband LO:HI]\n"
     "        [--fading none|flat|good|moderate|poor|flutter] [--doppler HZ] [--qsb DEPTH_DB:RATE_HZ]\n"
     "        [--impulses RATE[:LEVEL_DB]] [--carrier HZ:DB] [--cw HZ:DB:WPM] [--agc]\n"
     "        [--fm-deviation HZ] [--no-preemphasis] [--no-deemphasis] [--clock-ppm P] [--seed N]\n"
     "        [--clean-out SPEC]]\n"
     "    [--tui] [--realtime]\n"
     "\n"
-    "Encodes data as Unlimited tone peaks and writes the audio to an output device.\n"
-    "  --text STR, --in FILE   data to send (text, or the bytes of a file)\n"
-    "  --out SPEC              wav:<path>, <path>.wav or null (default tx.wav)\n"
-    "  --packet                frame the data as CRC-16 packets of up to %u bytes\n"
-    "  --profile               receiver profile; picks the preset (ssb -> hf, am -> hf, fm -> fm)\n"
-    "  --preset                mode: T, bits per peak k, data slots N, spacing, side and f_ref\n"
-    "  --slot-ms, --baud       slot T, a whole number of ms (6..128)\n"
-    "  --bits-per-peak, -k     k = 1..8: each peak is one of 2^k tones (also --bits)\n"
-    "  --data-slots, -N        peaks per START/STOP frame, (N + 1) T <= 1152 ms (also --slots)\n"
-    "  --spacing, --side       tone spacing 8/(7T) or 1/T; grid above or below f_ref\n"
-    "  --tone HZ               f_ref (tune tone and markers). Without it a changed mode keeps the preset's\n"
-    "                          placement: fm presets 2650 Hz with the grid below, otherwise the band centred\n"
-    "                          on 1500 Hz\n"
-    "  --channel MODE          pass the audio through the channel simulator; --out gets the received\n"
-    "                          audio, --clean-out the transmitted one\n"
-    "  --tui                   terminal view of the transmission; --realtime paces it to audio time\n"
-    "exit codes: 0 written, 2 usage error, 3 input/output error\n";
+    "Sends data through a radio's audio as short beeps on one pitch: a beep in a time slot is a 1, silence is\n"
+    "a 0. START/STOP markers (the same beep with an inaudible twist) frame every package of N bits and tell\n"
+    "the receiver the timing and how loud a 1 is. The receiver finds the pitch, the slot length and N itself.\n"
+    "\n"
+    "What to send\n"
+    "  --text STR, --in FILE   the data: a text, or the bytes of a file\n"
+    "  --packet                wrap the data in CRC-16 packets of up to %u bytes, so the receiver can check it\n"
+    "  --out SPEC              where the audio goes: wav:<path>, <path>.wav or null (default tx.wav)\n"
+    "\n"
+    "The signal: start from a preset and change what you need\n"
+    "  --preset NAME           hf_slow (32 ms slots), hf (16 ms, the default), hf_fast (8 ms): 8 bits per\n"
+    "                          package, for HF SSB; am (8 ms) and fm (4 ms): 16 bits per package\n"
+    "  --slot-ms X, --baud B   the slot length T, 4..128 ms (decimals allowed), or slots per second (1000/T).\n"
+    "                          Longer slots are slower but survive more noise and fading\n"
+    "  --bits N, -N N          bits per package between START and STOP, 1..%u (also --bits-per-package)\n"
+    "  --tone HZ               the pitch, 300..2700 Hz (default 1500)\n"
+    "  --passband LO:HI        the receiver's audio filter the signal must fit (default 300:2700, a 2.4 kHz\n"
+    "                          SSB filter; 300:2100 is a 1.8 kHz one). A signal that does not fit is refused\n"
+    "  --rate HZ               audio sample rate, 8000..192000 (default 8000)\n"
+    "  --level-dbfs DB         loudness of a beep's crest (default -3)\n"
+    "  --lead-in-ms N          silence before the signal, for the PTT and the transmitter to settle\n"
+    "  --tune-ms N, --sync N   length of the tune tone (default 250 ms), markers in the sync train (8..32)\n"
+    "\n"
+    "Channel simulator: hear the signal through a radio path (--out then gets what the receiver hears)\n"
+    "  --channel MODE          clean, usb, lsb, am or fm\n"
+    "  --snr DB                signal to noise in 2500 Hz: key-down tone (usb, lsb) or carrier (am, fm)\n"
+    "  --offset HZ             mistuning: the pitch moves by it; --pivot HZ: the lsb mirror point (3000)\n"
+    "  --rx-passband LO:HI     the receiver's filter (default: --passband)\n"
+    "  --fading, --doppler, --qsb, --impulses, --carrier, --cw, --agc, --fm-deviation, --no-preemphasis,\n"
+    "  --no-deemphasis, --clock-ppm, --seed: fading, interference and radio details\n"
+    "  --clean-out SPEC        also write the transmitted audio\n"
+    "\n"
+    "Display\n"
+    "  --tui                   live view: the beep being sent, its package and byte, scope and spectrum\n"
+    "  --realtime              pace the output to audio time\n"
+    "\n"
+    "Every run prints the occupied bandwidth, whether it fits the passband, and how far the radio may be\n"
+    "mistuned (the shift tolerance).\n"
+    "exit codes: 0 written, 2 usage error or refused configuration, 3 input/output error\n";
 
 // ---------------------------------------------------------------------------
 // Command line
@@ -145,20 +160,17 @@ struct Options {
     std::string out_spec = k_default_out_spec;
     bool packet = false;
 
-    std::string profile = "ssb";
-    std::string preset;  // empty: the profile's default
+    std::string preset = k_default_preset;
     bool has_slot_ms = false;
     double slot_ms = 0.0;
     bool has_baud = false;
     double baud = 0.0;
     bool has_bits = false;
-    double bits_per_peak = 0.0;
-    bool has_slots = false;
-    double data_slots = 0.0;
-    std::string spacing;  // empty: the preset's
-    std::string side;
+    double bits = 0.0;
     bool has_tone = false;
     double tone_hz = 0.0;
+    bool has_passband = false;
+    Passband passband = Passband();
     double rate_hz = k_default_rate_hz;
     double level_dbfs = k_default_level_dbfs;
     bool has_lead_in = false;
@@ -175,6 +187,8 @@ struct Options {
     std::string fading;
     bool has_doppler = false;
     double doppler_hz = 0.0;
+    bool has_rx_passband = false;
+    Passband rx_passband = Passband();
     std::string clean_out;
 
     bool tui = false;
@@ -190,6 +204,9 @@ bool parse_channel_option(const std::string& option, Arguments& args, Options& o
         c.freq_offset_hz = to_number(option, args.value(option));
     } else if (option == "--pivot") {
         c.lsb_pivot_hz = to_number(option, args.value(option));
+    } else if (option == "--rx-passband") {
+        o.has_rx_passband = true;
+        o.rx_passband = to_passband(option, args.value(option));
     } else if (option == "--fading") {
         o.fading = args.value(option);
         find_name(k_fadings, option, o.fading);
@@ -250,9 +267,6 @@ Options parse_options(int argc, char** argv) {
             o.out_spec = args.value(option);
         } else if (option == "--packet") {
             o.packet = true;
-        } else if (option == "--profile") {
-            o.profile = args.value(option);
-            find_name(k_profiles, option, o.profile);
         } else if (option == "--preset") {
             o.preset = args.value(option);
             find_name(k_presets, option, o.preset);
@@ -262,21 +276,15 @@ Options parse_options(int argc, char** argv) {
         } else if (option == "--baud") {
             o.has_baud = true;
             o.baud = to_number(option, args.value(option));
-        } else if (option == "--bits-per-peak" || option == "-k" || option == "--bits") {
+        } else if (option == "--bits" || option == "--bits-per-package" || option == "-N") {
             o.has_bits = true;
-            o.bits_per_peak = to_number(option, args.value(option));
-        } else if (option == "--data-slots" || option == "-N" || option == "--slots") {
-            o.has_slots = true;
-            o.data_slots = to_number(option, args.value(option));
-        } else if (option == "--spacing") {
-            o.spacing = args.value(option);
-            find_name(k_spacings, option, o.spacing);
-        } else if (option == "--side") {
-            o.side = args.value(option);
-            find_name(k_sides, option, o.side);
+            o.bits = to_number(option, args.value(option));
         } else if (option == "--tone") {
             o.has_tone = true;
             o.tone_hz = to_number(option, args.value(option));
+        } else if (option == "--passband") {
+            o.has_passband = true;
+            o.passband = to_passband(option, args.value(option));
         } else if (option == "--rate") {
             o.rate_hz = to_number(option, args.value(option));
         } else if (option == "--level-dbfs") {
@@ -310,102 +318,108 @@ Options parse_options(int argc, char** argv) {
     return o;
 }
 
-bool fm_preset(Preset preset) {
-    return preset == Preset::fm || preset == Preset::fm_fast;
+bool changed_signal(const Options& o) {
+    return o.has_slot_ms || o.has_baud || o.has_bits || o.has_tone || o.has_passband;
 }
 
-Preset base_preset(const Options& o) {
-    return o.preset.empty() ? find_name(k_profiles, "--profile", o.profile).preset
-                            : find_name(k_presets, "--preset", o.preset).preset;
-}
-
-bool mode_changed(const Options& o) {
-    return o.has_slot_ms || o.has_baud || o.has_bits || o.has_slots || !o.spacing.empty() || !o.side.empty();
-}
-
-// T in µs; --slot-ms and --baud must give a whole number of ms.
-uint32_t whole_ms_slot_us(const std::string& option, double slot_ms) {
-    const uint32_t slot_us = to_integer<uint32_t>(option, slot_ms * k_us_per_ms);
-    if (slot_us % k_us_per_ms_int != 0)
-        throw UsageError(option + " gives T " + fixed(slot_us / k_us_per_ms, k_us_decimals) +
-                         " ms; T must be a whole number of ms");
-    return slot_us;
-}
-
-// f_ref of a changed mode without --tone (spec 1.3): fm presets keep k_fm_tone_hz with the grid below,
-// otherwise the band is centred on k_band_centre_hz. A band that cannot fit is left to valid() to refuse.
-uint16_t placed_tone_hz(const EncoderConfig& config, bool fm) {
-    if (fm && config.side == GridSide::below) return unlimited::k_fm_tone_hz;
-    const double half_span = span_hz(config.bits_per_peak, config.spacing, config.slot_us / k_us_per_ms) / 2.0;
-    const double tone = config.side == GridSide::below ? std::ceil(unlimited::k_band_centre_hz + half_span)
-                                                       : std::floor(unlimited::k_band_centre_hz - half_span);
-    return static_cast<uint16_t>(std::max<double>(unlimited::k_min_tone_hz,
-                                                  std::min<double>(unlimited::k_max_tone_hz, tone)));
-}
-
-bool bits_in_range(const EncoderConfig& config) {
-    return config.bits_per_peak >= 1 && config.bits_per_peak <= unlimited::k_max_bits_per_peak;
-}
-
+// The preset with the options applied. Values far out of range are clamped into the field, so that check() names
+// the rule they break.
 EncoderConfig encoder_config(const Options& o) {
-    const Preset base = base_preset(o);
-    EncoderConfig config = EncoderConfig::from_preset(base, to_integer<uint32_t>("--rate", o.rate_hz));
-    if (o.has_slot_ms) config.slot_us = whole_ms_slot_us("--slot-ms", o.slot_ms);
+    const uint32_t rate_hz = to_clamped<uint32_t>(o.rate_hz);
+    EncoderConfig config = EncoderConfig::from_preset(find_name(k_presets, "--preset", o.preset).value, rate_hz);
+    if (o.has_slot_ms) config.slot_us = to_clamped<uint32_t>(o.slot_ms * k_us_per_ms);
     if (o.has_baud) {
-        if (!(o.baud > 0.0)) throw UsageError("--baud must be positive");
-        config.slot_us = whole_ms_slot_us("--baud", k_ms_per_s / o.baud);
+        if (!(o.baud > 0.0)) throw UsageError("--baud must be above 0");
+        config.slot_us = to_clamped<uint32_t>(k_us_per_s / o.baud);
     }
-    if (o.has_bits) config.bits_per_peak = to_integer<uint8_t>("--bits-per-peak", o.bits_per_peak);
-    if (o.has_slots) config.data_slots = to_integer<uint8_t>("--data-slots", o.data_slots);
-    if (!o.spacing.empty()) config.spacing = find_name(k_spacings, "--spacing", o.spacing).spacing;
-    if (!o.side.empty()) config.side = find_name(k_sides, "--side", o.side).side;
-    if (o.has_tone)
-        config.tone_hz = to_integer<uint16_t>("--tone", o.tone_hz);
-    else if (mode_changed(o) && bits_in_range(config) && config.slot_us > 0)
-        config.tone_hz = placed_tone_hz(config, fm_preset(base));
-    if (o.level_dbfs > 0.0) throw UsageError("--level-dbfs must be <= 0");
-    config.amplitude = to_integer<int16_t>("--level-dbfs",
-                                            k_dbfs_reference * std::pow(10.0, o.level_dbfs / k_amplitude_db));
+    if (o.has_bits) config.bits_per_package = to_clamped<uint8_t>(o.bits);
+    if (o.has_tone) config.tone_hz = to_clamped<uint16_t>(o.tone_hz);
+    if (o.has_passband) config.passband = o.passband;
+    if (o.level_dbfs > 0.0) throw UsageError("--level-dbfs must be 0 or below (0 dBFS is full scale)");
+    config.amplitude = to_clamped<int16_t>(k_dbfs_reference * std::pow(10.0, o.level_dbfs / k_amplitude_db));
     if (o.has_lead_in) config.lead_in_ms = to_integer<uint16_t>("--lead-in-ms", o.lead_in_ms);
     if (o.has_tune) config.tune_ms = to_integer<uint16_t>("--tune-ms", o.tune_ms);
-    if (o.has_sync) config.sync_markers = to_integer<uint8_t>("--sync", o.sync);
-    if (!config.valid()) throw UsageError("invalid signal: " + config_problem(config));
+    if (o.has_sync) config.sync_markers = to_clamped<uint8_t>(o.sync);
     return config;
 }
 
-// The preset in use: named, the profile's default, or "custom" when the mode was given directly.
-std::string preset_name(const Options& o) {
-    if (mode_changed(o)) return "custom";
-    if (!o.preset.empty()) return o.preset;
-    const Preset preset = base_preset(o);
-    for (size_t i = 0; i < sizeof(k_presets) / sizeof(k_presets[0]); ++i)
-        if (k_presets[i].preset == preset) return k_presets[i].name;
-    return o.profile;
+// "preset hf", or "custom, from preset hf" when the signal was changed.
+std::string preset_text(const Options& o) {
+    return (changed_signal(o) ? "custom, from preset " : "preset ") + o.preset;
 }
 
-// Empty when the --profile receiver decodes this signal; otherwise why not (the sender may still mean
-// another receiver profile).
-std::string profile_note(const Options& o, const EncoderConfig& config) {
-    const DecoderConfig receiver = DecoderConfig::for_profile(find_name(k_profiles, "--profile", o.profile).profile);
-    const uint32_t slot_ms = config.slot_us / k_us_per_ms_int;
-    if (slot_ms < receiver.min_slot_ms || slot_ms > receiver.max_slot_ms() || config.tone_hz < receiver.min_tone_hz ||
-        config.tone_hz > receiver.max_tone_hz)
-        return "the " + o.profile + " profile decodes T " + std::to_string(receiver.min_slot_ms) + ".." +
-               std::to_string(receiver.max_slot_ms()) + " ms and f_ref " + std::to_string(receiver.min_tone_hz) +
-               ".." + std::to_string(receiver.max_tone_hz) + " Hz; decode this signal with another profile";
-    return "";
+// The pitch and T are in range, so the band means something.
+bool band_known(const EncoderConfig& config) {
+    return config.tone_hz >= unlimited::k_min_tone_hz && config.tone_hz <= unlimited::k_max_tone_hz &&
+           config.slot_us >= unlimited::k_min_slot_us && config.slot_us <= unlimited::k_max_slot_us;
+}
+
+// The receiver profiles whose window holds T and whose tone search holds the pitch (spec 1.7 "heard by").
+std::string heard_by(const EncoderConfig& config) {
+    std::vector<std::string> names;
+    for (size_t i = 0; i < sizeof(k_profiles) / sizeof(k_profiles[0]); ++i) {
+        const DecoderConfig receiver = DecoderConfig::for_profile(k_profiles[i].value);
+        const Passband search = receiver.search_range();
+        const bool window = config.slot_us >= receiver.min_slot_ms * k_us_per_ms &&
+                            config.slot_us <= receiver.max_slot_ms() * k_us_per_ms;
+        if (window && config.tone_hz >= search.low_hz && config.tone_hz <= search.high_hz)
+            names.push_back(k_profiles[i].name);
+    }
+    if (names.empty()) {
+        const uint32_t needed = (config.slot_us + unlimited::k_speed_span * k_us_per_ms - 1) /
+                                (unlimited::k_speed_span * k_us_per_ms);
+        const uint32_t min_slot_ms = std::max(k_min_profile_slot_ms, std::min(k_max_profile_slot_ms, needed));
+        return "no receiver profile as it stands: give the receiver --min-slot-ms " + std::to_string(min_slot_ms) +
+               " and a --passband that holds the band";
+    }
+    std::string text = "receiver profile" + std::string(names.size() > 1 ? "s " : " ");
+    for (size_t i = 0; i < names.size(); ++i)
+        text += (i == 0 ? "" : (i + 1 == names.size() ? " and " : ", ")) + names[i];
+    return "heard by the " + text;
 }
 
 // ---------------------------------------------------------------------------
 // Data
 // ---------------------------------------------------------------------------
 
-// Average power of the frames over the key-down power (spec 1.3): every data slot holds a peak, every frame
-// one marker (its STOP; the START is the previous STOP), each by its slot energy.
-double average_power_ratio(const EncoderConfig& config, size_t bytes) {
-    const double peaks = std::ceil(static_cast<double>(bytes) * unlimited::k_bits_per_byte / config.bits_per_peak);
-    const double frames = std::ceil(peaks / config.data_slots);
-    return (peaks * unlimited::k_peak_energy + frames * unlimited::k_marker_energy) / (peaks + frames);
+int bit_count(uint8_t value) {
+    int count = 0;
+    for (unsigned v = value; v != 0; v &= v - 1) ++count;
+    return count;
+}
+
+size_t package_count(const EncoderConfig& config, size_t bytes) {
+    const size_t bits = bytes * unlimited::k_bits_per_byte;
+    return (bits + config.bits_per_package - 1) / config.bits_per_package;
+}
+
+// Average power of the packages over the key-down power (spec 1.3): each data 1 and each STOP by its slot energy.
+double average_power_ratio(const EncoderConfig& config, const std::vector<uint8_t>& data) {
+    size_t ones = 0;
+    for (size_t i = 0; i < data.size(); ++i) ones += static_cast<size_t>(bit_count(data[i]));
+    const double packages = static_cast<double>(package_count(config, data.size()));
+    const double bits = static_cast<double>(data.size() * unlimited::k_bits_per_byte);
+    return (ones * unlimited::k_one_energy + packages * unlimited::k_marker_energy) / (bits + packages);
+}
+
+size_t tune_slots(const EncoderConfig& config) {
+    const size_t slots = (static_cast<size_t>(config.tune_ms) * k_us_per_ms + config.slot_us - 1) / config.slot_us;
+    return std::max<size_t>(slots, unlimited::k_min_tune_slots);
+}
+
+std::string count_text(size_t count, const char* one, const char* many) {
+    return std::to_string(count) + " " + (count == 1 ? one : many);
+}
+
+// "34 packages of 8 bits", "5 packages of 3 bits and a last one of 1".
+std::string packages_text(const EncoderConfig& config, size_t bytes) {
+    const size_t packages = package_count(config, bytes);
+    const size_t last = bytes * unlimited::k_bits_per_byte - (packages - 1) * config.bits_per_package;
+    if (last == config.bits_per_package)
+        return count_text(packages, "package", "packages") + " of " + std::to_string(last) + " bits";
+    if (packages == 1) return "1 package of " + std::to_string(last) + " bits";
+    return count_text(packages - 1, "package", "packages") + " of " + std::to_string(config.bits_per_package) +
+           " bits and a last one of " + std::to_string(last);
 }
 
 // ---------------------------------------------------------------------------
@@ -536,8 +550,38 @@ std::unique_ptr<pc::OutputDevice> open_device(const std::string& spec) {
     return device;
 }
 
+std::string signed_hz(double hz) {
+    return (hz > 0.0 ? "+" : "") + fixed(hz, 0) + " Hz";
+}
+
+// "usb, SNR 10.0 dB key-down (5.7 dB average power), offset +80 Hz, receiver filter 300-2700 Hz"
+std::string channel_text(const Options& o, const sim::ChannelConfig& c, double power_ratio, double gain_db) {
+    std::string text = o.channel_name;
+    if (c.mode == sim::Mode::usb || c.mode == sim::Mode::lsb) {
+        text += ", SNR " + fixed(c.snr_db, k_db_decimals) + " dB key-down (" +
+                fixed(c.snr_db + k_power_db * std::log10(power_ratio), k_db_decimals) + " dB average power)";
+    } else if (c.mode != sim::Mode::clean) {
+        text += ", SNR " + fixed(c.snr_db, k_db_decimals) + " dB carrier";
+    }
+    if (c.mode == sim::Mode::fm)
+        text += ", CNR " + fixed(sim::fm_cnr_db(c), k_db_decimals) + " dB in " + fixed(c.fm_if_bandwidth_hz, 0) + " Hz";
+    if (c.mode != sim::Mode::clean) {
+        text += ", offset " + signed_hz(c.freq_offset_hz);
+        const double high = c.mode == sim::Mode::fm ? c.fm_audio_high_hz : c.rx_high_hz;
+        text += ", receiver filter " + fixed(c.rx_low_hz, 0) + "-" + fixed(high, 0) + " Hz";
+    }
+    if (!o.fading.empty() && o.fading != "none") text += ", fading " + o.fading;
+    return text + "; output gain " + fixed(gain_db, k_db_decimals) + " dB";
+}
+
 int run(const Options& o) {
     const EncoderConfig config = encoder_config(o);
+    const std::string problem = unlimited::cli::encoder_problem(config);
+    if (!problem.empty()) {
+        if (band_known(config))
+            std::fprintf(stderr, "%s: %s\n", k_program, unlimited::cli::bandwidth_line(config).c_str());
+        throw UsageError("refused: " + problem);
+    }
 
     std::vector<uint8_t> payload;
     if (o.has_text) {
@@ -555,6 +599,10 @@ int run(const Options& o) {
     if (o.channel) {
         if (!o.fading.empty()) sim::apply_preset(channel_config, find_name(k_fadings, "--fading", o.fading).preset);
         if (o.has_doppler) channel_config.doppler_spread_hz = o.doppler_hz;
+        const Passband receiver = o.has_rx_passband ? o.rx_passband : config.passband;
+        channel_config.rx_low_hz = receiver.low_hz;
+        channel_config.rx_high_hz = receiver.high_hz;
+        if (channel_config.mode == sim::Mode::fm) channel_config.fm_audio_high_hz = receiver.high_hz;
         channel_config.sample_rate = config.sample_rate_hz;
         channel_config.signal_level = config.amplitude / k_int16_scale;
         try {
@@ -572,25 +620,62 @@ int run(const Options& o) {
         if (clean_output == nullptr) return k_exit_io;
     }
 
+    Console console;
+    const double slot_ms = unlimited::cli::slot_ms_of(config.slot_us);
+    const double power_ratio = average_power_ratio(config, data);
+    const uint32_t duration = Encoder(config).duration_samples(data.size());
+    std::string what = std::to_string(payload.size()) + (payload.size() == 1 ? " byte" : " bytes");
+    what += o.has_text ? " of text" : " from " + o.data_path;
+    if (o.packet)
+        what += " in " + std::to_string(packets) + (packets == 1 ? " packet (" : " packets (") +
+                std::to_string(data.size()) + " bytes with the framing)";
+
     std::unique_ptr<pc::Tui> tui;
-    std::vector<StatusMark> marks;
     if (o.tui) {
         tui.reset(new pc::Tui(pc::TuiMode::encoder));
         if (tui->open()) {
-            tui->set_profile(preset_name(o));
+            tui->set_profile(changed_signal(o) ? "custom" : o.preset);
             tui->set_tone_hz(config.tone_hz);
-            tui->set_slot_ms(static_cast<float>(config.slot_us / k_us_per_ms));
-            tui->set_mode(config.bits_per_peak, config.data_slots, config.spacing, config.side);
+            tui->set_slot_ms(static_cast<float>(slot_ms));
+            tui->set_package(config.bits_per_package);
+            tui->set_passband(config.passband);
+            tui->set_search_range(unlimited::search_range(config));
             tui->set_field("rate", std::to_string(config.sample_rate_hz) + " Hz");
             if (o.channel)
                 tui->set_field("channel", o.channel_name + " " + fixed(channel_config.snr_db, k_db_decimals) + " dB");
+            console.hold(true);
         } else {
             std::fprintf(stderr, "%s: --tui needs a terminal on stdout; plain output\n", k_program);
             tui.reset();
         }
     }
-    std::vector<StatusMark>* recorded = tui != nullptr ? &marks : nullptr;
 
+    console.item("data", what);
+    console.item("signal", preset_text(o) + ": pitch " + std::to_string(config.tone_hz) + " Hz, slot T " +
+                               ms_text(slot_ms) + " ms (" +
+                               unlimited::cli::trimmed(unlimited::cli::k_ms_per_s / slot_ms,
+                                                       unlimited::cli::k_baud_decimals) +
+                               " baud), N " + std::to_string(config.bits_per_package) + " bits per package, " +
+                               fixed(unlimited::cli::net_bit_rate(config.bits_per_package, slot_ms), k_rate_decimals) +
+                               " bit/s net");
+    console.item("bandwidth", unlimited::cli::bandwidth_line(config));
+    console.item("emission", "-26 dB width " + std::to_string(unlimited::width_26db_hz(config.slot_us)) +
+                                 " Hz, -40 dB width " + std::to_string(unlimited::width_40db_hz(config.slot_us)) +
+                                 " Hz");
+    console.item("receivers", heard_by(config));
+    console.item("airtime", fixed(static_cast<double>(duration) / config.sample_rate_hz, k_seconds_decimals) +
+                                " s: lead-in " + std::to_string(config.lead_in_ms) + " ms, tune tone " +
+                                std::to_string(tune_slots(config)) + " slots, sync " +
+                                std::to_string(config.sync_markers) + " markers, " +
+                                packages_text(config, data.size()) + ", END, tail " + std::to_string(config.tail_ms) +
+                                " ms");
+    const double crest_dbfs = k_amplitude_db * std::log10(config.amplitude / k_dbfs_reference);
+    console.item("level", "crest " + fixed(crest_dbfs, k_db_decimals) + " dBFS; the packages' average power is " +
+                              fixed(-k_power_db * std::log10(power_ratio), k_db_decimals) +
+                              " dB below the key-down tone");
+
+    std::vector<StatusMark> marks;
+    std::vector<StatusMark>* recorded = tui != nullptr ? &marks : nullptr;
     Encoder encoder(config);
     TransmitSource transmit(encoder, data, recorded);
     if (!transmit.start()) throw UsageError("the encoder did not start");
@@ -618,50 +703,10 @@ int run(const Options& o) {
     }
     if (tui != nullptr) tui->close();
 
-    const double slot_ms = config.slot_us / k_us_per_ms;
-    double low_hz = 0.0;
-    double high_hz = 0.0;
-    band_hz(config, low_hz, high_hz);
-    const double side = config.side == GridSide::above ? 1.0 : -1.0;
-    const unsigned top_tone = (1u << config.bits_per_peak) - 1u;
-    const double first_tone_hz = config.tone_hz + side * tone_offset_hz(0, config.spacing, slot_ms);
-    const double last_tone_hz = config.tone_hz + side * tone_offset_hz(top_tone, config.spacing, slot_ms);
-    std::printf("data     %zu byte%s", payload.size(), payload.size() == 1 ? "" : "s");
-    if (o.packet) std::printf(" in %zu packet%s, %zu bytes framed", packets, packets == 1 ? "" : "s", data.size());
-    std::printf("\n");
-    std::printf("signal   %s: %s, %u bytes per frame\n", preset_name(o).c_str(),
-                mode_text(slot_ms, config.bits_per_peak, config.data_slots, config.spacing, side_name(config.side))
-                    .c_str(),
-                static_cast<unsigned>(config.frame_bytes()));
-    std::printf("tones    f_ref %u Hz, tone 0 at %s Hz, tone %u at %s Hz, band %s..%s Hz\n",
-                static_cast<unsigned>(config.tone_hz), fixed(first_tone_hz, k_tone_decimals).c_str(),
-                top_tone, fixed(last_tone_hz, k_tone_decimals).c_str(),
-                fixed(low_hz, k_hz_decimals).c_str(), fixed(high_hz, k_hz_decimals).c_str());
-    std::printf("audio    %s s, %zu samples at %u Hz -> %s, level %s dBFS, average %s dB of key-down\n",
-                fixed(static_cast<double>(samples) / config.sample_rate_hz, k_seconds_decimals).c_str(), samples,
-                static_cast<unsigned>(config.sample_rate_hz), o.out_spec.c_str(),
-                fixed(k_amplitude_db * std::log10(config.amplitude / k_dbfs_reference), k_db_decimals).c_str(),
-                fixed(k_power_db * std::log10(average_power_ratio(config, data.size())), k_power_decimals).c_str());
-    if (!o.clean_out.empty()) std::printf("clean    -> %s\n", o.clean_out.c_str());
-    if (o.channel) {
-        const sim::Mode mode = channel_config.mode;
-        std::printf("channel  %s", o.channel_name.c_str());
-        if (mode == sim::Mode::usb || mode == sim::Mode::lsb) {
-            std::printf(", snr %s dB key-down, %s dB average power",
-                        fixed(channel_config.snr_db, k_db_decimals).c_str(),
-                        fixed(channel_config.snr_db + k_power_db * std::log10(average_power_ratio(config, data.size())),
-                              k_db_decimals)
-                            .c_str());
-        } else if (mode != sim::Mode::clean) {
-            std::printf(", snr %s dB carrier", fixed(channel_config.snr_db, k_db_decimals).c_str());
-        }
-        if (mode == sim::Mode::fm)
-            std::printf(", cnr %s dB in %s Hz", fixed(sim::fm_cnr_db(channel_config), k_db_decimals).c_str(),
-                        fixed(channel_config.fm_if_bandwidth_hz, 0).c_str());
-        std::printf(", output gain %s dB\n", fixed(gain_db, k_db_decimals).c_str());
-    }
-    const std::string note = profile_note(o, config);
-    if (!note.empty()) std::fprintf(stderr, "%s: note: %s\n", k_program, note.c_str());
+    console.item("audio", std::to_string(samples) + " samples at " + std::to_string(config.sample_rate_hz) + " Hz -> " +
+                              o.out_spec + (o.clean_out.empty() ? "" : " (transmitted audio -> " + o.clean_out + ")"));
+    if (o.channel) console.item("channel", channel_text(o, channel_config, power_ratio, gain_db));
+    console.hold(false);
 
     if (!transmit.complete()) {
         std::fprintf(stderr, "%s: the transmission ended before all data was sent\n", k_program);
@@ -680,7 +725,8 @@ int main(int argc, char** argv) {
     try {
         const Options options = parse_options(argc, argv);
         if (options.help) {
-            std::printf(k_usage, static_cast<unsigned>(unlimited::k_packet_max_payload));
+            std::printf(k_usage, static_cast<unsigned>(unlimited::k_packet_max_payload),
+                        static_cast<unsigned>(unlimited::k_max_bits_per_package));
             return k_exit_ok;
         }
         return run(options);

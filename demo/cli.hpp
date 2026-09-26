@@ -18,8 +18,9 @@
 #include <string>
 #include <vector>
 
-// Command-line helpers shared by the demos: argument reader, number parsing, name tables, mode text, file
-// reading and the --packet framing.
+// Command-line helpers shared by the demos: argument reader, number parsing, name tables, the bandwidth line, the
+// plain-words reason for a refused configuration, file reading, the --packet framing and the console that holds lines
+// while the TUI owns the screen.
 namespace unlimited {
 namespace cli {
 
@@ -28,6 +29,11 @@ const int k_exit_usage = 2;
 const int k_exit_io = 3;
 
 const int k_range_decimals = 1;  // how an out-of-range value is printed
+const int k_ms_max_decimals = 3; // a T given in ms, to the µs
+const int k_baud_decimals = 2;
+const double k_us_per_ms = 1e3;
+const double k_ms_per_s = 1e3;
+const uint32_t k_us_per_ms_int = 1000;
 
 class UsageError : public std::runtime_error {
 public:
@@ -38,6 +44,20 @@ inline std::string fixed(double value, int decimals) {
     char text[64];
     std::snprintf(text, sizeof(text), "%.*f", decimals, value);
     return text;
+}
+
+// A number without trailing zeros: 16, 12.5, 31.25.
+inline std::string trimmed(double value, int max_decimals) {
+    std::string text = fixed(value, max_decimals);
+    if (text.find('.') == std::string::npos) return text;
+    while (!text.empty() && text[text.size() - 1] == '0') text.erase(text.size() - 1);
+    if (!text.empty() && text[text.size() - 1] == '.') text.erase(text.size() - 1);
+    return text;
+}
+
+// A duration in ms, to the µs: 16, 12.5, 16.001.
+inline std::string ms_text(double ms) {
+    return trimmed(ms, k_ms_max_decimals);
 }
 
 class Arguments {
@@ -95,6 +115,14 @@ T to_integer(const std::string& option, double value) {  // rounded; must fit T 
     return static_cast<T>(std::llround(value));
 }
 
+// Rounded and clamped to T's range, so that a value far outside a rule still reaches EncoderConfig::check() or
+// DecoderConfig::check(), which name the rule in plain words.
+template <typename T>
+T to_clamped(double value) {
+    const double high = static_cast<double>(std::numeric_limits<T>::max());
+    return static_cast<T>(std::llround(std::max(0.0, std::min(high, value))));
+}
+
 template <typename T, std::size_t N>
 const T& find_name(const T (&table)[N], const std::string& option, const std::string& name) {
     for (std::size_t i = 0; i < N; ++i)
@@ -104,139 +132,232 @@ const T& find_name(const T (&table)[N], const std::string& option, const std::st
     throw UsageError(option + ": '" + name + "' is not one of " + names);
 }
 
+template <typename T, std::size_t N, typename V>
+const char* name_of(const T (&table)[N], V value) {
+    for (std::size_t i = 0; i < N; ++i)
+        if (table[i].value == value) return table[i].name;
+    return "?";
+}
+
 struct PresetName {
     const char* name;
-    Preset preset;
+    Preset value;
 };
 
-const PresetName k_presets[] = {{"fm_fast", Preset::fm_fast}, {"fm", Preset::fm},
-                                {"hf_fast", Preset::hf_fast}, {"hf", Preset::hf},
-                                {"hf_robust", Preset::hf_robust}, {"hf_weak", Preset::hf_weak}};
+const PresetName k_presets[] = {{"hf_slow", Preset::hf_slow},
+                                {"hf", Preset::hf},
+                                {"hf_fast", Preset::hf_fast},
+                                {"am", Preset::am},
+                                {"fm", Preset::fm}};
 
 struct ProfileName {
     const char* name;
-    Profile profile;
-    Preset preset;  // the profile's default sender speed
+    Profile value;
 };
 
-const ProfileName k_profiles[] = {
-    {"ssb", Profile::ssb, Preset::hf}, {"am", Profile::am, Preset::hf}, {"fm", Profile::fm, Preset::fm}};
+const ProfileName k_profiles[] = {{"ssb", Profile::ssb}, {"am", Profile::am}, {"fm", Profile::fm}};
 
-struct SpacingName {
+struct RuleName {
     const char* name;
-    Spacing spacing;
+    DecisionMode value;
 };
 
-const SpacingName k_spacings[] = {{"standard", Spacing::standard}, {"dense", Spacing::dense}};
+const RuleName k_rules[] = {{"adaptive", DecisionMode::adaptive}, {"fixed", DecisionMode::fixed_ratio}};
 
-struct SideName {
-    const char* name;
-    GridSide side;
-};
-
-const SideName k_sides[] = {{"above", GridSide::above}, {"below", GridSide::below}};
-
-inline const char* spacing_name(Spacing spacing) {
-    return spacing == Spacing::dense ? "dense" : "standard";
+// "300:2700" -> {300, 2700}; each edge a whole number of Hz (check() judges the pair).
+inline Passband to_passband(const std::string& option, const std::string& text) {
+    const std::vector<double> edges = to_fields(option, text, 2, 2);
+    Passband passband;
+    passband.low_hz = to_integer<uint16_t>(option, edges[0]);
+    passband.high_hz = to_integer<uint16_t>(option, edges[1]);
+    return passband;
 }
 
-inline const char* side_name(GridSide side) {
-    return side == GridSide::above ? "above" : "below";
+inline double slot_ms_of(uint32_t slot_us) {
+    return slot_us / k_us_per_ms;
 }
 
-inline const char* side_name(std::int8_t side) {  // decoder events: +1 grid above f_ref as received, -1 below
-    return side > 0 ? "above" : "below";
+// Net rate (spec 1.7): N bits per (N + 1) slots of T.
+inline double net_bit_rate(unsigned bits_per_package, double slot_ms) {
+    return slot_ms > 0.0 ? bits_per_package * k_ms_per_s / ((bits_per_package + 1) * slot_ms) : 0.0;
 }
 
-const double k_ms_per_s = 1e3;
-const double k_us_per_ms = 1e3;
-const int k_slot_ms_decimals = 0;  // T is a whole number of ms once the mode is known
-const int k_rate_decimals = 1;
-const int k_us_decimals = 3;       // a T in ms, to the µs
-const int k_hz_decimals = 0;
-
-// Net rate of a mode (spec 1.4): N k bits per (N + 1) slots.
-inline double net_bit_rate(unsigned bits_per_peak, unsigned data_slots, double slot_ms) {
-    return data_slots * bits_per_peak * k_ms_per_s / ((data_slots + 1) * slot_ms);
+inline std::string range_text(uint16_t low_hz, uint16_t high_hz) {
+    return std::to_string(low_hz) + "-" + std::to_string(high_hz);
 }
 
-// Distance of grid tone n from f_ref (spec 1.3): (G + n c) / T, c = 8/7 (standard) or 1 (dense).
-inline double tone_offset_hz(unsigned tone, Spacing spacing, double slot_ms) {
-    const double standard = static_cast<double>(k_standard_spacing_num) / k_standard_spacing_den;
-    const double spacing_units = spacing == Spacing::dense ? 1.0 : standard;
-    return (k_grid_guard + tone * spacing_units) * k_ms_per_s / slot_ms;
+inline std::string passband_text(const Passband& passband) {
+    return range_text(passband.low_hz, passband.high_hz) + " Hz";
 }
 
-// Distance from f_ref to the farthest data or header tone: header tones use the standard grid in every mode.
-inline double span_hz(unsigned bits_per_peak, Spacing spacing, double slot_ms) {
-    const double data = tone_offset_hz((1u << bits_per_peak) - 1u, spacing, slot_ms);
-    const double header = tone_offset_hz(k_header_slots - 1u, Spacing::standard, slot_ms);
-    return std::max(data, header);
+// Half of the occupied band at slot_us: the room a pitch needs from each passband edge.
+inline uint16_t half_band_hz(uint32_t slot_us) {
+    const Band band = occupied_band(k_default_tone_hz, slot_us);
+    return static_cast<uint16_t>(band.width_hz / 2);
 }
 
-// Lowest and highest data or header tone (f_ref included), Hz.
-inline void band_hz(const EncoderConfig& config, double& low, double& high) {
-    const double span = span_hz(config.bits_per_peak, config.spacing, config.slot_us / k_us_per_ms);
-    low = config.side == GridSide::below ? config.tone_hz - span : config.tone_hz;
-    high = config.side == GridSide::below ? config.tone_hz : config.tone_hz + span;
+// The bandwidth line (spec 7), e.g. "occupied bandwidth 276 Hz (1362-1638 Hz); passband 300-2700 Hz: fits; shift
+// tolerance -1062/+1062 Hz". The tolerance is how far the pitch may move down / up (mistuning) and still be heard:
+// `fit` is passband_fit() limited by the receiver's pitch search (spec 1.5), never the pure filter fit.
+inline std::string bandwidth_line(const Band& band, const Passband& passband, const PassbandFit& fit) {
+    const std::string line = "occupied bandwidth " + std::to_string(band.width_hz) + " Hz (" +
+                             range_text(band.low_hz, band.high_hz) + " Hz); passband " + passband_text(passband) +
+                             ": ";
+    if (!passband_valid(passband))
+        return line + "not a valid passband (it needs LO < HI <= " + std::to_string(k_max_passband_hz) + " Hz)";
+    if (fit.fits)
+        return line + "fits; shift tolerance -" + std::to_string(fit.margin_low_hz) + "/+" +
+               std::to_string(fit.margin_high_hz) + " Hz";
+    std::string outside;
+    if (fit.margin_low_hz < 0) outside = std::to_string(-fit.margin_low_hz) + " Hz below";
+    if (fit.margin_high_hz < 0)
+        outside += (outside.empty() ? "" : " and ") + std::to_string(-fit.margin_high_hz) + " Hz above";
+    return line + "does not fit (" + outside + " the passband)";
 }
 
-// The EncoderConfig::check() rule that `config` breaks, as the usage error that names it (spec 7); empty when valid.
-inline std::string config_problem(const EncoderConfig& config) {
-    const double slot_ms = config.slot_us / k_us_per_ms;
-    const uint32_t us_per_ms = static_cast<uint32_t>(k_us_per_ms);
+// The sender's line: the receiver that hears it by default (passband_fit(config)).
+inline std::string bandwidth_line(const EncoderConfig& config) {
+    return bandwidth_line(occupied_band(config), config.passband, passband_fit(config));
+}
+
+// A received signal's measured pitch and T, rounded to the integers the band formulas take.
+inline uint16_t received_tone_hz(float tone_hz) {
+    return static_cast<uint16_t>(std::lround(std::max(0.0f, tone_hz)));
+}
+
+inline uint32_t received_slot_us(float slot_ms) {
+    return static_cast<uint32_t>(std::lround(std::max(0.0f, slot_ms) * k_us_per_ms));
+}
+
+// The band a received signal occupies.
+inline Band received_band(float tone_hz, float slot_ms) {
+    return occupied_band(received_tone_hz(tone_hz), received_slot_us(slot_ms));
+}
+
+// The receiver's line: the received signal against its own passband, the tolerance limited by its own pitch search.
+inline std::string bandwidth_line(const DecoderConfig& config, float tone_hz, float slot_ms) {
+    const uint16_t tone = received_tone_hz(tone_hz);
+    const uint32_t slot_us = received_slot_us(slot_ms);
+    return bandwidth_line(occupied_band(tone, slot_us), config.passband,
+                          passband_fit(tone, slot_us, config.passband, config.search_range()));
+}
+
+// Why the passband refuses the signal, and what to change.
+inline std::string outside_passband_problem(const EncoderConfig& config) {
+    const Band band = occupied_band(config);
+    const uint16_t half = static_cast<uint16_t>(band.width_hz / 2);
+    const int passband_width = config.passband.high_hz - config.passband.low_hz;
+    const std::string what = "the signal does not fit the receiver's passband: at T = " +
+                             ms_text(slot_ms_of(config.slot_us)) + " ms it is " + std::to_string(band.width_hz) +
+                             " Hz wide (" + range_text(band.low_hz, band.high_hz) + " Hz around the pitch " +
+                             std::to_string(config.tone_hz) + " Hz) and the passband is " +
+                             passband_text(config.passband);
+    if (band.width_hz > passband_width)
+        return what + ", only " + std::to_string(passband_width) +
+               " Hz wide; use longer slots (--slot-ms, or a slower --preset) or a wider --passband";
+    const int lowest = std::max<int>(config.passband.low_hz + half, k_min_tone_hz);
+    const int highest = std::min<int>(config.passband.high_hz - half, k_max_tone_hz);
+    if (lowest > highest)
+        return what + "; no pitch between " + std::to_string(k_min_tone_hz) + " and " +
+               std::to_string(k_max_tone_hz) + " Hz fits it: move --passband";
+    return what + "; move --tone to " + std::to_string(lowest) + ".." + std::to_string(highest) + " Hz";
+}
+
+// The EncoderConfig::check() rule `config` breaks, in plain words with the option to change (spec 7); empty when
+// valid. Every ConfigError has its text; the receiver-only ones cannot come from an encoder.
+inline std::string encoder_problem(const EncoderConfig& config) {
+    const double slot_ms = slot_ms_of(config.slot_us);
     switch (config.check()) {
     case ConfigError::none:
         return "";
     case ConfigError::sample_rate:
-        return "--rate must be " + std::to_string(k_min_sample_rate_hz) + ".." + std::to_string(k_max_sample_rate_hz) +
-               " Hz";
+        return "the sample rate " + std::to_string(config.sample_rate_hz) + " Hz is outside " +
+               std::to_string(k_min_sample_rate_hz) + ".." + std::to_string(k_max_sample_rate_hz) + " Hz (--rate)";
     case ConfigError::tone:
-        return "f_ref must be " + std::to_string(k_min_tone_hz) + ".." + std::to_string(k_max_tone_hz) + " Hz";
+        return "the pitch " + std::to_string(config.tone_hz) + " Hz is outside " + std::to_string(k_min_tone_hz) +
+               ".." + std::to_string(k_max_tone_hz) + " Hz (--tone)";
     case ConfigError::slot:
-        return "T " + fixed(slot_ms, k_us_decimals) + " ms: T must be a whole number of ms in " +
-               std::to_string(k_min_slot_us / us_per_ms) + ".." + std::to_string(k_max_slot_us / us_per_ms);
-    case ConfigError::bits_per_peak:
-        return "bits per peak must be 1.." + std::to_string(k_max_bits_per_peak);
-    case ConfigError::data_slots:
-        return "data slots must be " + std::to_string(k_min_data_slots) + ", " + std::to_string(2 * k_min_data_slots) +
-               " or " + std::to_string(k_max_data_slots);
-    case ConfigError::frame_length:
-        return "a frame of (N + 1) T = " + fixed((config.data_slots + 1u) * slot_ms, 0) + " ms exceeds " +
-               std::to_string(k_max_frame_us / us_per_ms) + " ms: fewer data slots or shorter T";
-    case ConfigError::spacing:
-        return "the spacing must be standard or dense";
-    case ConfigError::dense_slot:
-        return "dense spacing needs T >= " + std::to_string(k_min_dense_slot_us / us_per_ms) + " ms (T " +
-               fixed(slot_ms, k_us_decimals) + " ms): use standard spacing or a longer T";
-    case ConfigError::side:
-        return "the grid side must be above or below";
-    case ConfigError::band: {
-        double low = 0.0;
-        double high = 0.0;
-        band_hz(config, low, high);
-        return "the band " + fixed(low, k_hz_decimals) + ".." + fixed(high, k_hz_decimals) + " Hz (f_ref " +
-               std::to_string(config.tone_hz) + " Hz, grid " + side_name(config.side) + ") leaves " +
-               std::to_string(k_min_tone_hz) + ".." + std::to_string(k_max_tone_hz) +
-               " Hz: move --tone, or use fewer bits per peak, standard spacing or longer slots";
+        return "the slot length T = " + ms_text(slot_ms) + " ms is outside " +
+               ms_text(slot_ms_of(k_min_slot_us)) + ".." + ms_text(slot_ms_of(k_max_slot_us)) +
+               " ms (--slot-ms; --baud is 1000/T)";
+    case ConfigError::fast_tone:
+        return "slots shorter than " + ms_text(slot_ms_of(k_fast_slot_us)) + " ms need a pitch of at least " +
+               std::to_string(k_min_fast_tone_hz) + " Hz, and the pitch is " + std::to_string(config.tone_hz) +
+               " Hz: raise --tone or use longer slots (--slot-ms)";
+    case ConfigError::bits_per_package:
+        return "the bits per package N = " + std::to_string(config.bits_per_package) + " is outside " +
+               std::to_string(k_min_bits_per_package) + ".." + std::to_string(k_max_bits_per_package) + " (--bits)";
+    case ConfigError::package_length: {
+        const uint32_t most = static_cast<uint32_t>(k_max_package_us / config.slot_us) - 1;
+        return "a package of " + std::to_string(config.bits_per_package) + " bits at T = " + ms_text(slot_ms) +
+               " ms lasts (N + 1) x T = " + ms_text((config.bits_per_package + 1u) * slot_ms) +
+               " ms, more than the " + ms_text(slot_ms_of(k_max_package_us)) + " ms limit: use --bits " +
+               std::to_string(std::min<uint32_t>(most, k_max_bits_per_package)) +
+               " or less, or shorter slots (--slot-ms)";
     }
-    case ConfigError::queue:
-        return "a frame of " + std::to_string(config.frame_bytes()) + " bytes exceeds half of the " +
-               std::to_string(Encoder::k_queue_size) + "-byte encoder queue";
+    case ConfigError::passband:
+        return "the passband " + passband_text(config.passband) + " is not valid: it needs LO < HI <= " +
+               std::to_string(k_max_passband_hz) + " Hz (--passband LO:HI)";
+    case ConfigError::outside_passband:
+        return outside_passband_problem(config);
     case ConfigError::sync_markers:
-        return "--sync must be " + std::to_string(k_min_sync_markers) + ".." + std::to_string(k_max_sync_markers);
+        return "the sync train must have " + std::to_string(k_min_sync_markers) + ".." +
+               std::to_string(k_max_sync_markers) + " markers, not " + std::to_string(config.sync_markers) +
+               " (--sync)";
     case ConfigError::amplitude:
-        return "--level-dbfs is below the encoder resolution";
+        return "the level is too low: the beep's crest rounds to 0 (--level-dbfs)";
+    case ConfigError::min_slot:
+    case ConfigError::decision_mode:
+    case ConfigError::fixed_ratio:
+        return "a receiver setting was refused";
     }
     return "the encoder refuses this combination";
 }
 
-// "T 32 ms  k 5  N 8  standard  grid below  138.9 bit/s"
-inline std::string mode_text(double slot_ms, unsigned bits_per_peak, unsigned data_slots, Spacing spacing,
-                             const char* side) {
-    return "T " + fixed(slot_ms, k_slot_ms_decimals) + " ms  k " + std::to_string(bits_per_peak) + "  N " +
-           std::to_string(data_slots) + "  " + spacing_name(spacing) + "  grid " + side + "  " +
-           fixed(net_bit_rate(bits_per_peak, data_slots, slot_ms), k_rate_decimals) + " bit/s";
+// The same for DecoderConfig::check().
+inline std::string decoder_problem(const DecoderConfig& config) {
+    switch (config.check()) {
+    case ConfigError::none:
+        return "";
+    case ConfigError::min_slot:
+        return "the shortest slot must be 4..32 ms, not " + std::to_string(config.min_slot_ms) +
+               " (--min-slot-ms N: the receiver then hears slots of N..8N ms)";
+    case ConfigError::passband: {
+        if (!passband_valid(config.passband))
+            return "the passband " + passband_text(config.passband) + " is not valid: it needs LO < HI <= " +
+                   std::to_string(k_max_passband_hz) + " Hz (--passband LO:HI)";
+        const uint32_t slowest_us = static_cast<uint32_t>(config.max_slot_ms()) * k_us_per_ms_int;
+        const bool fast = static_cast<uint32_t>(config.min_slot_ms) * k_us_per_ms_int < k_fast_slot_us;
+        return "the passband " + passband_text(config.passband) + " leaves no pitch to search for: the search keeps " +
+               std::to_string(half_band_hz(slowest_us)) + " Hz from each edge (half the band of " +
+               std::to_string(config.max_slot_ms()) + " ms slots) and stays within " +
+               std::to_string(fast ? k_min_fast_tone_hz : k_min_tone_hz) + ".." + std::to_string(k_max_tone_hz) +
+               " Hz; widen --passband";
+    }
+    case ConfigError::decision_mode:
+        return "the decision rule must be adaptive or fixed (--rule)";
+    case ConfigError::fixed_ratio:
+        return "the fixed decision line must lie between 0 and 1 of the reference line, not " +
+               fixed(config.fixed_ratio, 2) + " (--ratio, e.g. 0.70)";
+    case ConfigError::sample_rate:
+    case ConfigError::tone:
+    case ConfigError::slot:
+    case ConfigError::fast_tone:
+    case ConfigError::bits_per_package:
+    case ConfigError::package_length:
+    case ConfigError::outside_passband:
+    case ConfigError::sync_markers:
+    case ConfigError::amplitude:
+        return "a sender setting was refused";
+    }
+    return "the decoder refuses this combination";
+}
+
+// "smart decision line" or "fixed decision line at 70 %".
+inline std::string rule_text(const DecoderConfig& config) {
+    if (config.decision_mode == DecisionMode::fixed_ratio)
+        return "fixed decision line at " + fixed(100.0 * config.fixed_ratio, 0) + " % of the reference";
+    return "smart decision line";
 }
 
 inline bool read_file(const std::string& path, std::vector<std::uint8_t>& data) {
@@ -260,6 +381,41 @@ inline std::size_t packetize(const std::vector<std::uint8_t>& payload, std::vect
     }
     return packets;
 }
+
+// Lines go to stdout at once, or wait while the TUI owns the screen.
+class Console {
+public:
+    Console() : held_(false) {}
+
+    void hold(bool held) {
+        held_ = held;
+        if (held_) return;
+        for (std::size_t i = 0; i < lines_.size(); ++i) std::printf("%s\n", lines_[i].c_str());
+        lines_.clear();
+        std::fflush(stdout);
+    }
+
+    void line(const std::string& text) {
+        if (held_) {
+            lines_.push_back(text);
+        } else {
+            std::printf("%s\n", text.c_str());
+        }
+    }
+
+    // "label      text": the first column is k_label_width wide.
+    void item(const std::string& label, const std::string& text) {
+        std::string padded = label;
+        if (padded.size() < k_label_width) padded.resize(k_label_width, ' ');
+        line(padded + text);
+    }
+
+private:
+    static const std::size_t k_label_width = 11;
+
+    bool held_;
+    std::vector<std::string> lines_;
+};
 
 }  // namespace cli
 }  // namespace unlimited

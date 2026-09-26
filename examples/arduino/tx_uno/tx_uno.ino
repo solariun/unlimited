@@ -3,18 +3,21 @@
 // Every line typed on the serial port (9600 baud) is sent as one Unlimited packet (sync word, length,
 // payload, CRC-16), so rx_esp32 or `unlimited_decode --packet` print it back. The PTT pin is keyed while
 // the encoder is busy; a line typed during a transmission is appended to it or sent right after.
-// There is no flow control: the hf preset sends about 17 bytes/s (139 bit/s), and while a packet waits for the
-// encoder queue the sketch holds one more line plus the 64-byte serial buffer, so pace pasted text.
-// Every slot carries a peak (100% duty, average power 0.81 of the tune tone): on a duty-limited rig reduce
-// the drive for long transmissions.
+//
+// The signal (preset hf): short beeps on one 1500 Hz pitch, one slot of 16 ms per bit (a beep is a 1, silence
+// a 0), 8 bits per package between START/STOP markers: 55.6 bit/s, about 7 bytes/s. It occupies 1362-1638 Hz,
+// so it fits a 2.4 kHz SSB filter (300-2700 Hz) with +-1062 Hz of tuning room; the sketch prints this at start.
+// There is no flow control: while a packet waits for the encoder queue the sketch holds one more line plus the
+// 64-byte serial buffer, so pace pasted text. Random data averages about 0.37 of the tune tone's power.
 //
 // Audio path: Timer2 ticks at 8 kHz and its ISR loads Encoder::next_sample() into the Timer1 PWM on
 // pin 9 (OC1A). Timer1 runs at 64 kHz with 250 steps (about 8 bits), exactly 8 PWM periods per sample,
 // and both timers start in a fixed phase: every sample reaches the pin with the same latency, so the PWM
 // adds no timing-jitter spurs. Timer1 and Timer2 are taken (no Servo, no tone(), no PWM on pins 3, 10, 11).
-// The ISR takes 600..720 CPU cycles per sample on average and at most about 1,500 of the 2,000 per tick, for every
-// preset: no tick is lost and loop() keeps about 65% of the CPU. `make check_embedded` measures this ISR on a
-// cycle-counting ATmega328P model (tests/avr) and fails above 1,600 cycles.
+// The encoder is integer-only (no float, no division in the ISR). The ISR takes about 500..630 CPU cycles per
+// sample on average and at most about 1,010 of the 2,000 per tick, for every preset: no tick is lost and loop()
+// keeps about 70% of the CPU. `make check_embedded` measures this ISR on a cycle-counting ATmega328P model
+// (tests/avr) and fails above 1,600 cycles.
 //
 // Wiring:
 //   pin 9 --[1k]--+--[10k]--+--||--[47k]--+-- radio mic / data input
@@ -35,8 +38,7 @@ const uint32_t k_serial_baud = 9600;
 const uint8_t k_audio_pin = 9;                             // OC1A
 const uint8_t k_ptt_pin = 8;
 const uint8_t k_ptt_led_pin = LED_BUILTIN;
-// T 32 ms, 5 bits per peak on 32 tones below f_ref 2132 Hz (band 869..2132 Hz); decoded by every profile.
-const unlimited::Preset k_preset = unlimited::Preset::hf;
+const unlimited::Preset k_preset = unlimited::Preset::hf;  // T 16 ms, N 8, 1500 Hz; every receiver profile hears it
 const uint16_t k_ptt_settle_ms = 100;                      // silent lead-in after keying (relay, TX delay)
 const uint8_t k_max_payload = 96;                          // longest line sent as one packet
 static_assert(k_max_payload <= unlimited::k_packet_max_payload, "a line must fit one packet");
@@ -96,6 +98,33 @@ void start_audio() {
     interrupts();
 }
 
+// "occupied bandwidth 276 Hz (1362-1638 Hz); passband 300-2700 Hz: fits; shift tolerance -1062/+1062 Hz"
+// (the demos' bandwidth line, integer only: no float code on the AVR). The tolerance stops where the band would
+// leave the passband or the pitch the search of the receiver that hears this sender (passband_fit(config), spec 1.5).
+void print_bandwidth(const unlimited::EncoderConfig& config) {
+    const unlimited::Band band = unlimited::occupied_band(config);
+    const unlimited::PassbandFit fit = unlimited::passband_fit(config);
+    Serial.print(F("occupied bandwidth "));
+    Serial.print(band.width_hz);
+    Serial.print(F(" Hz ("));
+    Serial.print(band.low_hz);
+    Serial.print('-');
+    Serial.print(band.high_hz);
+    Serial.print(F(" Hz); passband "));
+    Serial.print(config.passband.low_hz);
+    Serial.print('-');
+    Serial.print(config.passband.high_hz);
+    if (!fit.fits) {
+        Serial.println(F(" Hz: does not fit"));
+        return;
+    }
+    Serial.print(F(" Hz: fits; shift tolerance -"));
+    Serial.print(fit.margin_low_hz);
+    Serial.print(F("/+"));
+    Serial.print(fit.margin_high_hz);
+    Serial.println(F(" Hz"));
+}
+
 // Collects one line; it stays in g_line until the previous packet is in the encoder queue.
 void read_serial() {
     while (!g_line_ready && Serial.available() > 0) {
@@ -115,7 +144,7 @@ void read_serial() {
     }
 }
 
-// Keeps the encoder queue topped up; a frame boundary with an empty queue ends the transmission.
+// Keeps the encoder queue topped up; an empty queue at a package boundary ends the transmission.
 void feed_encoder() {
     while (g_packet_sent < g_packet_size && g_encoder.write(g_packet[g_packet_sent])) ++g_packet_sent;
 }
@@ -146,7 +175,10 @@ void setup() {
     set_ptt(false);
     Serial.begin(k_serial_baud);
     start_audio();
-    Serial.println(F("Unlimited tx_uno: type a line to send it"));
+    Serial.println(F("Unlimited tx_uno: preset hf, 1500 Hz, T 16 ms, 8 bits per package, 55.6 bit/s"));
+    print_bandwidth(g_encoder.config());
+    if (!g_encoder.config().valid()) Serial.println(F("tx_uno: the encoder refuses this configuration"));
+    Serial.println(F("type a line to send it"));
 }
 
 void loop() {

@@ -15,7 +15,7 @@ const uint8_t ToneSearch::k_phase_bins;
 const uint8_t FineAfc::k_bins;
 const uint8_t CandidateList::k_size;
 const uint8_t AuditRing::k_max_positions;
-const uint8_t AuditRing::k_frames;
+const uint8_t AuditRing::k_packages;
 
 namespace {
 
@@ -23,6 +23,7 @@ const float k_pi = 3.14159265f;
 const float k_two_pi = 2.0f * k_pi;
 const float k_phase_per_hz = 4294967296.0f / static_cast<float>(k_decoder_rate_hz);  // NCO step per Hz
 const float k_tiny = 1e-20f;
+const int32_t k_int16_max = 32767;
 
 // QuantileTracker: 25 % quantile of an exponential variable is mean * ln(4/3).
 const float k_quantile_scale = 3.476f;
@@ -38,7 +39,7 @@ const float k_noise_clip = 10.0f;       // exponential noise exceeds 10 x its me
 const uint16_t k_noise_seed_weight = 8;  // a seed counts as this many inputs
 const uint16_t k_noise_average = 64;     // exponential average over about 64 inputs after the warm-up
 
-// ImpulseBlanker (spec 3.3.2).
+// ImpulseBlanker (spec 3.3).
 const float k_spike_ratio = 10.0f;
 const float k_spike_floor = 10.0f;
 const float k_residual_ratio = 8.0f;
@@ -50,8 +51,10 @@ const uint8_t k_residual_prime_blocks = 64;
 const float k_min_block_energy = 16.0f;  // sum of (x >> 4)^2: below any impulse worth blanking (digital silence)
 const uint8_t k_fill_limit = 0xFF;
 
-// ToneSearch (spec 3.6).
+// ToneSearch (spec 3.6). Bins sit on whole multiples of k_search_step_hz: they are then exact DFT bins of the
+// 160-sample block, which the phase estimates rely on.
 const uint16_t k_search_step_hz = 50;
+const float k_estimate_accuracy_hz = 5.0f;  // of estimate_tone() for a tone between bins (U13)
 const uint8_t k_goertzel_shift = 14;
 const float k_goertzel_one = 16384.0f;
 const float k_fast_alpha = 1.0f / 8.0f;
@@ -61,8 +64,8 @@ const float k_slow_alpha = 1.0f / 128.0f;
 const float k_lower_half_bias = 0.8f;
 const float k_slow_blocks = 2.0f / k_slow_alpha - 1.0f;
 const float k_min_floor = static_cast<float>(ToneSearch::k_block_samples);  // noise of 1 LSB rms
-// The recent floor: the mean of the lower half of one block's 49 bin powers is 0.309 of the noise; averaged over about
-// 4 blocks. It follows a receiver AGC within 100 ms: after a strong signal ends the AGC raises the noise by the signal's
+// The recent floor: the mean of the lower half of one block's bin powers is 0.309 of the noise; averaged over about 4
+// blocks. It follows a receiver AGC within 100 ms: after a strong signal ends the AGC raises the noise by the signal's
 // SNR over a second or so, which the slow floor (2.5 s) would take for tones everywhere; the locks compare with the
 // larger of the two floors.
 const float k_block_floor_bias = 0.309f;
@@ -73,10 +76,9 @@ const float k_fast_lock = 6.0f;
 // after de-emphasis, a receiver's audio slope) keeps the 6 x.
 const float k_fast_lock_quiet = 4.0f;
 const float k_quiet_bin = 2.0f;
-// A tone below k_fast_lock (the hf_weak gate: 7.5 dB in a bin) locks after k_long_run_blocks stable blocks, not
-// k_lock_blocks: its phase products need that many for the tone estimate (only weak modes, with long tunes, are heard
-// that low). Half-bin powers |X_b - X_b+1|^2 / 2 (the DFT halfway between two bins, same noise) cut the scalloping
-// loss of a tone between two bins from 3.9 dB to 1.2 dB at worst.
+// A tone below k_fast_lock locks after k_long_run_blocks stable blocks, not k_lock_blocks: its phase products need
+// that many for the tone estimate. Half-bin powers |X_b - X_b+1|^2 / 2 (the DFT halfway between two bins, same noise)
+// cut the scalloping loss of a tone between two bins from 3.9 dB to 1.2 dB at worst.
 const uint8_t k_half_block_samples = ToneSearch::k_block_samples / 2;
 // The second half of a block against its first half turns by 2 pi f / 100 Hz for a tone f off the bin: the whole-bin
 // alias of the block-to-block phase (f mod 50 Hz) is the one whose half-block turn matches. Used when the half-block
@@ -113,8 +115,9 @@ const uint8_t k_train_breaks = 1;
 const uint8_t k_train_steady_products = 3;  // 80 ms of steady tone before the break
 const uint8_t k_resume_blocks = 2;
 const uint8_t k_count_limit_u8 = 0xFF;
+const float k_no_score = -1e30f;
 
-// FineAfc (spec 3.3.5): 65 bins on the squared signal, 1 Hz apart within +-20 Hz (tone +-10 Hz, the spec
+// FineAfc (spec 3.3): 65 bins on the squared signal, 1 Hz apart within +-20 Hz (tone +-10 Hz, the spec
 // resolution) and 3.33 Hz apart out to +-60 Hz (tone +-30 Hz: on data the coarse search can be half a
 // search bin off). A far offset is pulled in by a first correction and refined by the next.
 const float k_afc_default_rate_hz = 125.0f;
@@ -134,68 +137,17 @@ const float k_squared_to_tone = 0.5f;  // squaring doubles the offset
 
 const float k_parabola_limit = 0.5f;
 
-// SlotBank (spec 3.2). Bins stay inside 100..3900 Hz, where 1 / sin(w) <= 12.7 keeps the int32 state of a
-// full-scale 1024-sample window below 2^29 and the Q14 coefficient inside int16.
-const float k_bank_min_hz = 100.0f;
-const float k_bank_max_hz = 3900.0f;
-const uint8_t k_q15_shift = 15;
-#if !defined(UNLIMITED_BANK_FLOAT)
-const int32_t k_q15_round = 1 << (k_q15_shift - 1);
-#endif
-const int32_t k_q15_one = 32767;
-const float k_q15_scale = 32768.0f;
-const uint32_t k_ramp_end = 0x20000000u;    // u = 1/8: the Tukey alpha 0.25 ramp
-const uint32_t k_ramp_begin = 0xE0000000u;  // u = 7/8
-const float k_full_turn = 4294967296.0f;    // 2^32
-const float k_sample_centre = 0.5f;         // sample n of a window sits at u = (n + 0.5) / L
-const float k_min_skip = -k_sample_centre;  // a window may start up to half a sample before its first sample
+// The smart line (spec 3.10): rho = 0.5 + ln(2 pi a^2 rho) / (2 a^2), iterated from 0.6.
+const float k_rho_min = 0.50f;
+const float k_rho_max = 0.75f;
+const float k_rho_seed = 0.6f;
+const uint8_t k_rho_iterations = 3;
+const float k_rho_offset = 0.5f;
 
-// log2 Q8.8 (spec 3.10).
-const float k_log_q8_one = 256.0f;
-const float k_ln2 = 0.69314718f;
-const int32_t k_int16_min = -32768;
-const int32_t k_int16_max = 32767;
-
-// SlotBlanker (spec 3.2).
-const float k_slot_blank_power_ratio = static_cast<float>(k_slot_blank_ratio) * static_cast<float>(k_slot_blank_ratio);
-const float k_slot_min_power = 1.0f;  // digital silence: 1 LSB^2
-// Trigger density: +2 per trigger, -1 per other sample. A filtered impulse triggers a few tens of samples; a level
-// change (a tone starting after silence) keeps triggering and passes k_slot_blank_run: r then follows it fast.
-const uint8_t k_slot_blank_run = 64;
-const uint8_t k_slot_run_step = 2;
-const float k_slot_fast_alpha = 1.0f / 8.0f;
-const uint8_t k_slot_zero_span = 2 * k_slot_blank_hold + 1;
-const uint8_t k_slot_blank_tail = 32;  // 4 ms: the ringing of an impulse through the receiver filters
-const float k_slot_neighbours = static_cast<float>(2 * k_slot_blank_reach);
-
-// Window noise (spec 3.10): a low rank of the STOP slot's bin energies, clear of the neighbour peaks' leakage.
-const uint16_t k_noise_rank_divisor = 4;
-
-// Header ML (spec 3.8).
-const uint8_t k_header_tones = k_header_slots;
-const uint8_t k_header_sides = 2;
-// E[mean of the 4 smallest of 8 unit exponentials] - E[smallest] = 0.366 - 0.125: the spread of noise, over its mean.
-const float k_header_spread_scale = 1.0f / 0.2411f;
-const float k_header_carrier_level = 3.0f;
-const float k_header_carrier_steady = 0.3f;
-const float k_header_side_ratio = 4.0f;  // sides' own noise this far apart: one side is outside the receiver passband
-const float k_header_carrier_margin = 2.0f;    // x k_header_margin: the decision under a carrier ...
-const uint8_t k_header_carrier_disagree = 1;   // ... may have this many slots more against it
-const uint16_t k_header_bases = k_header_words / k_header_tones;  // words with a = 0; a XORs every tone
-const uint8_t k_header_word_a_bits = 3;
-const float k_no_score = -1e30f;
-
-// Slot decision (spec 3.10).
-const uint16_t k_min_presence_bins = k_min_grid_bins;
-const float k_confidence_limit = 255.0f;
-const float k_db_per_decade = 10.0f;
-
-// ln I0(0.5 i), i = 0..32.
-const float k_ln_i0_table[k_ln_i0_points] = {
-    0.00000f, 0.06155f, 0.23591f, 0.49879f, 0.82399f, 1.19084f, 1.58531f, 1.99853f, 2.42497f, 2.86112f, 3.30468f,
-    3.75407f, 4.20819f, 4.66620f, 5.12749f, 5.59159f, 6.05810f, 6.52673f, 6.99722f, 7.46936f, 7.94297f, 8.41791f,
-    8.89405f, 9.37128f, 9.84950f, 10.32864f, 10.80861f, 11.28935f, 11.77081f, 12.25293f, 12.73567f, 13.21899f,
-    13.70284f};
+// PackageLearner (spec 3.8).
+const int32_t k_no_marker = 0;           // grid indices after the train's newest marker are > 0
+const int32_t k_exact_start_slots = 4;   // N = 1: the first marker within 4 slots of L can place package 0 exactly
+const uint8_t k_gap_limit = 0xFF;
 
 float clamp(float value, float low, float high) {
     return value < low ? low : (value > high ? high : value);
@@ -542,10 +494,17 @@ ToneSearch::ToneSearch() {
     configure(k_min_tone_hz, k_max_tone_hz);
 }
 
+// Bins on the multiples of 50 Hz inside min_hz..max_hz (at least one), and a guard bin on each side: a tone just outside
+// the range peaks in a guard, where no lock is taken, instead of in the edge bin at a wrong 50 Hz alias.
 void ToneSearch::configure(uint16_t min_hz, uint16_t max_hz) {
-    first_hz_ = min_hz;
-    const uint16_t span_bins = static_cast<uint16_t>((max_hz - min_hz) / k_search_step_hz + 1);
-    bins_ = static_cast<uint8_t>(span_bins < k_max_bins ? span_bins : k_max_bins);
+    min_hz_ = min_hz;
+    max_hz_ = max_hz;
+    const uint16_t first_lock =
+        static_cast<uint16_t>((min_hz + k_search_step_hz - 1u) / k_search_step_hz * k_search_step_hz);
+    const uint16_t span_bins =
+        static_cast<uint16_t>(max_hz >= first_lock ? (max_hz - first_lock) / k_search_step_hz + 1u : 1u);
+    first_hz_ = static_cast<uint16_t>(first_lock > k_search_step_hz ? first_lock - k_search_step_hz : 0u);
+    bins_ = static_cast<uint8_t>((span_bins < k_max_lock_bins ? span_bins : k_max_lock_bins) + 2u);
     for (uint8_t b = 0; b < k_max_bins; ++b) {
         const float hz = static_cast<float>(first_hz_ + b * k_search_step_hz);
         const int32_t q14 = round_to_int(2.0f * cosf(k_two_pi * hz / static_cast<float>(k_decoder_rate_hz)) *
@@ -884,6 +843,7 @@ bool ToneSearch::local_peak(const float* power, uint8_t bin) const {
 }
 
 bool ToneSearch::eligible(uint8_t bin) const {
+    if (bin == 0 || bin + 1u >= bins_) return false;  // the guard bins
     if (excluded_bin_ >= 0 && bin <= excluded_bin_ + excluded_span_ && bin + excluded_span_ >= excluded_bin_) {
         return false;
     }
@@ -999,7 +959,14 @@ bool ToneSearch::candidate(float& tone_hz) const {
     const uint8_t needed = lock_level_ < k_fast_lock ? k_long_run_blocks : k_lock_blocks;
     if (stable_blocks_ < needed || lock_ == Lock::none) return false;
     tone_hz = estimate_tone();
-    return true;
+    return inside(tone_hz);
+}
+
+// A tone just outside the range leaks into the edge bin: the estimate, not the bin, decides, within its accuracy (a
+// tone on the range's edge may read a few Hz beyond it).
+bool ToneSearch::inside(float tone_hz) const {
+    return tone_hz >= static_cast<float>(min_hz_) - k_estimate_accuracy_hz &&
+           tone_hz <= static_cast<float>(max_hz_) + k_estimate_accuracy_hz;
 }
 
 bool ToneSearch::long_run() const {
@@ -1013,7 +980,7 @@ bool ToneSearch::train_onset(float& tone_hz, uint8_t min_products) const {
     const float reference = sqrtf(steady_sum_.re * steady_sum_.re + steady_sum_.im * steady_sum_.im);
     if (reference < k_min_phase_coherence * steady_weight_) return false;  // the reference was not a steady tone
     tone_hz = steady_tone_hz_;
-    return true;
+    return inside(tone_hz);
 }
 
 // A steady tone (the tune tone): the phase of the block-to-block product is the offset modulo one bin
@@ -1279,28 +1246,180 @@ void AuditRing::set(uint8_t position, float evidence) {
     evidence_[head_][position] = static_cast<int8_t>(round_to_int(evidence * static_cast<float>(k_audit_scale)));
 }
 
-void AuditRing::next_frame() {
-    head_ = static_cast<uint8_t>((head_ + 1) % (k_frames + 1));
+void AuditRing::next_package() {
+    head_ = static_cast<uint8_t>((head_ + 1) % (k_packages + 1));
     memset(evidence_[head_], 0, sizeof(evidence_[head_]));
-    if (count_ < k_frames) ++count_;
+    if (count_ < k_packages) ++count_;
 }
 
 float AuditRing::max_evidence() const {
     int16_t best = 0;
     for (uint8_t k = 0; k < positions_; ++k) {
         int16_t sum = 0;
-        for (uint8_t f = 1; f <= count_; ++f) sum = static_cast<int16_t>(sum + evidence_[(head_ + k_frames + 1 - f) % (k_frames + 1)][k]);
+        for (uint8_t p = 1; p <= count_; ++p) {
+            sum = static_cast<int16_t>(sum + evidence_[(head_ + k_packages + 1 - p) % (k_packages + 1)][k]);
+        }
         if (k == 0 || sum > best) best = sum;
     }
     return static_cast<float>(best) / static_cast<float>(k_audit_scale);
 }
 
-uint8_t AuditRing::frames() const {
+uint8_t AuditRing::packages() const {
     return count_;
 }
 
 uint8_t AuditRing::positions() const {
     return positions_;
+}
+
+// ---------------------------------------------------------------------------
+// PackageLearner (spec 3.8)
+// ---------------------------------------------------------------------------
+
+PackageLearner::PackageLearner() {
+    reset(0, 0);
+}
+
+void PackageLearner::reset(int32_t train_index, uint8_t train_ones, int32_t min_start) {
+    train_index_ = train_index;
+    min_start_ = min_start;
+    first_marker_ = k_no_marker;
+    last_marker_ = train_index;
+    candidate_start_ = train_index;
+    candidate_bits_ = 0;
+    faded_bits_ = 0;
+    unsupported_gap_ = 0;
+    train_ones_ = train_ones;
+    rejections_ = 0;
+    faded_start_ = false;
+    start_faded_ = false;
+    confirmed_ = false;
+}
+
+void PackageLearner::extend_train(int32_t index, bool adjacent) {
+    if (adjacent && train_ones_ < k_gap_limit) ++train_ones_;
+    train_index_ = index;
+    last_marker_ = index;
+    first_marker_ = k_no_marker;
+    candidate_bits_ = 0;
+    faded_bits_ = 0;
+    faded_start_ = false;
+    start_faded_ = false;
+    unsupported_gap_ = 0;
+}
+
+// Data slots never flip: after the train, the first marker that is not one slot away is a STOP, and a candidate N is
+// confirmed when the next span repeats it.
+LearnStep PackageLearner::push(int32_t index) {
+    const int32_t gap = index - last_marker_;
+    if (gap <= 1) {
+        extend_train(index, true);
+        return LearnStep::train;
+    }
+    const bool first_gap = first_marker_ == k_no_marker;
+    // Package 0 cannot start before the train's end: a train that stops short of min_start_ faded there, and so did
+    // the first START.
+    const int32_t start = first_gap && min_start_ > last_marker_ ? min_start_ : last_marker_;
+    const int32_t bits = index - start - 1;
+    if (bits < 1) {
+        extend_train(index, false);
+        return LearnStep::train;
+    }
+    last_marker_ = index;
+    const uint8_t clipped_gap = static_cast<uint8_t>(bits + 1 > k_gap_limit ? k_gap_limit : bits + 1);
+    if (first_gap) first_marker_ = index;
+    if (candidate_bits_ > 0) {
+        if (bits == candidate_bits_) {
+            confirmed_ = true;
+            faded_start_ = false;
+            return LearnStep::confirmed;
+        }
+        if (faded_bits_ > 0 && bits == faded_bits_) {
+            confirmed_ = true;
+            faded_start_ = true;
+            candidate_bits_ = faded_bits_;
+            candidate_start_ = train_index_ + 1;
+            return LearnStep::confirmed;
+        }
+        if (rejections_ < k_gap_limit) ++rejections_;
+        candidate_bits_ = 0;
+        faded_bits_ = 0;
+    } else if (bits > k_max_bits_per_package && unsupported_gap_ == clipped_gap) {
+        return LearnStep::unsupported;
+    }
+    if (bits > k_max_bits_per_package) {
+        unsupported_gap_ = clipped_gap;
+        return LearnStep::rejected;
+    }
+    unsupported_gap_ = 0;
+    candidate_bits_ = static_cast<uint8_t>(bits);
+    candidate_start_ = start;
+    start_faded_ = start != index - gap;
+    // Only the first package may start on a faded marker: the train's last marker, the first START.
+    faded_bits_ = first_gap && !start_faded_ && bits >= 2 ? static_cast<uint8_t>(bits - 1) : 0;
+    return LearnStep::candidate;
+}
+
+uint8_t PackageLearner::bits() const {
+    return candidate_bits_;
+}
+
+uint8_t PackageLearner::faded_bits() const {
+    return confirmed_ ? 0 : faded_bits_;
+}
+
+bool PackageLearner::faded_start() const {
+    return faded_start_;
+}
+
+bool PackageLearner::start_faded() const {
+    return start_faded_;
+}
+
+int32_t PackageLearner::candidate_start() const {
+    return candidate_start_;
+}
+
+int32_t PackageLearner::start_base() const {
+    return min_start_ > train_index_ ? min_start_ : train_index_;
+}
+
+// The reading with the fewest faded markers: package 0 starts a whole number of packages before the confirmed START,
+// the first marker after L that the two equal spans vouch for (a noise flip before it may have formed a candidate).
+int32_t PackageLearner::first_start() const {
+    const int32_t span = static_cast<int32_t>(candidate_bits_) + 1;
+    if (candidate_bits_ == 0) return candidate_start_;
+    return candidate_start_ - span * ((candidate_start_ - start_base()) / span);
+}
+
+bool PackageLearner::start_exact() const {
+    return candidate_bits_ >= 2 ||
+           (first_marker_ != k_no_marker && first_marker_ - start_base() <= k_exact_start_slots);
+}
+
+uint8_t PackageLearner::rejections() const {
+    return rejections_;
+}
+
+uint8_t PackageLearner::train_ones() const {
+    return train_ones_;
+}
+
+int32_t PackageLearner::min_start() const {
+    return min_start_;
+}
+
+int32_t PackageLearner::first_marker() const {
+    return first_marker_;
+}
+
+void PackageLearner::shift_candidate(int32_t slots) {
+    candidate_start_ += slots;
+    last_marker_ += slots;
+}
+
+int32_t PackageLearner::train_index() const {
+    return train_index_;
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,582 +1461,14 @@ float parabolic_offset(float left, float centre, float right) {
     return clamp(0.5f * (left - right) / curvature, -k_parabola_limit, k_parabola_limit);
 }
 
-
-// ln I0 from the table, linear between its points; above it the asymptote x - ln(2 pi x) / 2.
-float ln_i0(float x) {
-    if (x <= 0.0f) return 0.0f;
-    if (x >= k_ln_i0_max) return x - 0.5f * logf(k_two_pi * x);
-    const float position = x * static_cast<float>(k_ln_i0_points - 1) / k_ln_i0_max;
-    const uint8_t index = static_cast<uint8_t>(position);
-    const float fraction = position - static_cast<float>(index);
-    return k_ln_i0_table[index] + fraction * (k_ln_i0_table[index + 1] - k_ln_i0_table[index]);
-}
-
-int16_t log2_q8(float value) {
-    if (value <= 0.0f) return static_cast<int16_t>(k_int16_min);
-    const int32_t log_q8 = round_to_int(k_log_q8_one * logf(value) / k_ln2);
-    return static_cast<int16_t>(log_q8 < k_int16_min ? k_int16_min : (log_q8 > k_int16_max ? k_int16_max : log_q8));
-}
-
-float exp2_q8(int32_t log_q8) {
-    return expf(static_cast<float>(log_q8) * k_ln2 / k_log_q8_one);
-}
-
-// ---------------------------------------------------------------------------
-// SlotBank: one Goertzel per bin over w x, w = p(u) (Tukey alpha 0.25) from the slot phase.
-// ---------------------------------------------------------------------------
-
-namespace {
-
-// p(u) in Q15; u is the position in the window, 2^32 = the whole window.
-int32_t peak_weight_q15(uint32_t u) {
-    if (u >= k_ramp_end && u <= k_ramp_begin) return k_q15_one;
-    const int32_t s = sine_q15(u < k_ramp_end ? u << 1 : (0u - u) << 1);
-    return (s * s) >> k_q15_shift;
-}
-
-}  // namespace
-
-template <uint16_t Bins>
-void SlotBank<Bins>::reset() {
-    memset(this, 0, sizeof(*this));
-}
-
-template <uint16_t Bins>
-void SlotBank<Bins>::set_bins(uint16_t count) {
-    bins_ = count < Bins ? count : Bins;
-}
-
-template <uint16_t Bins>
-void SlotBank<Bins>::set_frequency(uint16_t bin, float hz) {
-    if (bin >= Bins) return;
-    const float coefficient = 2.0f * cosf(k_two_pi * clamp(hz, k_bank_min_hz, k_bank_max_hz) /
-                                          static_cast<float>(k_decoder_rate_hz));
-#if defined(UNLIMITED_BANK_FLOAT)
-    coeff_[bin] = coefficient;
-#else
-    const int32_t q14 = round_to_int(coefficient * k_goertzel_one);
-    coeff_q14_[bin] = static_cast<int16_t>(q14 > k_int16_max ? k_int16_max : (q14 < -k_int16_max ? -k_int16_max : q14));
-#endif
-}
-
-template <uint16_t Bins>
-uint16_t SlotBank<Bins>::bins() const {
-    return bins_;
-}
-
-template <uint16_t Bins>
-void SlotBank<Bins>::open(float length_samples, float skip_samples) {
-    const float length = max_of(length_samples, 1.0f);
-    const float skip = clamp(skip_samples, k_min_skip, length - 1.0f);
-    slot_step_ = static_cast<uint32_t>(k_full_turn / length);
-    slot_phase_ = static_cast<uint32_t>((skip + k_sample_centre) * static_cast<float>(slot_step_));
-    sum_w_ = 0;
-    sum_w2_ = 0;
-    for (uint16_t i = 0; i < bins_; ++i) {
-        s1_[i] = 0;
-        s2_[i] = 0;
+float equal_likelihood_ratio(float a_squared) {
+    // Below 2 pi a^2 rho_max = 1 the equation has no solution in range (the signal is below the noise).
+    if (k_two_pi * a_squared * k_rho_max <= 1.0f) return k_rho_max;
+    float rho = k_rho_seed;
+    for (uint8_t i = 0; i < k_rho_iterations; ++i) {
+        rho = clamp(k_rho_offset + logf(k_two_pi * a_squared * rho) / (2.0f * a_squared), k_rho_min, k_rho_max);
     }
-    active_ = true;
-}
-
-template <uint16_t Bins>
-bool SlotBank<Bins>::push(int16_t sample) {
-    if (!active_) return false;
-    const int32_t w = peak_weight_q15(slot_phase_);
-    sum_w_ += static_cast<uint32_t>(w);
-    sum_w2_ += static_cast<uint32_t>((w * w) >> k_q15_shift);
-#if defined(UNLIMITED_BANK_FLOAT)
-    const float x = static_cast<float>(sample) * static_cast<float>(w) / k_q15_scale;
-    for (uint32_t i = 0; i < bins_; ++i) {
-        const float s0 = x + coeff_[i] * s1_[i] - s2_[i];
-        s2_[i] = s1_[i];
-        s1_[i] = s0;
-    }
-#else
-    const int32_t x = (static_cast<int32_t>(sample) * w + k_q15_round) >> k_q15_shift;
-    for (uint32_t i = 0; i < bins_; ++i) {
-        const int64_t product = static_cast<int64_t>(coeff_q14_[i]) * s1_[i];
-        const int32_t s0 = x + static_cast<int32_t>(product >> k_goertzel_shift) - s2_[i];
-        s2_[i] = s1_[i];
-        s1_[i] = s0;
-    }
-#endif
-    const uint32_t before = slot_phase_;
-    slot_phase_ += slot_step_;
-    if (slot_phase_ >= before) return false;
-    active_ = false;
-    return true;
-}
-
-template <uint16_t Bins>
-bool SlotBank<Bins>::active() const {
-    return active_;
-}
-
-template <uint16_t Bins>
-float SlotBank<Bins>::energy(uint16_t bin) const {
-    if (bin >= bins_) return 0.0f;
-#if defined(UNLIMITED_BANK_FLOAT)
-    const float s1 = s1_[bin];
-    const float s2 = s2_[bin];
-    return max_of(s1 * s1 + s2 * s2 - coeff_[bin] * s1 * s2, 0.0f);
-#else
-    const int64_t s1 = s1_[bin];
-    const int64_t s2 = s2_[bin];
-    const int64_t cross = ((static_cast<int64_t>(coeff_q14_[bin]) * s1) >> k_goertzel_shift) * s2;
-    return max_of(static_cast<float>(s1 * s1 + s2 * s2 - cross), 0.0f);
-#endif
-}
-
-template <uint16_t Bins>
-float SlotBank<Bins>::window_sum() const {
-    return static_cast<float>(sum_w_) / k_q15_scale;
-}
-
-template <uint16_t Bins>
-float SlotBank<Bins>::window_square_sum() const {
-    return static_cast<float>(sum_w2_) / k_q15_scale;
-}
-
-template class SlotBank<k_header_bins>;
-#if UNLIMITED_MAX_BITS_PER_PEAK != 4
-template class SlotBank<k_grid_bins>;  // the same type as HeaderBank when the cap is 4
-#endif
-
-// ---------------------------------------------------------------------------
-// BinBackground: log2 Q8.8 25 % quantile per bin.
-// ---------------------------------------------------------------------------
-
-namespace {
-
-int16_t clamp_log(int32_t value) {
-    return static_cast<int16_t>(value < k_int16_min ? k_int16_min : (value > k_int16_max ? k_int16_max : value));
-}
-
-// Value of rank `rank` (0 = smallest) of values[0..count-1] (quickselect); reorders them.
-int16_t select_rank(int16_t* values, uint16_t count, uint16_t rank) {
-    uint16_t low = 0;
-    uint16_t high = static_cast<uint16_t>(count - 1u);
-    while (low < high) {
-        const uint16_t middle = static_cast<uint16_t>((low + high) / 2u);
-        int16_t swap = values[middle];
-        values[middle] = values[high];
-        values[high] = swap;
-        const int16_t pivot = values[high];
-        uint16_t store = low;
-        for (uint16_t i = low; i < high; ++i) {
-            if (values[i] >= pivot) continue;
-            swap = values[i];
-            values[i] = values[store];
-            values[store] = swap;
-            ++store;
-        }
-        values[high] = values[store];
-        values[store] = pivot;
-        if (rank == store) break;
-        if (rank < store) {
-            high = static_cast<uint16_t>(store - 1u);
-        } else {
-            low = static_cast<uint16_t>(store + 1u);
-        }
-    }
-    return values[rank];
-}
-
-}  // namespace
-
-void BinBackground::reset(uint16_t bins, float initial_mean) {
-    bins_ = bins < k_grid_bins ? bins : k_grid_bins;
-    slots_ = 0;
-    const int16_t initial = clamp_log(static_cast<int32_t>(log2_q8(initial_mean)) - k_bg_mean_offset);
-    for (uint16_t i = 0; i < k_grid_bins; ++i) log_q8_[i] = initial;
-}
-
-void BinBackground::push(uint16_t bin, float energy) {
-    if (bin >= bins_) return;
-    if (bin == 0 && slots_ < k_bg_warmup_slots) ++slots_;
-    const int32_t factor = slots_ < k_bg_warmup_slots ? k_bg_warmup_factor : 1;
-    const int32_t current = log_q8_[bin];
-    log_q8_[bin] = clamp_log(log2_q8(energy) > current ? current + factor * k_bg_step_up : current - factor * k_bg_step_down);
-}
-
-void BinBackground::set_mean(uint16_t bin, float mean) {
-    if (bin >= bins_) return;
-    log_q8_[bin] = clamp_log(static_cast<int32_t>(log2_q8(mean)) - k_bg_mean_offset);
-}
-
-float BinBackground::mean(uint16_t bin) const {
-    if (bin >= bins_) return 0.0f;
-    return exp2_q8(static_cast<int32_t>(log_q8_[bin]) + k_bg_mean_offset);
-}
-
-// Median of the bins' means (in log2 Q8.8: the mean of the two middle values for an even count).
-float BinBackground::noise() const {
-    if (bins_ == 0) return 0.0f;
-    int16_t values[k_grid_bins];
-    memcpy(values, log_q8_, bins_ * sizeof(values[0]));
-    const uint16_t upper = static_cast<uint16_t>(bins_ / 2u);
-    int32_t middle = select_rank(values, bins_, upper);
-    if ((bins_ & 1u) == 0) middle = (middle + select_rank(values, upper, static_cast<uint16_t>(upper - 1u))) / 2;
-    return exp2_q8(middle + k_bg_mean_offset);
-}
-
-// ---------------------------------------------------------------------------
-// SlotBlanker
-// ---------------------------------------------------------------------------
-
-SlotBlanker::SlotBlanker() {
-    reset();
-}
-
-void SlotBlanker::reset() {
-    memset(window_, 0, sizeof(window_));
-    window_energy_ = 0;
-    power_ = 0.0f;
-    count_ = 0;
-    head_ = 0;
-    zero_left_ = 0;
-    tail_left_ = 0;
-    run_ = 0;
-    blanked_ = false;
-}
-
-// window_ holds samples n - 2 reach .. n. The decision is on n - reach; a trigger zeroes it and hold samples on each
-// side, and the output is n - reach - hold.
-int16_t SlotBlanker::push(int16_t sample) {
-    const int32_t oldest = window_[head_];
-    const int32_t newest = sample;
-    window_energy_ = window_energy_ - static_cast<uint64_t>(oldest * oldest) + static_cast<uint64_t>(newest * newest);
-    window_[head_] = sample;
-    head_ = static_cast<uint8_t>((head_ + 1u) % k_window);
-    const float x = static_cast<float>(window_[(head_ + k_slot_blank_reach) % k_window]);
-    const float square = x * x;
-    const float neighbours = static_cast<float>(window_energy_) - square;
-    const float reference = max_of(power_, k_slot_min_power);
-    const bool warm = count_ >= k_slot_rms_samples;
-    const bool loud = warm && square > k_slot_blank_power_ratio * reference;
-    const bool peaky = square * k_slot_neighbours > static_cast<float>(k_slot_blank_crest) * neighbours;
-    if (tail_left_ > 0) --tail_left_;
-    if (loud && (peaky || tail_left_ > 0)) {
-        zero_left_ = k_slot_zero_span;
-        if (peaky) tail_left_ = k_slot_blank_tail;
-        run_ = static_cast<uint8_t>(run_ > k_count_limit_u8 - k_slot_run_step ? k_count_limit_u8 : run_ + k_slot_run_step);
-        if (run_ > k_slot_blank_run) power_ += k_slot_fast_alpha * (square - power_);
-    } else {
-        if (run_ > 0) --run_;
-        if (!warm) {
-            ++count_;
-            power_ += (square - power_) / static_cast<float>(count_);
-        } else if (zero_left_ <= k_slot_blank_hold) {  // not inside the zeroed span of an earlier trigger
-            power_ += (min_of(square, k_slot_blank_power_ratio * reference) - power_) /
-                      static_cast<float>(k_slot_rms_samples);
-        }
-    }
-    const int16_t out = window_[(head_ + k_slot_blank_reach - k_slot_blank_hold) % k_window];
-    blanked_ = zero_left_ > 0;
-    if (!blanked_) return out;
-    --zero_left_;
-    return 0;
-}
-
-bool SlotBlanker::blanked() const {
-    return blanked_;
-}
-
-// ---------------------------------------------------------------------------
-// Header ML (spec 3.8)
-// ---------------------------------------------------------------------------
-
-namespace {
-
-void sort_ascending(float* values, uint8_t count) {
-    for (uint8_t i = 1; i < count; ++i) {
-        const float value = values[i];
-        uint8_t j = i;
-        while (j > 0 && values[j - 1] > value) {
-            values[j] = values[j - 1];
-            --j;
-        }
-        values[j] = value;
-    }
-}
-
-// floor[d][h]: mean of the smallest k_header_bg_slots energies of tone h over the header slots. A codeword uses a tone
-// at most 3 times, so those slots hold noise or a steady interferer only: the floor is what z subtracts. The spread of
-// those slots (their mean less the smallest, scaled to the mean of exponential noise) is the tone's noise, and N_h
-// a low rank of the spreads: a steady carrier at +10 dB over the peaks leaks into every header bin, and its level,
-// unlike its fluctuation, is not noise. Noise alone: the floor shifts every z by the same amount, which leaves the ML
-// and the agreement as they are.
-void slot_floor(const float (&energy)[k_header_sides][k_header_slots][k_header_tones], uint8_t side, uint8_t tone,
-                float& floor, float& spread, float& lowest) {
-    float values[k_header_slots];
-    for (uint8_t j = 0; j < k_header_slots; ++j) values[j] = energy[side][j][tone];
-    sort_ascending(values, k_header_slots);
-    float sum = 0.0f;
-    for (uint8_t j = 0; j < k_header_bg_slots; ++j) sum += values[j];
-    floor = sum / static_cast<float>(k_header_bg_slots);
-    spread = k_header_spread_scale * (floor - values[0]);
-    lowest = values[0];
-}
-
-// Floor and spread of every side and tone, N_h of each side and z = (E - floor) / N_h. N_h is the
-// k_header_noise_rank-th smallest spread of both sides' tones. When the sides' own noise (the
-// k_header_side_noise_rank-th smallest spread of their tones) differs by more than k_header_side_ratio, one side lies
-// in a receiver stopband (a grid near the passband edge has the other side outside it) or under a carrier: each side
-// then takes the larger of its own noise and N_h, so a stopband side scores near 0 and the other side is not scaled
-// by the stopband's noise. A tone whose floor is k_header_carrier_level x N_h or more (noise alone: 0.37 x N_h) and
-// that stays near it in every slot (its smallest above k_header_carrier_steady x the floor; a neighbour slot's peak
-// leaking in comes and goes) holds a carrier: its products with the noise and the peaks swing its bin by as much as a
-// peak, so its z is over its own spread when that is larger. A side without noise (digital silence) has z = 0.
-void header_scores(const float (&energy)[k_header_sides][k_header_slots][k_header_tones],
-                   float (&background)[k_header_sides][k_header_tones],
-                   float (&z)[k_header_sides][k_header_slots][k_header_tones], float (&noise)[k_header_sides],
-                   bool (&carrier_sides)[k_header_sides]) {
-    float spread[k_header_sides][k_header_tones];
-    float lowest[k_header_sides][k_header_tones];
-    float ranked[k_header_sides * k_header_tones];
-    for (uint8_t d = 0; d < k_header_sides; ++d) {
-        float side[k_header_tones];
-        for (uint8_t h = 0; h < k_header_tones; ++h) {
-            slot_floor(energy, d, h, background[d][h], spread[d][h], lowest[d][h]);
-            side[h] = spread[d][h];
-            ranked[d * k_header_tones + h] = spread[d][h];
-        }
-        sort_ascending(side, k_header_tones);
-        noise[d] = side[k_header_side_noise_rank - 1];
-    }
-    sort_ascending(ranked, k_header_sides * k_header_tones);
-    const float pooled = ranked[k_header_noise_rank - 1];
-    const bool agree = noise[0] <= k_header_side_ratio * noise[1] && noise[1] <= k_header_side_ratio * noise[0];
-    for (uint8_t d = 0; d < k_header_sides; ++d) noise[d] = agree ? pooled : max_of(noise[d], pooled);
-    const float clean = min_of(noise[0], noise[1]);
-    for (uint8_t d = 0; d < k_header_sides; ++d) {
-        bool carriers[k_header_tones];
-        bool carrier_side = false;
-        for (uint8_t h = 0; h < k_header_tones; ++h) {
-            carriers[h] = background[d][h] > k_header_carrier_level * noise[d] &&
-                          lowest[d][h] > k_header_carrier_steady * background[d][h];
-            carrier_side = carrier_side || carriers[h];
-        }
-        // A side whose noise stands above the other's because of a carrier on it: the carrier leaks into every tone of
-        // the side (the header window's sidelobes), and its products with the peaks' own leakage swing each tone by as
-        // much as its leak, not by the noise. Each tone is then scaled by its own spread, at least the other side's
-        // noise (spec 8.4 C8': a carrier +10 dB between two header tones).
-        carrier_side = carrier_side && !agree && noise[d] > clean;
-        for (uint8_t h = 0; h < k_header_tones; ++h) {
-            float scale = noise[d];
-            if (carrier_side) {
-                scale = max_of(spread[d][h], clean);
-            } else if (carriers[h]) {
-                scale = max_of(spread[d][h], noise[d]);
-            }
-            for (uint8_t j = 0; j < k_header_slots; ++j) {
-                z[d][j][h] = noise[d] > 0.0f ? (energy[d][j][h] - background[d][h]) / scale : 0.0f;
-            }
-        }
-        if (carrier_side) noise[d] = clean;
-        carrier_sides[d] = carrier_side;
-    }
-}
-
-uint8_t strongest_tone(const float (&z)[k_header_tones]) {
-    uint8_t strongest = 0;
-    for (uint8_t h = 1; h < k_header_tones; ++h) {
-        if (z[h] > z[strongest]) strongest = h;
-    }
-    return strongest;
-}
-
-}  // namespace
-
-HeaderDecision decide_header(const float (&energy)[2][k_header_slots][k_header_slots]) {
-    HeaderDecision decision;
-    decision.word = 0;
-    decision.side = 1;
-    decision.margin = 0.0f;
-    decision.noise = 0.0f;
-    memset(decision.background, 0, sizeof(decision.background));
-    decision.agreement = 0;
-    decision.accepted = false;
-
-    float background[k_header_sides][k_header_tones];
-    float z[k_header_sides][k_header_slots][k_header_tones];
-    float noise[k_header_sides];
-    bool carrier_sides[k_header_sides];
-    header_scores(energy, background, z, noise, carrier_sides);
-    if (!(noise[0] > 0.0f) && !(noise[1] > 0.0f)) return decision;
-
-    // Tones of word (a, b, c) are those of (0, b, c) XOR a.
-    float best = k_no_score;
-    float second = k_no_score;
-    uint8_t best_side = 0;
-    for (uint16_t base = 0; base < k_header_bases; ++base) {
-        const uint16_t base_word = static_cast<uint16_t>(base << k_header_word_a_bits);
-        uint8_t tones[k_header_slots];
-        for (uint8_t j = 0; j < k_header_slots; ++j) tones[j] = header_symbol(base_word, j);
-        for (uint8_t d = 0; d < k_header_sides; ++d) {
-            for (uint8_t a = 0; a < k_header_tones; ++a) {
-                float score = 0.0f;
-                for (uint8_t j = 0; j < k_header_slots; ++j) score += z[d][j][tones[j] ^ a];
-                if (score > best) {
-                    second = best;
-                    best = score;
-                    decision.word = static_cast<uint16_t>(base_word | a);
-                    best_side = d;
-                } else if (score > second) {
-                    second = score;
-                }
-            }
-        }
-    }
-    decision.side = best_side == 0 ? 1 : -1;
-    decision.margin = best - second;
-    decision.noise = noise[best_side];
-    for (uint8_t h = 0; h < k_header_tones; ++h) decision.background[h] = background[best_side][h];
-    for (uint8_t j = 0; j < k_header_slots; ++j) {
-        if (strongest_tone(z[best_side][j]) == header_symbol(decision.word, j)) ++decision.agreement;
-    }
-    // Under a carrier the peaks of the tones next to it are lost (a slot's strongest tone is then another): one more slot
-    // may disagree when the margin is twice the usual.
-    const bool carrier_side = carrier_sides[best_side];
-    const uint8_t agree = carrier_side && decision.margin >= k_header_carrier_margin * k_header_margin
-                              ? static_cast<uint8_t>(k_header_agree - k_header_carrier_disagree)
-                              : k_header_agree;
-    decision.accepted = decision.margin >= k_header_margin && decision.agreement >= agree;
-    return decision;
-}
-
-HeaderMatch match_header(const float (&energy)[2][k_header_slots][k_header_slots], uint16_t word, int8_t side) {
-    HeaderMatch match;
-    match.agreement = 0;
-    match.peaks = 0;
-    float background[k_header_sides][k_header_tones];
-    float z[k_header_sides][k_header_slots][k_header_tones];
-    float noise[k_header_sides];
-    bool carrier_sides[k_header_sides];
-    header_scores(energy, background, z, noise, carrier_sides);
-    const uint8_t d = side > 0 ? 0 : 1;
-    if (!(noise[d] > 0.0f)) return match;
-    for (uint8_t j = 0; j < k_header_slots; ++j) {
-        const uint8_t strongest = strongest_tone(z[d][j]);
-        if (strongest == header_symbol(word, j)) ++match.agreement;
-        if (z[d][j][strongest] >= k_header_peak_z) ++match.peaks;
-    }
-    return match;
-}
-
-// ---------------------------------------------------------------------------
-// Slot decision (spec 3.10)
-// ---------------------------------------------------------------------------
-
-namespace {
-
-// N_bin: the median background of the grid bins; below k_bg_min_bits (tones on half or a quarter of the slots)
-// the mean background of the unused bins M..7.
-float slot_noise(const BinBackground& background, uint16_t tones, uint16_t bins) {
-    if (tones >= bins) return background.noise();
-    float sum = 0.0f;
-    for (uint16_t t = tones; t < bins; ++t) sum += background.mean(t);
-    return sum / static_cast<float>(bins - tones);
-}
-
-// z_t = E_t less the bin's excess background over N_bin (an in-grid carrier), at least 0.
-float peak_energy(const GridBank& bank, const BinBackground& background, uint16_t bin, bool subtract, float noise) {
-    const float excess = subtract ? max_of(background.mean(bin) - noise, 0.0f) : 0.0f;
-    return max_of(bank.energy(bin) - excess, 0.0f);
-}
-
-float harmonic_number(uint16_t count) {
-    float sum = 0.0f;
-    for (uint16_t j = 1; j <= count; ++j) sum += 1.0f / static_cast<float>(j);
-    return sum;
-}
-
-}  // namespace
-
-// The (bins / 4)-th smallest energy (0-based) over its expectation for exponential noise of mean 1: the sum of
-// 1 / (bins - i) for i = 0..rank. The median over ln 2 read 1 dB high at 8 bins (the 5th of 8 is 0.88, not 0.69).
-float window_noise(const GridBank& bank) {
-    const uint16_t bins = bank.bins();
-    if (bins == 0) return 0.0f;
-    int16_t values[k_grid_bins];
-    for (uint16_t t = 0; t < bins; ++t) values[t] = log2_q8(bank.energy(t));
-    const uint16_t rank = static_cast<uint16_t>(bins / k_noise_rank_divisor);
-    float expected = 0.0f;
-    for (uint16_t i = 0; i <= rank; ++i) expected += 1.0f / static_cast<float>(bins - i);
-    return exp2_q8(select_rank(values, bins, rank)) / expected;
-}
-
-SlotDecision decide_slot(const GridBank& bank, const BinBackground& background, uint8_t bits_per_peak,
-                         uint8_t slot) {
-    const uint16_t tones = static_cast<uint16_t>(1u << bits_per_peak);
-    const uint16_t bins = bank.bins() > tones ? bank.bins() : tones;
-    const bool subtract = bits_per_peak >= k_bg_min_bits;
-    const float noise = max_of(slot_noise(background, tones, bins), k_tiny);
-
-    SlotDecision d;
-    memset(&d, 0, sizeof(d));
-
-    // Argmax of z over the M tones; the sum over every open bin gives the presence ratio.
-    float z_best = 0.0f;
-    float z_second = 0.0f;
-    float z_sum = 0.0f;
-    uint16_t best = 0;
-    for (uint16_t t = 0; t < bins; ++t) {
-        const float z = peak_energy(bank, background, t, subtract, noise);
-        z_sum += z;
-        if (t >= tones) continue;
-        if (t == 0 || z > z_best) {
-            if (t > 0) z_second = z_best;
-            z_best = z;
-            best = t;
-        } else if (z > z_second) {
-            z_second = z;
-        }
-    }
-    d.tone = static_cast<uint8_t>(best);
-    d.symbol = peak_symbol(d.tone, slot, bits_per_peak);
-    d.noise = noise;
-
-    // Max-log LLRs with the slot's own amplitude: m_t = ln I0(2 a sqrt(z_t) / N).
-    const float amplitude = sqrtf(max_of(z_best - noise, k_amp_floor * noise));
-    float one[k_max_bits_per_peak];
-    float zero[k_max_bits_per_peak];
-    for (uint8_t b = 0; b < bits_per_peak; ++b) {
-        one[b] = k_no_score;
-        zero[b] = k_no_score;
-    }
-    for (uint16_t t = 0; t < tones; ++t) {
-        const float metric = ln_i0(2.0f * amplitude * sqrtf(peak_energy(bank, background, t, subtract, noise)) / noise);
-        const uint8_t label = peak_symbol(static_cast<uint8_t>(t), slot, bits_per_peak);
-        for (uint8_t b = 0; b < bits_per_peak; ++b) {
-            const bool bit = ((label >> (bits_per_peak - 1u - b)) & 1u) != 0;
-            float& side = bit ? one[b] : zero[b];
-            if (metric > side) side = metric;
-        }
-    }
-    for (uint8_t b = 0; b < bits_per_peak; ++b) {
-        const bool decided = ((d.symbol >> (bits_per_peak - 1u - b)) & 1u) != 0;
-        // Clamped as a float: at a high per-slot Es/N0 the metrics pass the int32 range.
-        const float limit = static_cast<float>(k_llr_q4_max);
-        int32_t q4 = round_to_int(clamp(one[b] - zero[b], -limit, limit));
-        if (decided && q4 < 1) q4 = 1;  // the sign always carries the hard decision
-        if (!decided && q4 > -1) q4 = -1;
-        d.soft[b] = static_cast<int8_t>(q4);
-    }
-
-    const float others = (z_sum - z_best) / static_cast<float>(bins - 1u);
-    const uint16_t presence_bins = bins > k_min_presence_bins ? bins : k_min_presence_bins;
-    d.confident = others > 0.0f ? z_best >= k_presence_factor * harmonic_number(presence_bins) * others : z_best > 0.0f;
-    d.erasure = z_best < k_erasure_ratio * z_second;
-    float ratio_db = 0.0f;
-    if (z_best > 0.0f) ratio_db = z_second > 0.0f ? k_db_per_decade * log10f(z_best / z_second) : k_confidence_limit;
-    d.confidence = static_cast<uint8_t>(round_to_int(clamp(ratio_db / k_confidence_step_db, 0.0f, k_confidence_limit)));
-    // A peak's envelope is the window itself: sqrt(E) = A sum(w^2) / 2.
-    const float window = bank.window_square_sum();
-    d.crest = window > 0.0f ? 2.0f * sqrtf(max_of(z_best - noise, 0.0f)) / window : 0.0f;
-    return d;
+    return rho;
 }
 
 }  // namespace dsp

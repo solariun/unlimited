@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="820" height="480" viewBox="0 0 820 480" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img">
+<title>Unlimited receiver decision</title>
+<desc>Two real packages as the Decoder measured them: slot levels as bars, the dashed reference line from the START to the STOP crest, the amber decision line and the decided bits, in AWGN and in CCIR poor fading.</desc>
+<rect x="0.5" y="0.5" width="819" height="479" rx="12" fill="#FFFFFF" stroke="#D3D1C7"/>
+<text x="24" y="32" font-size="16" fill="#2C2C2A" font-weight="bold">How the receiver reads a package: the reference line and the decision line</text>
+<text x="24" y="52" font-size="12" fill="#5F5E5A">Real Decoder slot and package events (ssb profile, smart line); the levels are the Decoder's slot amplitudes, in % of its running marker average.</text>
+<rect x="24" y="90" width="380" height="310" fill="#FFFFFF" stroke="#D3D1C7" stroke-width="1" rx="8"/>
+<text x="36" y="110" font-size="12" fill="#2C2C2A" font-weight="bold">Steady signal: package 0 of “Hi”</text>
+<text x="36" y="126" font-size="10" fill="#5F5E5A">hf, AWGN at SNR +3 dB (key-down, 2500 Hz), USB tuned +37 Hz</text>
+<line x1="70" y1="320" x2="70" y2="152" stroke="#888780" stroke-width="1"/>
+<line x1="70" y1="320" x2="390" y2="320" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="66" y1="320" x2="70" y2="320" stroke="#888780" stroke-width="1"/>
+<text x="64" y="324" font-size="11" fill="#5F5E5A" text-anchor="end">0</text>
+<line x1="70" y1="264" x2="390" y2="264" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="66" y1="264" x2="70" y2="264" stroke="#888780" stroke-width="1"/>
+<text x="64" y="268" font-size="11" fill="#5F5E5A" text-anchor="end">50</text>
+<line x1="70" y1="208" x2="390" y2="208" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="66" y1="208" x2="70" y2="208" stroke="#888780" stroke-width="1"/>
+<text x="64" y="212" font-size="11" fill="#5F5E5A" text-anchor="end">100</text>
+<line x1="70" y1="152" x2="390" y2="152" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="66" y1="152" x2="70" y2="152" stroke="#888780" stroke-width="1"/>
+<text x="64" y="156" font-size="11" fill="#5F5E5A" text-anchor="end">150</text>
+<text x="34" y="236" font-size="9" fill="#5F5E5A" text-anchor="middle" transform="rotate(-90 34 236)">level (% of the marker average)</text>
+<rect x="76.08" y="213.6" width="19.84" height="106.4" fill="#7F77DD" stroke="#7F77DD" stroke-width="0.8"/>
+<text x="86" y="334" font-size="9" fill="#7F77DD" text-anchor="middle" font-weight="bold">START</text>
+<rect x="108.08" y="307.46" width="19.84" height="12.54" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="118" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">1</text>
+<text x="118" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="140.08" y="213.23" width="19.84" height="106.77" fill="#1D9E75" stroke="#1D9E75" stroke-width="0.8"/>
+<text x="150" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">2</text>
+<text x="150" y="351" font-size="12" fill="#0F6E56" text-anchor="middle" font-weight="bold">1</text>
+<rect x="172.08" y="313.95" width="19.84" height="6.05" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="182" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">3</text>
+<text x="182" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="204.08" y="313.07" width="19.84" height="6.93" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="214" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">4</text>
+<text x="214" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="236.08" y="220.02" width="19.84" height="99.98" fill="#1D9E75" stroke="#1D9E75" stroke-width="0.8"/>
+<text x="246" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">5</text>
+<text x="246" y="351" font-size="12" fill="#0F6E56" text-anchor="middle" font-weight="bold">1</text>
+<rect x="268.08" y="312.38" width="19.84" height="7.62" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="278" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">6</text>
+<text x="278" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="300.08" y="314.4" width="19.84" height="5.6" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="310" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">7</text>
+<text x="310" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="332.08" y="310.85" width="19.84" height="9.15" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="342" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">8</text>
+<text x="342" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="364.08" y="230.4" width="19.84" height="89.6" fill="#7F77DD" stroke="#7F77DD" stroke-width="0.8"/>
+<text x="374" y="334" font-size="9" fill="#7F77DD" text-anchor="middle" font-weight="bold">STOP</text>
+<line x1="86" y1="213.6" x2="374" y2="230.4" stroke="#2C2C2A" stroke-width="1.5" stroke-dasharray="5 3"/>
+<polyline fill="none" stroke="#BA7517" stroke-width="2" stroke-linejoin="round" points="86,263.61 118,264.6 150,265.59 182,266.58 214,267.57 246,268.55 278,269.54 310,270.53 342,271.52 374,272.51"/>
+<circle cx="86" cy="213.6" r="3" fill="#2C2C2A"/>
+<circle cx="374" cy="230.4" r="3" fill="#2C2C2A"/>
+<text x="230" y="369" font-size="11" fill="#0F6E56" text-anchor="middle" font-weight="bold">decided = 0x48 'H', as sent</text>
+<text x="36" y="388" font-size="10" fill="#5F5E5A">START 95 %, STOP 80 %; the line at 53 % of the reference; T 16.08 ms</text>
+<rect x="416" y="90" width="380" height="310" fill="#FFFFFF" stroke="#D3D1C7" stroke-width="1" rx="8"/>
+<text x="428" y="110" font-size="12" fill="#2C2C2A" font-weight="bold">Fading: package 14 of a 59-byte text</text>
+<text x="428" y="126" font-size="10" fill="#5F5E5A">hf, CCIR poor (2 ms, 1 Hz Doppler), SNR 20 dB; the steepest reference line</text>
+<line x1="462" y1="320" x2="462" y2="152" stroke="#888780" stroke-width="1"/>
+<line x1="462" y1="320" x2="782" y2="320" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="458" y1="320" x2="462" y2="320" stroke="#888780" stroke-width="1"/>
+<text x="456" y="324" font-size="11" fill="#5F5E5A" text-anchor="end">0</text>
+<line x1="462" y1="264" x2="782" y2="264" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="458" y1="264" x2="462" y2="264" stroke="#888780" stroke-width="1"/>
+<text x="456" y="268" font-size="11" fill="#5F5E5A" text-anchor="end">50</text>
+<line x1="462" y1="208" x2="782" y2="208" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="458" y1="208" x2="462" y2="208" stroke="#888780" stroke-width="1"/>
+<text x="456" y="212" font-size="11" fill="#5F5E5A" text-anchor="end">100</text>
+<line x1="462" y1="152" x2="782" y2="152" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="458" y1="152" x2="462" y2="152" stroke="#888780" stroke-width="1"/>
+<text x="456" y="156" font-size="11" fill="#5F5E5A" text-anchor="end">150</text>
+<text x="426" y="236" font-size="9" fill="#5F5E5A" text-anchor="middle" transform="rotate(-90 426 236)">level (% of the marker average)</text>
+<rect x="468.08" y="202.4" width="19.84" height="117.6" fill="#7F77DD" stroke="#7F77DD" stroke-width="0.8"/>
+<text x="478" y="334" font-size="9" fill="#7F77DD" text-anchor="middle" font-weight="bold">START</text>
+<rect x="500.08" y="318.89" width="19.84" height="1.11" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="510" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">1</text>
+<text x="510" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="532.08" y="222.32" width="19.84" height="97.68" fill="#1D9E75" stroke="#1D9E75" stroke-width="0.8"/>
+<text x="542" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">2</text>
+<text x="542" y="351" font-size="12" fill="#0F6E56" text-anchor="middle" font-weight="bold">1</text>
+<rect x="564.08" y="317.09" width="19.84" height="2.91" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="574" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">3</text>
+<text x="574" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="596.08" y="237.9" width="19.84" height="82.1" fill="#1D9E75" stroke="#1D9E75" stroke-width="0.8"/>
+<text x="606" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">4</text>
+<text x="606" y="351" font-size="12" fill="#0F6E56" text-anchor="middle" font-weight="bold">1</text>
+<rect x="628.08" y="244.13" width="19.84" height="75.87" fill="#1D9E75" stroke="#1D9E75" stroke-width="0.8"/>
+<text x="638" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">5</text>
+<text x="638" y="351" font-size="12" fill="#0F6E56" text-anchor="middle" font-weight="bold">1</text>
+<rect x="660.08" y="318.47" width="19.84" height="1.53" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="670" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">6</text>
+<text x="670" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="692.08" y="316.52" width="19.84" height="3.48" fill="#F1EFE8" stroke="#888780" stroke-width="0.8"/>
+<text x="702" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">7</text>
+<text x="702" y="351" font-size="12" fill="#2C2C2A" text-anchor="middle" font-weight="bold">0</text>
+<rect x="724.08" y="252.13" width="19.84" height="67.87" fill="#1D9E75" stroke="#1D9E75" stroke-width="0.8"/>
+<text x="734" y="334" font-size="9" fill="#5F5E5A" text-anchor="middle">8</text>
+<text x="734" y="351" font-size="12" fill="#0F6E56" text-anchor="middle" font-weight="bold">1</text>
+<rect x="756.08" y="264" width="19.84" height="56" fill="#7F77DD" stroke="#7F77DD" stroke-width="0.8"/>
+<text x="766" y="334" font-size="9" fill="#7F77DD" text-anchor="middle" font-weight="bold">STOP</text>
+<line x1="478" y1="202.4" x2="766" y2="264" stroke="#2C2C2A" stroke-width="1.5" stroke-dasharray="5 3"/>
+<polyline fill="none" stroke="#BA7517" stroke-width="2" stroke-linejoin="round" points="478,261.2 510,264.62 542,268.04 574,271.47 606,274.89 638,278.31 670,281.73 702,285.16 734,288.58 766,292"/>
+<circle cx="478" cy="202.4" r="3" fill="#2C2C2A"/>
+<circle cx="766" cy="264" r="3" fill="#2C2C2A"/>
+<text x="622" y="369" font-size="11" fill="#0F6E56" text-anchor="middle" font-weight="bold">decided = 0x59 'Y', as sent</text>
+<text x="428" y="388" font-size="10" fill="#5F5E5A">START 105 %, STOP 50 %; the line at 50 % of the reference; T 16.01 ms</text>
+<rect x="24" y="412" width="12" height="12" fill="#7F77DD" stroke="#888780" stroke-width="0.5" rx="2"/>
+<text x="42" y="422" font-size="11" fill="#2C2C2A">START / STOP crest</text>
+<line x1="168.96" y1="418" x2="192.96" y2="418" stroke="#2C2C2A" stroke-width="1.5" stroke-dasharray="5 3"/>
+<text x="198.96" y="422" font-size="11" fill="#2C2C2A">reference line: how tall a 1 is</text>
+<line x1="400.28" y1="418" x2="424.28" y2="418" stroke="#BA7517" stroke-width="2"/>
+<text x="430.28" y="422" font-size="11" fill="#2C2C2A">decision line</text>
+<rect x="528.64" y="412" width="12" height="12" fill="#1D9E75" stroke="#1D9E75" stroke-width="0.5" rx="2"/>
+<text x="546.64" y="422" font-size="11" fill="#2C2C2A">decided 1</text>
+<rect x="622.12" y="412" width="12" height="12" fill="#F1EFE8" stroke="#888780" stroke-width="0.5" rx="2"/>
+<text x="640.12" y="422" font-size="11" fill="#2C2C2A">decided 0</text>
+<text x="24" y="448" font-size="11" fill="#5F5E5A">The markers have the height of a data 1, so the line from the START crest to the STOP crest says how tall a 1 is at every slot, even in a fade.</text>
+<text x="24" y="464" font-size="11" fill="#5F5E5A">A slot above the decision line is a 1. The smart line sits at 50–75 % of the reference (about 70 % when weak, lower when clean), never below the noise.</text>
+</svg>
