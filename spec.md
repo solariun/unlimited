@@ -9,7 +9,7 @@ primary target is HF SSB (USB or LSB, any tuning shift inside the tolerance of �
 macOS, Windows) and MCUs (Arduino, STM32, ESP8266, ESP32).
 
 **Status (2026-09-26): v0.2 implemented, hardened, and its public API FROZEN (§5).** Verification on the frozen
-tree: `make test` 213/213; `make test_long` 159 PASS / 0 FAIL / 87 REPORT; `make check_embedded` (host, xtensa, AVR,
+tree: `make test` 213/213; `make test_long` 155 PASS / 4 FAIL / 87 REPORT (the 4 FAIL rows are the A5 implementation-loss item, §11); `make check_embedded` (host, xtensa, AVR,
 decoder and queue variants, heap trap, AVR ISR cycle gate); `make arduino_check`; `make demo_run` 5/5; unit tests
 under ASan + UBSan clean. v0.1 (single-tone OOK peaks) is **superseded**: its OOK data symbol is not kept as a mode.
 This file is normative: every change to behaviour, API, layout or tests is recorded here first (Spec-Driven
@@ -1021,8 +1021,7 @@ Values in the code are normative; this table lists them by stage.
 **Removed:** `k_rho_*`, `k_floor_sigma`, `k_gap_window`, `k_slot_window`, `k_g_slot`, `k_weak_margin`,
 `k_loud_zero`, `k_guard_max_level`, `k_end_max_level`, the OOK marker-edge and zero-pair constants,
 `k_default_fixed_ratio`, `k_timing_gain` in TRACK, `k_preamble_max_gap`. `k_header_bg_scale` (2.732, the design's
-self-background factor) is still declared in `dsp.hpp` but no longer used: the header ML subtracts the per-tone floor
-instead (§3.8 step 3; §11).
+self-background factor) was removed on 2026-09-26: the header ML subtracts the per-tone floor instead (§3.8 step 3).
 
 ### 3.15 Memory and CPU
 
@@ -1230,7 +1229,7 @@ Basis for "cold late join needs M ≥ 2N" and for mode memory as the core path.
 
 ### 4.8 Integrated decoder (*measured*, `make test_long`, frozen tree, 2026-09-26)
 
-159 PASS / 0 FAIL / 87 REPORT in 232 s (10 cores). One seed set per point; results are deterministic (identical on
+155 PASS / 4 FAIL / 87 REPORT in about 240 s (10 cores); the 4 FAIL rows are A5 genie ratios (below and §11). One seed set per point; results are deterministic (identical on
 rerun). USB offsets −50..+50 Hz unless stated. Full result lines: §9.
 
 **AWGN at the A1′ gates** (BER ≤ 1e-3 and frames ≥ 95% gated):
@@ -1330,7 +1329,7 @@ host clang, `avr-g++ -mmcu=atmega328p` and `xtensa-esp32-elf-g++` (`check_embedd
 **The listings below are the frozen public headers**, generated from `src/unlimited.h` and `src/unlimited/*.hpp`
 with only the `private:` sections removed (comments, includes and declarations verbatim). They were diffed against
 the tree on 2026-09-26 and match exactly. Private members are implementation detail. Where a header comment
-disagrees with §1–§4 (three comments, listed in §11), the numbered sections are normative.
+disagrees with §1–§4, the numbered sections are normative.
 
 ```cpp
 // src/unlimited.h
@@ -1476,8 +1475,8 @@ uint16_t header_word(uint8_t bits_per_peak, uint8_t data_slots, uint32_t slot_us
 HeaderFields header_fields(uint16_t word);
 uint8_t header_symbol(uint16_t word, uint8_t slot);  // tone 0..7 of header slot 0..7
 
-// Data mapping (spec 1.5): slot i = 1..N of a frame carries symbol s on tone (gray(s) + (i - 1) r) mod M,
-// M = 2^k, r = tone_rotation(k). `slot` below is i - 1.
+// Data mapping (spec 1.5): slot i = 1..N of a frame carries symbol s on tone (gray^-1(s) + (i - 1) r) mod M,
+// M = 2^k, r = tone_rotation(k), so de-rotated neighbouring tones differ in one bit. `slot` below is i - 1.
 uint8_t gray_encode(uint8_t value);
 uint8_t gray_decode(uint8_t value);
 uint8_t tone_rotation(uint8_t bits_per_peak);  // (M / 8) | 1
@@ -1567,7 +1566,7 @@ struct EncoderStatus {
     EncoderSegment segment;
     SlotKind kind;               // kind of the slot being rendered
     uint8_t byte;                // frame segment: first byte of the frame being sent, else 0
-    uint8_t slot;                // header 0..7, frame 0..N-1 peak slot; the STOP gives 8 (header) or N (frame)
+    uint8_t slot;                // header 0..7, frame 0..N-1 peak slot; the STOP gives 8 (header) or the frame's peak count
     uint8_t symbol;              // k-bit value of the peak being rendered (header: 0..7)
     uint8_t tone;                // grid tone index of the peak being rendered
     uint32_t slot_index;         // slot being rendered, counted from 0 at start(), lead-in included; +1 per slot
@@ -1643,7 +1642,7 @@ struct Event {
     uint8_t value;                // byte: the byte; slot: the k-bit symbol
     uint8_t index;                // byte: 0..frame_bytes-1 in its frame; slot: 1..N
     uint8_t tone;                 // slot: grid tone index as received
-    uint8_t level_pct;            // slot: winner amplitude, % of the interpolated START/STOP crest (<= 255)
+    uint8_t level_pct;            // slot: winner amplitude, % of the frame's START crest (<= 255)
     uint8_t confidence;           // slot: 10 log10(E_best / E_second), 0.5 dB steps (<= 255)
     int8_t soft[k_bits_per_byte]; // byte: bit LLRs MSB first; slot: soft[0..k-1]; > 0 means 1; 16 per nat, |soft| <= 112
     uint8_t bits_per_peak;        // mode, valid from locked to end/lost, else 0
@@ -2082,7 +2081,6 @@ static const uint16_t k_min_grid_bins = 8;
 static const uint16_t k_grid_bins = k_max_grid_tones > k_min_grid_bins ? k_max_grid_tones : k_min_grid_bins;
 static const float k_peak_window_mean = 0.875f;        // sum of w / L for the Tukey alpha 0.25 window
 
-static const float k_header_bg_scale = 2.732f;        // 1 / E[mean of the 4 smallest of 8 unit exponentials]
 static const uint8_t k_header_bg_slots = 4;           // smallest slot energies per side and tone
 static const uint8_t k_header_noise_rank = 9;         // N_h = 9th smallest of the 16 tone spreads (both sides)
 static const uint8_t k_header_side_noise_rank = 5;    // a side's own noise: 5th smallest of its 8 tone spreads
@@ -2544,7 +2542,8 @@ unlimited/
   examples/arduino/rx_esp32/rx_esp32.ino            ADC DMA 24 kHz → decimate by 3 → Decoder → PacketReader → Serial
   examples/arduino/loopback_esp32/loopback_esp32.ino encoder → decoder in RAM at every preset, CPU load printed
   examples/arduino/wav_sd_esp32/wav_sd_esp32.ino    Encoder → WavWriter → SD card (core WAV codec on an MCU)
-  README.md  docs/                                  §12.2 deliverables, not yet written
+  README.md                                         complete public overview (design, protocol, worked example, API)
+  tools/doc_figures.cpp  tools/doc_examples.cpp     `make docs` → docs/images/*.svg and docs/protocol_examples.md
 ```
 
 - Arduino compiles only `src/` recursively, so PC code lives in `pc/`.
@@ -2556,7 +2555,7 @@ unlimited/
 
 **library.properties:** name=Unlimited, author/maintainer Gustavo Campos, sentence "Robust tone-peak data modem for
 HF, VHF and UHF radio audio.", category=Communication, url=https://github.com/solariun/unlimited, architectures=*,
-includes=unlimited.h. `version` is 0.1.0 in the tree and becomes **0.2.0 at the v0.2 release** (§11).
+includes=unlimited.h. `version` is 0.2.0.
 
 **Makefile targets** (`make help` lists them):
 
@@ -2633,7 +2632,7 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--tone-ran
 - REPORT rows print their value without a gate (statistics, design limits, decisions G1/G4/C12, F6 points).
 - BER-only and ratio gates also require ≥ 50% of the frames delivered (a run that releases nothing cannot pass).
 - Tests marked ′ replace their v0.1 version; v0.1 tests not listed as changed or removed stand as written.
-- **Current status:** `make test` 213/213; `make test_long` 159 PASS / 0 FAIL / 87 REPORT; `check_embedded`,
+- **Current status:** `make test` 213/213; `make test_long` 155 PASS / 4 FAIL (A5, §11) / 87 REPORT; `check_embedded`,
   `arduino_check`, `demo_run` pass; unit tests clean under ASan + UBSan.
 
 ### 8.1 Unit tests (`make test`)
@@ -2862,7 +2861,9 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--tone-ran
    above 1.51, hf N32 1.50 (§4.8). Likely residual timing/AFC error at long slots (§4.1: 0.1/T costs 0.14–0.43 dB).
    The gate is kept; the decoder is to be improved.
 2. B4′ "PC decode ≥ 500× real time" has no automated test (only the resampler's speed is gated).
-3. `README.md` and `docs/` do not exist yet (§12.2).
+3. Documentation: `README.md` (complete overview, protocol, worked example, API, performance) and `docs/`
+   (`make docs`: figures generated from the real code in `docs/images/`, bit-exact `docs/protocol_examples.md`)
+   exist since 2026-09-26; the rest of §12.2 (per-topic documents) comes with the modem phase.
 
 **Open decisions:** tighten C4 to BER ≤ 5e-4 (*measured* 6.9e-5; proposed by the long-suite work); the C13 23 dB
 row; when to take the deferred API of H6.
@@ -2903,8 +2904,8 @@ Everything about the project, in `docs/` (English), rendered on GitHub:
   header loss, mode memory, late join, AGC, QRN, carriers in the grid, FM clicks, clock error, LSB/USB inversion,
   mistuning, end of transmission, lost signal);
 - diagrams: Mermaid (state machine, pipelines, layering) and SVG;
-- **signal images generated from the real encoder/decoder** (`tools/plot_signals.cpp` → `docs/images/*.svg`,
-  `make docs_images`): each slot kind, envelopes, phase reversal, the header, a full transmission, spectra and
+- **signal images generated from the real encoder/decoder** (`tools/doc_figures.cpp` → `docs/images/*.svg`,
+  `make docs`; the first nine figures exist since 2026-09-26): each slot kind, envelopes, phase reversal, the header, a full transmission, spectra and
   waterfall of the grid, channel impairments, decoder views, BER curves;
 - API reference, audio I/O and drivers, channel simulator, TUI, testing and results, porting to MCUs (caps, bank
   variant, cycle counts), operating guide (levels, ALC, VOX, PTT, duty cycle and drive for 100% duty), modem usage.

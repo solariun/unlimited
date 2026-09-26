@@ -65,12 +65,12 @@ FQBN_UNO   = arduino:avr:uno
 FQBN_ESP32 = esp32:esp32:esp32
 ARDUINO_BUILD = $(BUILDDIR)/arduino
 
-.PHONY: all lib demo test test_long check_embedded arduino_check demo_run tables clean help
+.PHONY: all lib demo test test_long check_embedded arduino_check demo_run tables docs clean help
 
 all: lib demo
 
 help:
-	@echo "make [all|lib|demo|test|test_long|check_embedded|arduino_check|demo_run|tables|clean]"
+	@echo "make [all|lib|demo|test|test_long|check_embedded|arduino_check|demo_run|tables|docs|clean]"
 
 lib: $(LIB)
 
@@ -222,6 +222,27 @@ tables: $(GEN_TABLES)
 $(GEN_TABLES): tools/gen_tables.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $< -o $@
+
+# Documentation generated from the library itself: tools/doc_figures.cpp draws docs/images/*.svg from the real
+# Encoder, sim::Channel and Decoder (the BER figure runs the chain on every core, about 20 s on 10 cores);
+# tools/doc_examples.cpp prints the bit-exact protocol examples of docs/protocol_examples.md.
+DOCS_DIR     = docs
+DOC_FIGURES  = $(BUILDDIR)/tools/doc_figures
+DOC_EXAMPLES = $(BUILDDIR)/tools/doc_examples
+docs: $(DOC_FIGURES) $(DOC_EXAMPLES)
+	@mkdir -p $(DOCS_DIR)/images
+	./$(DOC_FIGURES) $(DOCS_DIR)/images
+	./$(DOC_EXAMPLES) > $(DOCS_DIR)/protocol_examples.md.tmp
+	mv $(DOCS_DIR)/protocol_examples.md.tmp $(DOCS_DIR)/protocol_examples.md
+	@echo "docs: $(DOCS_DIR)/images/*.svg and $(DOCS_DIR)/protocol_examples.md regenerated"
+
+$(DOC_FIGURES): $(BUILDDIR)/tools/doc_figures.o $(SUPPORT_OBJ) $(PC_OBJ) $(LIB_DEP)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+$(DOC_EXAMPLES): $(BUILDDIR)/tools/doc_examples.o $(LIB_DEP)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 clean:
 	rm -rf $(BUILDDIR) $(BINDIR)

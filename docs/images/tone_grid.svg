@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="820" height="482" viewBox="0 0 820 482" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img">
+<title>Unlimited hf tone grid</title>
+<desc>Frequency layout of the hf preset: passband, f_ref, guard, 32 data tones, header tones, tuning tolerance, and the LSB mirror.</desc>
+<rect x="0.5" y="0.5" width="819" height="481" rx="12" fill="#FFFFFF" stroke="#D3D1C7"/>
+<text x="24" y="32" font-size="16" fill="#2C2C2A" font-weight="bold">The hf tone grid</text>
+<text x="24" y="52" font-size="12" fill="#5F5E5A">T 32 ms, k 5 (M = 32 tones), N 8, standard spacing 8/(7T), grid below f_ref; exact grid of spec 1.3.</text>
+<rect x="72.92" y="78" width="694.15" height="312" fill="#F1EFE8"/>
+<text x="78.92" y="92" font-size="11" fill="#5F5E5A">receiver passband 300–2700 Hz</text>
+<text x="78.92" y="120" font-size="12" fill="#2C2C2A" font-weight="bold">USB, as sent</text>
+<line x1="602.79" y1="100" x2="602.79" y2="162" stroke="#7F77DD" stroke-width="2.5"/>
+<text x="602.79" y="94" font-size="11" fill="#7F77DD" text-anchor="middle" font-weight="bold">f_ref 2132 Hz</text>
+<line x1="557.6" y1="122" x2="557.6" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="557.6" y="169" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">0</text>
+<line x1="547.27" y1="122" x2="547.27" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="536.94" y1="122" x2="536.94" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="526.61" y1="122" x2="526.61" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="516.28" y1="122" x2="516.28" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="505.95" y1="122" x2="505.95" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="495.62" y1="122" x2="495.62" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="485.29" y1="122" x2="485.29" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="474.96" y1="122" x2="474.96" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="474.96" y="169" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">8</text>
+<line x1="464.63" y1="122" x2="464.63" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="454.3" y1="122" x2="454.3" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="443.98" y1="122" x2="443.98" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="433.65" y1="122" x2="433.65" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="423.32" y1="122" x2="423.32" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="412.99" y1="122" x2="412.99" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="402.66" y1="122" x2="402.66" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="392.33" y1="122" x2="392.33" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="392.33" y="169" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">16</text>
+<line x1="382" y1="122" x2="382" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="371.67" y1="122" x2="371.67" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="361.34" y1="122" x2="361.34" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="351.01" y1="122" x2="351.01" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="340.68" y1="122" x2="340.68" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="330.35" y1="122" x2="330.35" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="320.02" y1="122" x2="320.02" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="309.69" y1="122" x2="309.69" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="309.69" y="169" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">24</text>
+<line x1="299.36" y1="122" x2="299.36" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="289.03" y1="122" x2="289.03" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="278.7" y1="122" x2="278.7" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="268.37" y1="122" x2="268.37" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="258.04" y1="122" x2="258.04" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="247.71" y1="122" x2="247.71" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="237.38" y1="122" x2="237.38" y2="156" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="237.38" y="169" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">31</text>
+<line x1="557.6" y1="114" x2="602.79" y2="114" stroke="#BA7517" stroke-width="1.5"/>
+<polygon fill="#BA7517" points="557.6,114 564.6,110 564.6,118"/>
+<polygon fill="#BA7517" points="602.79,114 595.79,110 595.79,118"/>
+<text x="551.6" y="118" font-size="11" fill="#BA7517" text-anchor="end" font-weight="bold">guard 5/T = 156.25 Hz</text>
+<text x="397.49" y="186" font-size="10" fill="#5F5E5A" text-anchor="middle">data tone index n: f_n = f_ref − (5 + 8n/7)/T, spacing 8/(7T) = 35.71 Hz</text>
+<circle cx="557.6" cy="208" r="3.5" fill="#0F6E56"/>
+<circle cx="547.27" cy="208" r="3.5" fill="#0F6E56"/>
+<circle cx="536.94" cy="208" r="3.5" fill="#0F6E56"/>
+<circle cx="526.61" cy="208" r="3.5" fill="#0F6E56"/>
+<circle cx="516.28" cy="208" r="3.5" fill="#0F6E56"/>
+<circle cx="505.95" cy="208" r="3.5" fill="#0F6E56"/>
+<circle cx="495.62" cy="208" r="3.5" fill="#0F6E56"/>
+<circle cx="485.29" cy="208" r="3.5" fill="#0F6E56"/>
+<text x="475.29" y="212" font-size="11" fill="#0F6E56" text-anchor="end">header tones h = 0–7 (standard grid in every mode)</text>
+<rect x="237.38" y="239" width="365.41" height="10" fill="#E1F5EE" stroke="#1D9E75" stroke-width="1" rx="2"/>
+<text x="420.09" y="248" font-size="10" fill="#2C2C2A" text-anchor="middle">occupied 869–2132 Hz (1263 Hz), centred on 1500 Hz</text>
+<line x1="92.77" y1="244" x2="237.38" y2="244" stroke="#BA7517" stroke-width="1.5" stroke-dasharray="4 3"/>
+<line x1="602.79" y1="244" x2="747.41" y2="244" stroke="#BA7517" stroke-width="1.5" stroke-dasharray="4 3"/>
+<polygon fill="#BA7517" points="92.77,244 99.77,240 99.77,248"/>
+<polygon fill="#BA7517" points="747.41,244 740.41,240 740.41,248"/>
+<text x="420" y="266" font-size="10" fill="#BA7517" text-anchor="middle">tuning tolerance ±500 Hz (spec 1.4): the whole band stays in 300–2700 Hz (room: 569 Hz below, 568 Hz above)</text>
+<text x="78.92" y="296" font-size="12" fill="#2C2C2A" font-weight="bold">LSB receiver: f → 3000 − f</text>
+<line x1="237.21" y1="308" x2="237.21" y2="358" stroke="#7F77DD" stroke-width="2.5"/>
+<text x="231.21" y="318" font-size="11" fill="#7F77DD" text-anchor="end" font-weight="bold">f_ref 868 Hz</text>
+<line x1="282.4" y1="318" x2="282.4" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="282.4" y="365" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">0</text>
+<line x1="292.73" y1="318" x2="292.73" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="303.06" y1="318" x2="303.06" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="313.39" y1="318" x2="313.39" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="323.72" y1="318" x2="323.72" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="334.05" y1="318" x2="334.05" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="344.38" y1="318" x2="344.38" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="354.71" y1="318" x2="354.71" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="365.04" y1="318" x2="365.04" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="365.04" y="365" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">8</text>
+<line x1="375.37" y1="318" x2="375.37" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="385.7" y1="318" x2="385.7" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="396.02" y1="318" x2="396.02" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="406.35" y1="318" x2="406.35" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="416.68" y1="318" x2="416.68" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="427.01" y1="318" x2="427.01" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="437.34" y1="318" x2="437.34" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="447.67" y1="318" x2="447.67" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="447.67" y="365" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">16</text>
+<line x1="458" y1="318" x2="458" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="468.33" y1="318" x2="468.33" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="478.66" y1="318" x2="478.66" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="488.99" y1="318" x2="488.99" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="499.32" y1="318" x2="499.32" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="509.65" y1="318" x2="509.65" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="519.98" y1="318" x2="519.98" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="530.31" y1="318" x2="530.31" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="530.31" y="365" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">24</text>
+<line x1="540.64" y1="318" x2="540.64" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="550.97" y1="318" x2="550.97" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="561.3" y1="318" x2="561.3" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="571.63" y1="318" x2="571.63" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="581.96" y1="318" x2="581.96" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="592.29" y1="318" x2="592.29" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<line x1="602.62" y1="318" x2="602.62" y2="352" stroke="#1D9E75" stroke-width="1.6"/>
+<text x="602.62" y="365" font-size="10" fill="#1D9E75" text-anchor="middle" font-weight="bold">31</text>
+<text x="614.62" y="339" font-size="11" fill="#2C2C2A">grid above f_ref: the header</text>
+<text x="614.62" y="355" font-size="11" fill="#2C2C2A">tells the decoder (σ_rx = +1)</text>
+<line x1="44" y1="398" x2="796" y2="398" stroke="#888780" stroke-width="1"/>
+<line x1="130.77" y1="398" x2="130.77" y2="402" stroke="#888780" stroke-width="1"/>
+<text x="130.77" y="412" font-size="11" fill="#5F5E5A" text-anchor="middle">500</text>
+<line x1="203.08" y1="398" x2="203.08" y2="402" stroke="#888780" stroke-width="1"/>
+<line x1="275.38" y1="398" x2="275.38" y2="402" stroke="#888780" stroke-width="1"/>
+<text x="275.38" y="412" font-size="11" fill="#5F5E5A" text-anchor="middle">1000</text>
+<line x1="347.69" y1="398" x2="347.69" y2="402" stroke="#888780" stroke-width="1"/>
+<line x1="420" y1="398" x2="420" y2="402" stroke="#888780" stroke-width="1"/>
+<text x="420" y="412" font-size="11" fill="#5F5E5A" text-anchor="middle">1500</text>
+<line x1="492.31" y1="398" x2="492.31" y2="402" stroke="#888780" stroke-width="1"/>
+<line x1="564.62" y1="398" x2="564.62" y2="402" stroke="#888780" stroke-width="1"/>
+<text x="564.62" y="412" font-size="11" fill="#5F5E5A" text-anchor="middle">2000</text>
+<line x1="636.92" y1="398" x2="636.92" y2="402" stroke="#888780" stroke-width="1"/>
+<line x1="709.23" y1="398" x2="709.23" y2="402" stroke="#888780" stroke-width="1"/>
+<text x="709.23" y="412" font-size="11" fill="#5F5E5A" text-anchor="middle">2500</text>
+<text x="420" y="428" font-size="10" fill="#5F5E5A" text-anchor="middle">audio frequency (Hz)</text>
+<text x="24" y="452" font-size="11" fill="#5F5E5A">LSB mirrors the audio, so the grid lands on the other side of f_ref.</text>
+<text x="24" y="468" font-size="11" fill="#5F5E5A">The tone index is the distance from f_ref, so the decoder only flips σ_rx; the header's ML decides it.</text>
+</svg>

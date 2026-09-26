@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="820" height="516" viewBox="0 0 820 516" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img">
+<title>Unlimited BER in AWGN</title>
+<desc>Measured bit error rate against SNR for the hf_fast, hf, hf_robust and hf_weak presets, with noncoherent MFSK theory and the v0.1 OOK point.</desc>
+<rect x="0.5" y="0.5" width="819" height="515" rx="12" fill="#FFFFFF" stroke="#D3D1C7"/>
+<text x="24" y="32" font-size="16" fill="#2C2C2A" font-weight="bold">BER vs SNR in AWGN, measured on the integrated decoder</text>
+<text x="24" y="52" font-size="12" fill="#5F5E5A">Real Encoder → sim::Channel (USB, AWGN, tuned ±50 Hz) → real Decoder (ssb profile).</text>
+<text x="24" y="68" font-size="12" fill="#5F5E5A">50 transmissions of 250 random bytes per point (100000 bits sent), measured by make docs.</text>
+<clipPath id="clip1"><rect x="70" y="95" width="520" height="322"/></clipPath>
+<line x1="70" y1="416" x2="590" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<text x="64" y="420" font-size="11" fill="#5F5E5A" text-anchor="end">1e-5</text>
+<line x1="67" y1="391.92" x2="70" y2="391.92" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="377.83" x2="70" y2="377.83" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="367.84" x2="70" y2="367.84" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="360.08" x2="70" y2="360.08" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="353.75" x2="70" y2="353.75" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="348.39" x2="70" y2="348.39" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="343.75" x2="70" y2="343.75" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="339.66" x2="70" y2="339.66" stroke="#888780" stroke-width="0.8"/>
+<line x1="70" y1="336" x2="590" y2="336" stroke="#ECEAE2" stroke-width="1"/>
+<text x="64" y="340" font-size="11" fill="#5F5E5A" text-anchor="end">1e-4</text>
+<line x1="67" y1="311.92" x2="70" y2="311.92" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="297.83" x2="70" y2="297.83" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="287.84" x2="70" y2="287.84" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="280.08" x2="70" y2="280.08" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="273.75" x2="70" y2="273.75" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="268.39" x2="70" y2="268.39" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="263.75" x2="70" y2="263.75" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="259.66" x2="70" y2="259.66" stroke="#888780" stroke-width="0.8"/>
+<line x1="70" y1="256" x2="590" y2="256" stroke="#ECEAE2" stroke-width="1"/>
+<text x="64" y="260" font-size="11" fill="#5F5E5A" text-anchor="end">1e-3</text>
+<line x1="67" y1="231.92" x2="70" y2="231.92" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="217.83" x2="70" y2="217.83" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="207.84" x2="70" y2="207.84" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="200.08" x2="70" y2="200.08" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="193.75" x2="70" y2="193.75" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="188.39" x2="70" y2="188.39" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="183.75" x2="70" y2="183.75" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="179.66" x2="70" y2="179.66" stroke="#888780" stroke-width="0.8"/>
+<line x1="70" y1="176" x2="590" y2="176" stroke="#ECEAE2" stroke-width="1"/>
+<text x="64" y="180" font-size="11" fill="#5F5E5A" text-anchor="end">1e-2</text>
+<line x1="67" y1="151.92" x2="70" y2="151.92" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="137.83" x2="70" y2="137.83" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="127.84" x2="70" y2="127.84" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="120.08" x2="70" y2="120.08" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="113.75" x2="70" y2="113.75" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="108.39" x2="70" y2="108.39" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="103.75" x2="70" y2="103.75" stroke="#888780" stroke-width="0.8"/>
+<line x1="67" y1="99.66" x2="70" y2="99.66" stroke="#888780" stroke-width="0.8"/>
+<line x1="70" y1="96" x2="590" y2="96" stroke="#ECEAE2" stroke-width="1"/>
+<text x="64" y="100" font-size="11" fill="#5F5E5A" text-anchor="end">1e-1</text>
+<line x1="70" y1="96" x2="70" y2="416" stroke="#888780" stroke-width="1"/>
+<line x1="70" y1="416" x2="590" y2="416" stroke="#888780" stroke-width="1"/>
+<line x1="70" y1="96" x2="70" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="70" y1="416" x2="70" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="70" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−15</text>
+<line x1="102.5" y1="96" x2="102.5" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="102.5" y1="416" x2="102.5" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="102.5" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−14</text>
+<line x1="135" y1="96" x2="135" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="135" y1="416" x2="135" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="135" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−13</text>
+<line x1="167.5" y1="96" x2="167.5" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="167.5" y1="416" x2="167.5" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="167.5" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−12</text>
+<line x1="200" y1="96" x2="200" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="200" y1="416" x2="200" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="200" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−11</text>
+<line x1="232.5" y1="96" x2="232.5" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="232.5" y1="416" x2="232.5" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="232.5" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−10</text>
+<line x1="265" y1="96" x2="265" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="265" y1="416" x2="265" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="265" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−9</text>
+<line x1="297.5" y1="96" x2="297.5" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="297.5" y1="416" x2="297.5" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="297.5" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−8</text>
+<line x1="330" y1="96" x2="330" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="330" y1="416" x2="330" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="330" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−7</text>
+<line x1="362.5" y1="96" x2="362.5" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="362.5" y1="416" x2="362.5" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="362.5" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−6</text>
+<line x1="395" y1="96" x2="395" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="395" y1="416" x2="395" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="395" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−5</text>
+<line x1="427.5" y1="96" x2="427.5" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="427.5" y1="416" x2="427.5" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="427.5" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−4</text>
+<line x1="460" y1="96" x2="460" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="460" y1="416" x2="460" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="460" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−3</text>
+<line x1="492.5" y1="96" x2="492.5" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="492.5" y1="416" x2="492.5" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="492.5" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−2</text>
+<line x1="525" y1="96" x2="525" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="525" y1="416" x2="525" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="525" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">−1</text>
+<line x1="557.5" y1="96" x2="557.5" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="557.5" y1="416" x2="557.5" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="557.5" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">0</text>
+<line x1="590" y1="96" x2="590" y2="416" stroke="#ECEAE2" stroke-width="1"/>
+<line x1="590" y1="416" x2="590" y2="420" stroke="#888780" stroke-width="1"/>
+<text x="590" y="430" font-size="11" fill="#5F5E5A" text-anchor="middle">1</text>
+<rect x="70" y="96" width="520" height="320" fill="none" stroke="#888780" stroke-width="1"/>
+<line x1="70" y1="256" x2="590" y2="256" stroke="#BA7517" stroke-width="1.2" stroke-dasharray="6 4"/>
+<text x="586" y="251" font-size="10" fill="#BA7517" text-anchor="end" font-weight="bold">BER 1e-3</text>
+<text x="330" y="448" font-size="10" fill="#5F5E5A" text-anchor="middle">SNR (dB): key-down tone power over noise in 2500 Hz</text>
+<text x="20" y="256" font-size="10" fill="#5F5E5A" text-anchor="middle" transform="rotate(-90 20 256)">bit error rate</text>
+<g clip-path="url(#clip1)">
+<polyline fill="none" stroke="#D85A30" stroke-width="1" stroke-linejoin="round" stroke-dasharray="4 3" points="70,47.29 78.12,47.79 86.25,48.33 94.38,48.91 102.5,49.53 110.62,50.2 118.75,50.92 126.88,51.7 135,52.54 143.12,53.44 151.25,54.41 159.38,55.46 167.5,56.59 175.62,57.81 183.75,59.13 191.88,60.55 200,62.08 208.12,63.73 216.25,65.51 224.38,67.43 232.5,69.5 240.62,71.74 248.75,74.15 256.88,76.75 265,79.56 273.12,82.58 281.25,85.84 289.38,89.36 297.5,93.15 305.62,97.23 313.75,101.62 321.88,106.35 330,111.45 338.12,116.93 346.25,122.82 354.38,129.16 362.5,135.97 370.62,143.28 378.75,151.13 386.88,159.55 395,168.59 403.12,178.28 411.25,188.65 419.38,199.77 427.5,211.66 435.62,224.39 443.75,237.99 451.88,252.52 460,268.04 468.12,284.6 476.25,302.26 484.38,321.08 492.5,341.13 500.62,362.48 508.75,385.19 516.88,409.35 525,435.03"/>
+<polyline fill="none" stroke="#1D9E75" stroke-width="1" stroke-linejoin="round" stroke-dasharray="4 3" points="70,52.26 78.12,53.24 86.25,54.31 94.38,55.46 102.5,56.72 110.62,58.08 118.75,59.56 126.88,61.17 135,62.92 143.12,64.81 151.25,66.87 159.38,69.11 167.5,71.54 175.62,74.17 183.75,77.03 191.88,80.13 200,83.49 208.12,87.13 216.25,91.07 224.38,95.34 232.5,99.96 240.62,104.96 248.75,110.36 256.88,116.2 265,122.51 273.12,129.31 281.25,136.65 289.38,144.56 297.5,153.08 305.62,162.26 313.75,172.13 321.88,182.75 330,194.15 338.12,206.4 346.25,219.53 354.38,233.61 362.5,248.7 370.62,264.85 378.75,282.13 386.88,300.59 395,320.32 403.12,341.37 411.25,363.82 419.38,387.74 427.5,413.22 435.62,440.34"/>
+<polyline fill="none" stroke="#7F77DD" stroke-width="1" stroke-linejoin="round" stroke-dasharray="4 3" points="70,64.96 78.12,67.23 86.25,69.71 94.38,72.42 102.5,75.37 110.62,78.59 118.75,82.1 126.88,85.92 135,90.08 143.12,94.61 151.25,99.53 159.38,104.87 167.5,110.67 175.62,116.96 183.75,123.78 191.88,131.16 200,139.15 208.12,147.79 216.25,157.12 224.38,167.2 232.5,178.07 240.62,189.78 248.75,202.4 256.88,215.97 265,230.56 273.12,246.23 281.25,263.05 289.38,281.08 297.5,300.39 305.62,321.06 313.75,343.16 321.88,366.77 330,391.98 338.12,418.85"/>
+<polyline fill="none" stroke="#378ADD" stroke-width="1" stroke-linejoin="round" stroke-dasharray="4 3" points="70,100.34 78.12,106.12 86.25,112.41 94.38,119.26 102.5,126.71 110.62,134.8 118.75,143.58 126.88,153.1 135,163.4 143.12,174.56 151.25,186.61 159.38,199.63 167.5,213.68 175.62,228.81 183.75,245.11 191.88,262.63 200,281.46 208.12,301.68 216.25,323.35 224.38,346.56 232.5,371.41 240.62,397.96 248.75,426.32"/>
+</g>
+<polyline fill="none" stroke="#D85A30" stroke-width="1.8" stroke-linejoin="round" points="362.5,126.92 395,164.08 427.5,207.21 460,249.57 492.5,321.13 525,391.88"/>
+<circle cx="362.5" cy="126.92" r="4" fill="#FFFFFF" stroke="#D85A30" stroke-width="1.5"/>
+<circle cx="395" cy="164.08" r="4" fill="#FFFFFF" stroke="#D85A30" stroke-width="1.5"/>
+<circle cx="427.5" cy="207.21" r="4" fill="#FFFFFF" stroke="#D85A30" stroke-width="1.5"/>
+<circle cx="460" cy="249.57" r="4" fill="#D85A30" stroke="#D85A30" stroke-width="1.5"/>
+<circle cx="492.5" cy="321.13" r="4" fill="#D85A30" stroke="#D85A30" stroke-width="1.5"/>
+<circle cx="525" cy="391.88" r="4" fill="#D85A30" stroke="#D85A30" stroke-width="1.5"/>
+<polygon fill="#D85A30" points="553.5,412 561.5,412 557.5,420"/>
+<polyline fill="none" stroke="#1D9E75" stroke-width="1.8" stroke-linejoin="round" points="265,126.27 297.5,149.2 330,187.29 362.5,240.98 395,313.7"/>
+<circle cx="265" cy="126.27" r="4" fill="#FFFFFF" stroke="#1D9E75" stroke-width="1.5"/>
+<circle cx="297.5" cy="149.2" r="4" fill="#FFFFFF" stroke="#1D9E75" stroke-width="1.5"/>
+<circle cx="330" cy="187.29" r="4" fill="#FFFFFF" stroke="#1D9E75" stroke-width="1.5"/>
+<circle cx="362.5" cy="240.98" r="4" fill="#1D9E75" stroke="#1D9E75" stroke-width="1.5"/>
+<circle cx="395" cy="313.7" r="4" fill="#1D9E75" stroke="#1D9E75" stroke-width="1.5"/>
+<polygon fill="#1D9E75" points="423.5,412 431.5,412 427.5,420"/>
+<polygon fill="#1D9E75" points="456,412 464,412 460,420"/>
+<polyline fill="none" stroke="#7F77DD" stroke-width="1.8" stroke-linejoin="round" points="167.5,118.44 200,134.74 232.5,169.01 265,233.31 297.5,283.99"/>
+<circle cx="167.5" cy="118.44" r="4" fill="#FFFFFF" stroke="#7F77DD" stroke-width="1.5"/>
+<circle cx="200" cy="134.74" r="4" fill="#FFFFFF" stroke="#7F77DD" stroke-width="1.5"/>
+<circle cx="232.5" cy="169.01" r="4" fill="#FFFFFF" stroke="#7F77DD" stroke-width="1.5"/>
+<circle cx="265" cy="233.31" r="4" fill="#FFFFFF" stroke="#7F77DD" stroke-width="1.5"/>
+<circle cx="297.5" cy="283.99" r="4" fill="#7F77DD" stroke="#7F77DD" stroke-width="1.5"/>
+<polygon fill="#7F77DD" points="326,410.58 334,410.58 330,418.58"/>
+<circle cx="362.5" cy="391.92" r="4" fill="#7F77DD" stroke="#7F77DD" stroke-width="1.5"/>
+<polyline fill="none" stroke="#378ADD" stroke-width="1.8" stroke-linejoin="round" points="102.5,127.02 135,156.13 167.5,212.07 200,269.71 232.5,328.25"/>
+<circle cx="102.5" cy="127.02" r="4" fill="#FFFFFF" stroke="#378ADD" stroke-width="1.5"/>
+<circle cx="135" cy="156.13" r="4" fill="#FFFFFF" stroke="#378ADD" stroke-width="1.5"/>
+<circle cx="167.5" cy="212.07" r="4" fill="#FFFFFF" stroke="#378ADD" stroke-width="1.5"/>
+<circle cx="200" cy="269.71" r="4" fill="#378ADD" stroke="#378ADD" stroke-width="1.5"/>
+<circle cx="232.5" cy="328.25" r="4" fill="#378ADD" stroke="#378ADD" stroke-width="1.5"/>
+<polygon fill="#378ADD" points="261,412 269,412 265,420"/>
+<polygon fill="#378ADD" points="293.5,412 301.5,412 297.5,420"/>
+<polygon fill="#888780" points="453.5,250.5 459,256 453.5,261.5 448,256"/>
+<line x1="456.5" y1="251" x2="474.5" y2="191.91" stroke="#888780" stroke-width="0.8"/>
+<text x="466.5" y="161.91" font-size="10" fill="#5F5E5A">v0.1 OOK hf, T 32 ms</text>
+<text x="466.5" y="174.91" font-size="10" fill="#5F5E5A">(1 bit per peak):</text>
+<text x="466.5" y="187.91" font-size="10" fill="#5F5E5A">1e-3 at −3.2 dB</text>
+<line x1="612" y1="100" x2="634" y2="100" stroke="#D85A30" stroke-width="1.8"/>
+<circle cx="623" cy="100" r="4" fill="#D85A30" stroke="#D85A30" stroke-width="1.5"/>
+<text x="642" y="104" font-size="11" fill="#2C2C2A" font-weight="bold">hf_fast  T16 k4</text>
+<line x1="612" y1="119" x2="634" y2="119" stroke="#1D9E75" stroke-width="1.8"/>
+<circle cx="623" cy="119" r="4" fill="#1D9E75" stroke="#1D9E75" stroke-width="1.5"/>
+<text x="642" y="123" font-size="11" fill="#2C2C2A" font-weight="bold">hf  T32 k5</text>
+<line x1="612" y1="138" x2="634" y2="138" stroke="#7F77DD" stroke-width="1.8"/>
+<circle cx="623" cy="138" r="4" fill="#7F77DD" stroke="#7F77DD" stroke-width="1.5"/>
+<text x="642" y="142" font-size="11" fill="#2C2C2A" font-weight="bold">hf_robust  T64 k6</text>
+<line x1="612" y1="157" x2="634" y2="157" stroke="#378ADD" stroke-width="1.8"/>
+<circle cx="623" cy="157" r="4" fill="#378ADD" stroke="#378ADD" stroke-width="1.5"/>
+<text x="642" y="161" font-size="11" fill="#2C2C2A" font-weight="bold">hf_weak  T128 k7</text>
+<line x1="612" y1="182" x2="634" y2="182" stroke="#2C2C2A" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="642" y="186" font-size="11" fill="#2C2C2A">theory: noncoherent MFSK</text>
+<circle cx="623" cy="201" r="4" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="1.5"/>
+<text x="642" y="205" font-size="11" fill="#2C2C2A">&lt; 90% of frames delivered</text>
+<polygon fill="#2C2C2A" points="619,216 627,216 623,224"/>
+<text x="642" y="224" font-size="11" fill="#2C2C2A">0 errors (drawn at 1/bits)</text>
+<polygon fill="#888780" points="623,233.5 628.5,239 623,244.5 617.5,239"/>
+<text x="642" y="243" font-size="11" fill="#2C2C2A">v0.1 OOK hf (spec 4.1)</text>
+<text x="612" y="272" font-size="11" fill="#2C2C2A" font-weight="bold">SNR at BER 1e-3, theory:</text>
+<text x="612" y="288" font-size="11" fill="#D85A30">hf_fast −3.19 dB</text>
+<text x="612" y="304" font-size="11" fill="#1D9E75">hf −5.88 dB</text>
+<text x="612" y="320" font-size="11" fill="#7F77DD">hf_robust −8.60 dB</text>
+<text x="612" y="336" font-size="11" fill="#378ADD">hf_weak −11.34 dB</text>
+<text x="24" y="470" font-size="11" fill="#5F5E5A">BER over the bytes the decoder released (bit errors / bits matched to what was sent); hollow points lost frames to acquisition.</text>
+<text x="24" y="486" font-size="11" fill="#5F5E5A">Theory: noncoherent orthogonal MFSK with the matched α 0.25 window, Es/N0 = SNR · 2500 Hz · T · 0.84375.</text>
+<text x="24" y="502" font-size="11" fill="#5F5E5A">Near threshold the limit is acquisition, not the slot decisions (spec 4.8).</text>
+</svg>
