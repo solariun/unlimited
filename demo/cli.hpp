@@ -320,8 +320,9 @@ inline std::string decoder_problem(const DecoderConfig& config) {
     case ConfigError::none:
         return "";
     case ConfigError::min_slot:
-        return "the shortest slot must be 4..32 ms, not " + std::to_string(config.min_slot_ms) +
-               " (--min-slot-ms N: the receiver then hears slots of N..8N ms)";
+        return "the shortest slot must be " + std::to_string(k_min_window_slot_ms) + ".." +
+               std::to_string(k_max_window_slot_ms) + " ms, not " + std::to_string(config.min_slot_ms) +
+               " (--min-slot-ms N: the receiver then hears slots of N.." + std::to_string(k_speed_span) + "N ms)";
     case ConfigError::passband: {
         if (!passband_valid(config.passband))
             return "the passband " + passband_text(config.passband) + " is not valid: it needs LO < HI <= " +

@@ -389,7 +389,8 @@ void test_a4_snr_report() {
 
 // L5 long: +-1000 ppm on the transmitter clock (channel resampling), the receiver clock (resampling of the
 // received audio) and both in opposite directions, 10-minute transmissions at T = 16 ms with N = 8 and 32,
-// gate + 3 dB: no slip, no error, the measured T within 0.2 % of the true one.
+// gate + 3 dB: no slip, every byte, the measured T within 0.2 % of the true one; gate decision G5 (spec 0.8): BER
+// <= 1e-4 with 0 extra and 0 shifted bytes (it was 0 wrong bytes).
 void test_l5_clock() {
     struct Case {
         double tx_ppm;
@@ -427,18 +428,20 @@ void test_l5_clock() {
             const loopback::Score& s = o.score;
             const bool slips = s.locks != 1 || o.locked_transmissions != 1 || o.wrong_locks + o.stray_locks != 0 ||
                                s.lost_events != 0 || s.ends != 1 || s.late_joins != 0;
-            const bool pass = !slips && s.wrong_bytes == 0 && s.lost_bytes == 0 && s.extra_bytes == 0 &&
+            const bool pass = !slips && near_zero_errors(o) && s.lost_bytes == 0 &&
                               o.mean_slot_error() <= k_l5_slot_tolerance;
             result("L5",
                    format("TX %+g ppm, RX %+g ppm, %g min at T=16 ms N=%u, usb AWGN %+.1f dB (gate + 3)",
                           cases[c].tx_ppm, cases[c].rx_ppm, k_l5_minutes, k_l5_bits[b],
                           gate_db(k_hf_slot_ms) + k_f6_margin_db),
-                   format("%zu bytes: wrong %zu, lost %zu, extra %zu, locks %zu (%zu with the sent T and N), ends %zu, "
-                          "late joins %zu, flywheel bytes %zu, %s; measured T error mean %.3f%% worst %.3f%%",
-                          s.bytes_sent, s.wrong_bytes, s.lost_bytes, s.extra_bytes, s.locks, o.locked_transmissions,
-                          s.ends, s.late_joins, s.flywheel_bytes, lost_text(o).c_str(),
+                   format("%zu bytes: wrong %zu (BER %.2e), lost %zu, extra %zu, shifted %zu, locks %zu (%zu with the "
+                          "sent T and N), ends %zu, late joins %zu, flywheel bytes %zu, %s; measured T error mean "
+                          "%.3f%% worst %.3f%%",
+                          s.bytes_sent, s.wrong_bytes, s.ber(), s.lost_bytes, s.extra_bytes, o.misplaced_bytes, s.locks,
+                          o.locked_transmissions, s.ends, s.late_joins, s.flywheel_bytes, lost_text(o).c_str(),
                           k_percent * o.mean_slot_error(), k_percent * o.worst_slot_error),
-                   "0 slips (1 lock, 1 end, no LOST), 0 errors, mean T within 0.2%", pass);
+                   "0 slips (1 lock, 1 end, no LOST), every byte, BER <= 1e-4, 0 extra, 0 shifted, mean T within 0.2%",
+                   pass);
             ledger_runs(format("L5 N%u case %zu", k_l5_bits[b], c), o, true);
         }
     }

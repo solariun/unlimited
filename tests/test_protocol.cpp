@@ -338,8 +338,7 @@ TEST(protocol_presets_in_typical_filters) {
 // at its own search and never goes below 0.
 TEST(protocol_shift_tolerance_follows_the_search) {
     const uint16_t k_edge_step_hz = 50;
-    const uint8_t k_fastest_window_ms = 4;       // DecoderConfig::min_slot_ms 4..32; the fm profile's
-    const uint8_t k_slowest_window_ms = 32;
+    const uint8_t k_fm_window_ms = 4;            // the fm profile's
     const uint8_t k_ssb_window_ms = 8;           // the ssb and am profiles'
     const uint32_t k_ssb_slowest_us = 64000;     // 8 x 8 ms
     const uint32_t k_us_per_ms = 1000;
@@ -347,7 +346,7 @@ TEST(protocol_shift_tolerance_follows_the_search) {
     const uint32_t k_slot_step_us = 500;
     const uint16_t k_tone_step_hz = 11;
     size_t ranges = 0;
-    for (uint8_t min_slot = k_fastest_window_ms; min_slot <= k_slowest_window_ms; ++min_slot) {
+    for (uint8_t min_slot = unlimited::k_min_window_slot_ms; min_slot <= unlimited::k_max_window_slot_ms; ++min_slot) {
         for (uint16_t low = 0; low <= unlimited::k_max_passband_hz; low += k_edge_step_hz) {
             for (uint16_t high = low + k_edge_step_hz; high <= unlimited::k_max_passband_hz; high += k_edge_step_hz) {
                 unlimited::DecoderConfig receiver;
@@ -379,7 +378,7 @@ TEST(protocol_shift_tolerance_follows_the_search) {
                 unlimited::DecoderConfig receiver;
                 receiver.passband = config.passband;
                 receiver.min_slot_ms = k_ssb_window_ms;
-                if (slot_us < unlimited::k_fast_slot_us) receiver.min_slot_ms = k_fastest_window_ms;
+                if (slot_us < unlimited::k_fast_slot_us) receiver.min_slot_ms = k_fm_window_ms;
                 if (slot_us > k_ssb_slowest_us) {
                     receiver.min_slot_ms = uint8_t((slot_us + k_window_us_per_ms - 1) / k_window_us_per_ms);
                 }

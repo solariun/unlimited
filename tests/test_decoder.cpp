@@ -237,6 +237,14 @@ TEST(decoder_config_profiles_and_check) {
         if (!CHECK(config.check() == cases[i].expected)) NOTE("case %s", cases[i].name);
         CHECK(!config.valid());
     }
+    // The public window limits (frozen v0.3 API): 3 and 33 above are just outside them, the limits themselves pass.
+    CHECK_EQ(unsigned(unlimited::k_min_window_slot_ms), 4u);
+    CHECK_EQ(unsigned(unlimited::k_max_window_slot_ms), 32u);
+    DecoderConfig edge;
+    edge.min_slot_ms = unlimited::k_min_window_slot_ms;
+    CHECK(edge.valid());
+    edge.min_slot_ms = unlimited::k_max_window_slot_ms;
+    CHECK(edge.valid());
     DecoderConfig wide;
     wide.min_slot_ms = 16;
     CHECK(wide.valid());

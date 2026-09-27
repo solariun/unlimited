@@ -8,19 +8,21 @@ pitch, the speed (slot length) and how many bits go between START and STOP; the 
 finds the pitch, measures the speed and counts the bits per package by itself. The C++11 core runs on a PC and on
 microcontrollers (Arduino/AVR sends; ESP32/STM32 receive and send).
 
-**Status (2026-09-27): v0.3 released as library version 0.3.0: implemented, measured and documented. The API freeze
-(§5.4) waits for Gustavo's decision on the open problems of §11.2.**
+**Status (2026-09-27): v0.3 released as library version 0.3.0: implemented, measured and documented. The public
+API is frozen for v0.3 (§5.4): the same day Gustavo confirmed the gate decisions of §0.8, turned the zero-error gates
+into BER ≤ 1e-4 gates (G5) and froze the API (§11.1 questions 13–15).**
 - v0.3 is Gustavo's original design (v0.1: one bit per tone), made configurable (bits per package, slot length,
   pitch, receiver speed window, passband) and faster by default.
 - **Implemented:** the core (`src/`), the demos, the TUI and the Arduino examples. `make test` passes 219 of 219
   (187 core tests, 32 TUI and demo tests), and `make check_embedded`, `make arduino_check` and `make demo_run` pass.
   No public API signature changed against the design; three functions were added for the truthful shift tolerance
-  (§0.7 A9, §5.2).
+  (§0.7 A9) and two constants for the receiver's speed window (§0.7 A8, §5.2).
 - **Measured:** the long regression suite (`make test_long`, §8.3–§8.5, 8.5 minutes on 10 cores) on the final
-  decoder: 31 tests, 29 pass; 370 result rows: 259 PASS, 21 FAIL, 90 REPORT. The FAILs are L20 (20 rows: cold late
-  joins slower than 6 packages, an open defect, §11.2) and one L19 row (one AWGN bit error in 24,000 bits at gate
-  + 3 dB, §8.2). No byte was released at a wrong position in any lock, no CRC-valid wrong packet was delivered, and
-  noise, carriers, keyed CW and speech made no false lock (§4.3). BER at the gates and the fading floors are v0.1b's.
+  decoder: 31 tests, 30 pass; 370 result rows: 260 PASS, 20 FAIL, 90 REPORT. The 20 FAILs are L20 (cold late joins
+  slower than 6 packages, an open defect, §11.2). No gate asks for literally 0 bit errors any more (§0.8 G5): the L19
+  row with one AWGN bit error in 24,000 bits at gate + 3 dB now passes. No byte was released at a wrong position in
+  any lock, no CRC-valid wrong packet was delivered, and noise, carriers, keyed CW and speech made no false lock
+  (§4.3). BER at the gates and the fading floors are v0.1b's.
 - The implementation found places where the design's rules contradicted each other or could not work as written,
   and the first long-suite run found integrity defects (bytes at wrong positions, false locks) that the integrity
   fix of 2026-09-27 removed. The rules in this file are the implemented ones; each change and its reason is in §0.7,
@@ -50,6 +52,8 @@ Development). Where this file and the code disagree, the disagreement is a defec
 | 2026-09-26 | **v0.3 implemented** (core: 179 unit tests, ASan + UBSan clean, `check_embedded`; apps: `make test` 210/210, `demo_run`, `arduino_check`). This file brought in line with the code: the implementation's decisions and their reasons (§0.7: sync, preamble, TRACK, search and joins, demos); the rules as implemented (§3.4, §3.6–§3.13; V2, V4, V11, V14, V16); every named constant with its value from the code (§3.14); measured sizes and CPU (§1.6, §1.8, §3.15); measured gate results (§4; long suite pending); the `dsp.hpp` listing regenerated (§5.3); the TUI (§6.5) and demos (§7) as built; the tests with their function names and the adapted criteria of L6, L7, L8, L9, L10, L17, L19, L20, R8, U8, U26, U27 (§8); open problems (§11.2). |
 | 2026-09-26 | `README.md` and `docs/` rewritten for v0.3 (the figures and bit-exact examples generated from the library by `make docs`). First long-suite run on v0.3: 234 PASS / 42 FAIL / 102 REPORT of 378 rows; it found bytes released at wrong positions (535 in 11 locks), a wrong-N cold join and false locks on keyed CW and speech. |
 | 2026-09-27 | **v0.3 release** (library version 0.3.0). The integrity fix of the decoder (§0.7 I20–I28: a sync must follow a tune; the train closes at its gap; a short END needs package 0; no rival package length for a cold join; the beep-shape guard; twisted packages are erasures; confirmation releases up to the newest STOP; the guard's inner-flip limit follows N) with 7 regression tests. The truthful shift tolerance (§0.7 A9, §1.5): `search_range(passband, min_slot_us)`, `passband_fit(tone_hz, slot_us, passband, search)` and `search_range(const EncoderConfig&)` added; `passband_fit(const EncoderConfig&)`, the bandwidth line of the demos, the TUI, `tx_uno` and `rx_esp32` limited to the receiver's pitch search; L19 shifts each side by its printed tolerance − 10 Hz. Gate decisions G1–G4 (§0.8: C11, A3, C8, L20). Stale comments fixed (`event_flag_late_join`, `dsp.hpp`). The long suite measured on the final decoder (§4, §8): 259 PASS / 21 FAIL / 90 REPORT of 370 rows; §5 listings regenerated from the headers; README refreshed. |
+| 2026-09-27 | **Gustavo's decisions** (§0.8, §11.1): G1–G3 kept and G4 confirmed (L20 stays gated, an open defect); **G5**: every long-suite gate that asked for 0 bit errors (L5, L19, C10 and C15 from CNR 8 dB) asks for BER ≤ 1e-4 with 0 extra and 0 shifted bytes, on the same bits; the receiver's speed-window limits exported (§0.7 A8: `k_min_window_slot_ms` = 4, `k_max_window_slot_ms` = 32 in `protocol.hpp`), used by `DecoderConfig::check()`, the demos' messages and `--help`, and the tests (the open problem "`min_slot_ms` range not public" removed from §11.2, the two after it renumbered P6 and P7). The long suite run again: 260 PASS / 20 FAIL (L20) / 90 REPORT of 370 rows (§4, §8). |
+| 2026-09-27 | **API freeze v0.3** (§5.4, Gustavo). The v0.3 public headers are frozen as listed in §5 (library version 0.3.0). Public API added since the first v0.3 headers (2026-09-26): `search_range(const Passband&, uint32_t min_slot_us)` and `passband_fit(uint16_t tone_hz, uint32_t slot_us, const Passband& passband, const Passband& search)` (`protocol.hpp`), `search_range(const EncoderConfig&)` (`encoder.hpp`), `k_min_window_slot_ms` and `k_max_window_slot_ms` (`protocol.hpp`); `passband_fit(const EncoderConfig&)` limits its margins to that search (§0.7 A9); `passband_fit(const Band&, const Passband&)` is the pure filter fit. §5 listings regenerated from the headers and checked line by line. |
 
 ### How to read this document
 
@@ -198,10 +202,10 @@ answer to fading floors is FEC (§13).
 **In plain words.** The implementation followed this file. Where a rule could not work as written — mostly because
 a faded marker could still shift the bytes, or because two rules contradicted each other — the implementers changed
 the rule, and the change is now the rule of §1–§8. None of them changes the signal on the air or a public API
-signature (the truthful shift tolerance, A9, added three functions). Each row says what changed and why, in plain
-words; the exact rule is in the section named. Rows I20–I28 are the integrity fix of 2026-09-27: the first long-suite
-run found bytes released at wrong positions (535 in 11 locks at 5 points), a wrong-N cold join and false locks on CW
-and speech; after it, none.
+signature (the truthful shift tolerance, A9, added three functions; A8 two constants). Each row says what changed
+and why, in plain words; the exact rule is in the section named. Rows I20–I28 are the integrity fix of 2026-09-27:
+the first long-suite run found bytes released at wrong positions (535 in 11 locks at 5 points), a wrong-N cold join
+and false locks on CW and speech; after it, none.
 
 **Receiver (core).**
 
@@ -247,22 +251,24 @@ and speech; after it, none.
 | A5 | The TUI header also exposes `Tui::PackageView`, `ByteView` and `SentSlot` besides `SlotBar`. | They are the renderer's data, testable without a terminal. | §6.5 |
 | A6 | `--tui` without `--realtime` runs through a file at full speed: only the final frame is seen. | File input is processed as fast as possible unless it is paced. | §6.5, §7 |
 | A7 | `demo_run` also checks a refusal: `hf_fast` in `--passband 1250:1750` must exit 2 with "does not fit". | The bandwidth check is part of the demo contract (L14). | §7 |
-| A8 | The decoder's `min_slot_ms` range (4..32) is not a public constant: the demos' messages copy "4..32". | Open item: export it from `decoder.hpp` (§11.2). | §5, §11.2 |
+| A8 | The decoder's `min_slot_ms` range (4..32) was private to `decoder.cpp`, and the demos' messages copied "4..32". **Resolved by Gustavo (2026-09-27):** exported as `k_min_window_slot_ms` = 4 and `k_max_window_slot_ms` = 32 in `protocol.hpp`, next to `k_speed_span`; `DecoderConfig::check()`, the demos' refusal and `--help`, the encoder's `--min-slot-ms` suggestion and the tests use them. | Applications name the limits instead of copying the numbers, and the limits are part of the frozen API (§5.4). | §1.4, §5 |
 | A9 | **The shift tolerance is truthful (2026-09-27).** It never promises a mistuning the receiver would not follow: the filter's room on each side is limited to the pitches the receiver searches (`search_range()`, V14). A sender's tolerance (`passband_fit(config)`) uses the receiver that hears it by default; a receiver's line uses its own search. The pure filter fit stays available (`passband_fit(band, passband)`). Printed by both demos, the TUI, `tx_uno` and `rx_esp32`. | The `fm` preset printed −650 Hz, but the `fm` profile searches only from 1000 Hz (−500 Hz); a 3.0 kHz filter printed ±1262 Hz for `hf` beyond the 300..2700 Hz search. L19 failed on exactly those 9 shifts; they now decode. | §1.5, §5.2, §7 |
 
-### 0.8 Gate decisions (2026-09-27)
+### 0.8 Gate decisions (2026-09-27, confirmed by Gustavo)
 
 **In plain words.** The long regression suite measured every gate on the final decoder. Where a gate set before any
 measurement turned out to ask the wrong question, it was changed by a decision recorded here, with its reason; where a
-miss is a real defect, the gate stays and fails, and the defect is an open problem (§11.2). These decisions were made
-by Claude for the release; Gustavo may override any of them (the change then goes through this file first).
+miss is a real defect, the gate stays and fails, and the defect is an open problem (§11.2). Claude proposed G1–G4 for
+the release; **Gustavo confirmed all four on 2026-09-27** and added G5 the same day. Any later change to them goes
+through this file first.
 
-| # | Gate | Decision | In plain words: why |
-|---|---|---|---|
-| G1 | C11: AM, the `am` preset | Gated at CNR 6 dB (was 2 dB); `hf_slow` keeps its 2 dB gate. The `am` preset below 6 dB is reported. | An 8 ms beep carries a quarter of the energy of `hf_slow`'s 32 ms beep (−6 dB), so it needs about 4–6 dB more CNR. *Measured*: BER 1.43e-2 at 2 dB, 4.4e-3 at 3 dB, 2.1e-3 at 4 dB, 8.1e-4 at 5 dB, 1.65e-4 at 6 dB. |
-| G2 | A3: locks at N = 32 | The 99 % / 90 % gates apply to messages of at least 8 packages. The 16-byte rows at N = 32 (4 packages) are reported, and N = 32 is gated on 64-byte messages (16 packages). | A 4-package message gives the preamble and the guard almost no second chance: one faded STOP loses the whole message. Every other A3 row already has 8 packages or more. *Measured* at N = 32 with 64-byte messages: 400/400 at the gate, 291/300 at gate − 2 dB. |
-| G3 | C8: a strong carrier close to the pitch | Acquisition gated with a +6 dB carrier from 250 Hz away and with a +12 dB carrier from 350 Hz away; a +12 dB carrier 250–300 Hz away (and +9 dB at 250 Hz) is reported. | *Measured*: +6 dB at ±250 Hz 95–98 %, +12 dB at ±350 Hz 96–99 %, but +12 dB at ±250 Hz 22–32 % and at ±300 Hz 80–83 %. No cheap and safe fix was found; it stays an open problem (§11.2). |
-| G4 | L20: a cold late join within 6 packages | Unchanged: gated, and it fails. | The slow joins are a real defect, not a wrong gate. Its lead: duplicate detections of one marker fill the 16-entry candidate ring and push out the older chain markers (§11.2). |
+| # | Gate | Decision | In plain words: why | Gustavo (2026-09-27) |
+|---|---|---|---|---|
+| G1 | C11: AM, the `am` preset | Gated at CNR 6 dB (was 2 dB); `hf_slow` keeps its 2 dB gate. The `am` preset below 6 dB is reported. | An 8 ms beep carries a quarter of the energy of `hf_slow`'s 32 ms beep (−6 dB), so it needs about 4–6 dB more CNR. *Measured*: BER 1.43e-2 at 2 dB, 4.4e-3 at 3 dB, 2.1e-3 at 4 dB, 8.1e-4 at 5 dB, 1.65e-4 at 6 dB. | Confirmed: kept |
+| G2 | A3: locks at N = 32 | The 99 % / 90 % gates apply to messages of at least 8 packages. The 16-byte rows at N = 32 (4 packages) are reported, and N = 32 is gated on 64-byte messages (16 packages). | A 4-package message gives the preamble and the guard almost no second chance: one faded STOP loses the whole message. Every other A3 row already has 8 packages or more. *Measured* at N = 32 with 64-byte messages: 400/400 at the gate, 291/300 at gate − 2 dB. | Confirmed: kept |
+| G3 | C8: a strong carrier close to the pitch | Acquisition gated with a +6 dB carrier from 250 Hz away and with a +12 dB carrier from 350 Hz away; a +12 dB carrier 250–300 Hz away (and +9 dB at 250 Hz) is reported. | *Measured*: +6 dB at ±250 Hz 95–98 %, +12 dB at ±350 Hz 96–99 %, but +12 dB at ±250 Hz 22–32 % and at ±300 Hz 80–83 %. No cheap and safe fix was found; it stays an open problem (§11.2). | Confirmed: kept |
+| G4 | L20: a cold late join within 6 packages | Unchanged: gated, and it fails. | The slow joins are a real defect, not a wrong gate. Its lead: duplicate detections of one marker fill the 16-entry candidate ring and push out the older chain markers (§11.2). | Confirmed: the gate stays, an open defect |
+| G5 | Every long-suite gate that asked for 0 bit errors: L5 (10 min with clock errors), L19 (filters and shifts), C10 and C15 (FM, from CNR 8 dB) | **BER ≤ 1e-4 with 0 extra and 0 shifted bytes**, on the same bits (at least 10⁴ per row). The rest of each gate is unchanged: L5 still asks for no slip, every byte and T within 0.2 %, L19 for loss ≤ 1 %, C10/C15 at CNR 14 dB for 0 bytes lost. | With random noise even a perfect receiver sometimes makes 1 error in 24,000 bits, so zero-error gates fail by chance about once per 100 rows: one L19 row did (1 bit error in 24,000; the same condition over 384,000 more bits: 0). A bit error is noise; an extra byte or a byte at a wrong place is a defect, so those stay at 0. | His decision |
 
 ---
 
@@ -365,8 +371,8 @@ of slot lengths, because signals of different speeds can look alike when tones a
 
 The receiver sorts most look-alikes out with rules (§3.7, §3.8), but the last one — a chain of packages whose
 markers come (N + 1)·T apart, like a slower train — can only be excluded by the window: inside an 8:1 window a chain
-with N ≥ 8 (every preset) can never also pass for a train. Pick `min_slot_ms` = the fastest slot you want to hear;
-the window is `min_slot_ms` .. 8 × `min_slot_ms` (default 8..64 ms).
+with N ≥ 8 (every preset) can never also pass for a train. Pick `min_slot_ms` = the fastest slot you want to hear,
+from 4 to 32 ms; the window is `min_slot_ms` .. 8 × `min_slot_ms` (default 8..64 ms).
 
 **Exact rules.**
 - `slot_us` ∈ [`k_min_slot_us`, `k_max_slot_us`] = [4000, 128000] µs, any integer; presets use 32, 16, 8 and 4 ms.
@@ -374,8 +380,8 @@ the window is `min_slot_ms` .. 8 × `min_slot_ms` (default 8..64 ms).
   (9 × 128 ms). It keeps the START→STOP phase comparison of the AFC unambiguous after the fine AFC (§3.9) and the
   reference line meaningful on a changing path.
 - **Receiver window:** T ∈ [`min_slot_ms`, `k_speed_span` · `min_slot_ms`], `k_speed_span` = 8, `min_slot_ms` ∈
-  [4, 32] (measured T accepted within ±6 % of the ends). A sender outside the window produces no `locked` event and
-  no bytes (L12).
+  [`k_min_window_slot_ms`, `k_max_window_slot_ms`] = [4, 32] (public constants of `protocol.hpp`, §0.7 A8; measured
+  T accepted within ±6 % of the ends). A sender outside the window produces no `locked` event and no bytes (L12).
 - **Why 8:1 (D5).** A train of period P and a package chain whose markers are P apart (P = (N + 1)·T) have their
   flips at the same times. With N ≥ 8, P ≥ 9·T ≥ 9·T_min lies outside [T_min, 8·T_min], so a chain can never be
   read as a train: **alias-free by construction for every preset**. With N ≤ 7 the chain looks like an in-window
@@ -1538,7 +1544,7 @@ Values in the code are normative; this table lists every named constant of the d
 | Stage | Constants |
 |---|---|
 | Size gate | `k_decoder_base_bytes` 7168, `k_decoder_bytes_per_bit` 576 (`sizeof(Decoder)` ≤ 7168 + 576·cap, `static_assert`) |
-| Profiles | `k_ssb_min_slot_ms` 8, `k_fm_min_slot_ms` 4, `k_min_block_samples` 4, `k_max_block_samples` 32, `k_default_fixed_ratio` 0.70 (the search range, from `k_min_fast_tone_hz` 1000 for slots under `k_fast_slot_us`, is the shared `search_range()` of `protocol.cpp`, §1.5) |
+| Profiles | `k_ssb_min_slot_ms` 8, `k_fm_min_slot_ms` 4, `k_min_block_samples` = `k_min_window_slot_ms` 4 (the block size an invalid configuration keeps while it stays idle), `k_default_fixed_ratio` 0.70; `check()` bounds `min_slot_ms` with the public `k_min_window_slot_ms` 4 and `k_max_window_slot_ms` 32 of `protocol.hpp` (§0.7 A8; they replaced the private `k_min_block_samples`/`k_max_block_samples` limits). The search range, from `k_min_fast_tone_hz` 1000 for slots under `k_fast_slot_us`, is the shared `search_range()` of `protocol.cpp` (§1.5) |
 | Units and limits | `k_ms_per_s` 1000, `k_us_per_ms` 1000, `k_samples_per_ms` 8, `k_pi` 3.14159265, `k_two_pi` 2π, `k_count_limit` 0xFFFFFFFF, `k_count_limit_u8` 0xFF, `k_reference_bandwidth_hz` 2500, `k_snr_floor_db` −99, `k_db_per_decade` 10, `k_no_value` −1e30, `k_no_guard_q` 1e30, `k_percent` 100, `k_percent_limit` 255, `k_top_bit` 0x80 |
 | Front end | `k_energy_shift` 4, `k_energy_scale` 256, `k_in_bin_scale` 2/(32²·256) (e_k = p_k for a steady in-bin tone), `k_settle_blocks` 3 (blanker latency + 1), `k_noise_blocks` 8, `k_noise_outlier` 4, `k_noise_drop` 0.5 |
 | Fine AFC (control) | `k_afc_decimation_samples` 64 (8 ms: 125 Hz input), `k_afc_eval_ms` 250, `k_afc_min_inputs` 16, `k_afc_wait_ms` 1000, `k_afc_min_offset_hz` 0.2, `k_afc_reset_rotation` 0.5 rad, `k_preamble_afc_limit` 0.25 cycles/slot |
@@ -1705,13 +1711,15 @@ v0.3 *measured* by the long suite (2026-09-27; v0.1b's values in brackets):
   80 % / 83 % (with 155–159 wrong bytes), +9 dB at ±250 Hz 79 % / 86 %; 100 Hz away no lock (v0.1b: the same).
 - **C9** keyed CW (20 WPM, equal PEP, ±300 Hz) at +3 dB: 0 errors. **C10** FM with pre- and de-emphasis: the `fm`
   preset 3.6e-5 at CNR 6 dB, 0 errors from 8 dB, 0 bytes lost at 14 dB; `hf` over FM 0 errors (pass). **C15** flat
-  transmitter, de-emphasising receiver: `fm` 6.4e-5 at 6 dB, 0 from 8 dB; `hf` 0 (pass).
+  transmitter, de-emphasising receiver: `fm` 6.4e-5 at 6 dB, 0 from 8 dB; `hf` 0 (pass). (From 8 dB the gate is BER
+  ≤ 1e-4 with 0 extra and 0 shifted bytes, §0.8 G5.)
 - **C11** AM (m = 0.8, 6 kHz IF): `hf_slow` at CNR 2 dB 0 errors (pass); the `am` preset at CNR 6 dB 1.65e-4 (pass,
   §0.8 G1), below it 8.1e-4 at 5 dB, 2.1e-3 at 4 dB, 4.4e-3 at 3 dB, 1.4e-2 at 2 dB (reported).
 - **C12** flutter (0.5 ms, 10 Hz), `hf`, 30 dB: BER 7.2e-2 (reported: the level changes inside a package); 0 extra
   bytes of 13,420 released (pass).
 - **L5** clock error ±1000 ppm (TX, RX, both ways), 10 min at T = 16 ms, N = 8 and 32, gate + 3 dB: 0 slips, 0
-  errors, one lock and one END each, the measured T 0.007–0.026 % off on average, 0.162 % at worst (pass).
+  errors, one lock and one END each, the measured T 0.007–0.026 % off on average, 0.162 % at worst (pass; the gate
+  asks for BER ≤ 1e-4 with 0 extra and 0 shifted bytes, §0.8 G5).
 - **F1, F2** (noise, drifting carriers; 30 min per profile): 0 locks. **F3** keyed CW and **F4** speech-like bursts:
   0 locks and 0 bytes in the 6 gated runs of 30 min and in the 30 more (15 hours) (pass; v0.1b: 1 lock each; the
   first v0.3 run: 39 false locks in these 36 runs, before §0.7 I20 and I25). **F5**: 0 CRC-valid wrong packets over F1–F4 and
@@ -1743,7 +1751,12 @@ v0.3 *measured* by the long suite (2026-09-27; v0.1b's values in brackets):
 
 ---
 
-## 5. Core public API (C++11, namespace `unlimited`) — v0.3 as implemented, to be frozen
+## 5. Core public API (C++11, namespace `unlimited`) — FROZEN for v0.3
+
+**In plain words.** These are the declarations an application uses. They are **frozen for v0.3** (Gustavo,
+2026-09-27): every 0.3 release keeps them exactly as listed here, so code written against them keeps compiling and
+behaving the same. Changing one needs a changelog row first, a new version and the `library.properties` version
+(§5.4). The receiver's internals (`dsp.hpp`, §5.3) and its tuning are not frozen.
 
 **Rules for the core:**
 - no heap, exceptions, RTTI or STL; `float`, never `double` (AVR);
@@ -1762,15 +1775,15 @@ host, for the ATmega328P and for the ESP32 (the decoder also with caps 16 and 64
 installed, so the ARM build is still unverified (§11.2).
 
 **The listings below are the public headers**, generated from `src/unlimited.h` and `src/unlimited/*.hpp` with only
-the `private:` sections removed, and checked against the files (they match exactly, 2026-09-27). Private members are
-implementation detail. No public declaration changed in the implementation (the private sections did, and so did
-the internal `dsp.hpp`, §5.3); three were added for the truthful shift tolerance (§0.7 A9, §5.2). Where a header
-comment disagrees with §1–§4, the numbered sections are normative.
+the `private:` sections removed, and checked against the files line by line (they match exactly, 2026-09-27, at the
+freeze). Private members are implementation detail. No public declaration changed in the implementation (the private
+sections did, and so did the internal `dsp.hpp`, §5.3); three functions were added for the truthful shift tolerance
+(§0.7 A9) and two constants for the speed window (§0.7 A8), §5.2. Where a header comment disagrees with §1–§4, the
+numbered sections are normative.
 
-**Open item (§0.7 A8):** the range of `DecoderConfig::min_slot_ms` (4..32, `ConfigError::min_slot`) is private to
-`decoder.cpp` (`k_min_block_samples`, `k_max_block_samples`); the demos' messages copy "4..32". Exporting it (e.g.
-`k_min_min_slot_ms` / `k_max_min_slot_ms` in `decoder.hpp`) is proposed for the freeze; until then the rule stays
-in §1.4 and §5.1.
+**The speed-window limits** are public since the freeze (§0.7 A8): `k_min_window_slot_ms` = 4 and
+`k_max_window_slot_ms` = 32 in `protocol.hpp` bound `DecoderConfig::min_slot_ms` (`ConfigError::min_slot`).
+Applications name them instead of copying "4..32"; the demos do.
 
 ```cpp
 // src/unlimited.h
@@ -1883,6 +1896,10 @@ static const uint32_t k_max_slot_us = 128000;
 static const uint32_t k_max_package_us = 1152000;  // (N + 1) T: START to STOP
 static const uint32_t k_fast_slot_us = 8000;       // below it: FM-like channels only, tone >= k_min_fast_tone_hz
 static const uint8_t k_speed_span = 8;
+// A receiver's T_min (DecoderConfig::min_slot_ms) lies in k_min_window_slot_ms..k_max_window_slot_ms: its window is
+// min_slot_ms .. k_speed_span * min_slot_ms.
+static const uint8_t k_min_window_slot_ms = 4;
+static const uint8_t k_max_window_slot_ms = 32;
 
 // Pitch (spec 1.3).
 static const uint16_t k_min_tone_hz = 300;
@@ -1971,7 +1988,7 @@ enum class ConfigError : uint8_t {
     outside_passband,  // encoder: the occupied band does not fit the passband
     sync_markers,      // encoder: outside k_min_sync_markers..k_max_sync_markers
     amplitude,         // encoder: not > 0
-    min_slot,          // decoder: min_slot_ms outside 4..32
+    min_slot,          // decoder: min_slot_ms outside k_min_window_slot_ms..k_max_window_slot_ms
     decision_mode,     // decoder: not a DecisionMode value
     fixed_ratio        // decoder: fixed_ratio outside (0, 1)
 };
@@ -2144,7 +2161,8 @@ typedef void (*EventHandler)(const Event& event, void* context);
 
 // The receiver chooses its T range and its audio passband; it learns the tone, T and N from the signal.
 struct DecoderConfig {
-    uint8_t min_slot_ms;           // accepted T = min_slot_ms .. 8 * min_slot_ms; block = min_slot_ms samples
+    uint8_t min_slot_ms;           // k_min_window_slot_ms..k_max_window_slot_ms: accepted T = min_slot_ms ..
+                                   // 8 * min_slot_ms; block = min_slot_ms samples
     Passband passband;             // the radio's audio passband; the tone search stays inside it (spec 3.6)
     DecisionMode decision_mode;
     float fixed_ratio;             // DecisionMode::fixed_ratio: fraction of the reference line
@@ -2436,8 +2454,10 @@ conversion to int16 rounds and clamps.
 - The ranges alone keep the tone at least 500 Hz below rate/2 and every slot ≥ 32 samples (compile-time asserts).
 - `valid()` is `check() == ConfigError::none`. Applications report the rule by mapping the enum (the demos do),
   never by copying the rules.
-- `occupied_band(config)` = `occupied_band(tone_hz, slot_us)`; `passband_fit(config)` = `passband_fit(
-  occupied_band(config), passband)` (§1.5).
+- `occupied_band(config)` = `occupied_band(tone_hz, slot_us)`; `search_range(config)` = `search_range(passband,
+  T_min)` of the receiver that hears the sender by default; `passband_fit(config)` = `passband_fit(tone_hz, slot_us,
+  passband, search_range(config))`, the shift tolerance (§1.5, §0.7 A9). `check()`'s `outside_passband` rule uses the
+  pure filter fit `passband_fit(occupied_band(config), passband)`, whose `fits` is the same.
 
 **Decoder:**
 - Input is 8000 Hz int16. `process()` calls `process_sample()` for each sample; deterministic and bit-exact
@@ -2455,8 +2475,9 @@ conversion to int16 rounds and clamps.
 - `DecoderConfig()` = `for_profile(ssb)` = `{8, {300, 2700}, adaptive, 0.70f, true}`; `for_profile(am)` =
   `{8, {100, 3000}, adaptive, 0.70f, true}`; `for_profile(fm)` = `{4, {300, 3000}, adaptive, 0.70f, true}` (fields
   `{min_slot_ms, passband, decision_mode, fixed_ratio, impulse_blanker}`). The profile itself is not stored.
-- `check()` returns the first rule broken, in this order: `min_slot` (4..32), `passband` (`passband_valid()` and a
-  non-empty `search_range()`), `decision_mode` (a `DecisionMode` value), `fixed_ratio` (0 < r < 1).
+- `check()` returns the first rule broken, in this order: `min_slot` (`k_min_window_slot_ms`..`k_max_window_slot_ms`
+  = 4..32), `passband` (`passband_valid()` and a non-empty `search_range()`), `decision_mode` (a `DecisionMode`
+  value), `fixed_ratio` (0 < r < 1).
 - `max_slot_ms()` = 8·`min_slot_ms`; `search_range()` as §1.5.
 
 **Events.** Every event carries `state` (the current one), `bits_per_package` while a lock holds N, `tone_hz`,
@@ -2508,6 +2529,19 @@ conversion to int16 rounds and clamps.
 | encoder.hpp | **Added** `search_range(const EncoderConfig&)` (the search of the receiver that hears the sender by default). **Changed:** `passband_fit(const EncoderConfig&)` limits each margin to that search (its `fits`, and `EncoderConfig::check()`, are unchanged) |
 | decoder.hpp | `DecoderConfig::search_range()` calls the shared rule (identical values); the `event_flag_late_join` comment names the cold join too |
 | dsp.hpp (internal) | comments only |
+
+**v0.3 release → API freeze v0.3 (2026-09-27, Gustavo; §0.7 A8, §5.4):**
+
+| Header | Added or changed |
+|---|---|
+| protocol.hpp | **Added** `k_min_window_slot_ms` (4) and `k_max_window_slot_ms` (32): the range of `DecoderConfig::min_slot_ms`, until then private to `decoder.cpp`. The `ConfigError::min_slot` comment names them |
+| decoder.hpp | the `DecoderConfig::min_slot_ms` comment names them; no declaration changed |
+| the other headers | – |
+
+At the freeze the public API of v0.3 is the first v0.3 headers (2026-09-26) plus `search_range(const Passband&,
+uint32_t)`, `passband_fit(uint16_t, uint32_t, const Passband&, const Passband&)`, `search_range(const
+EncoderConfig&)` and the two window constants, with `passband_fit(const EncoderConfig&)` limited to the receiver's
+search (changelog row "API freeze v0.3").
 
 **v0.1 → v0.3** in short: the on-air signal is v0.1's (same beeps, twist, tune tone, sync train, END), with N and the
 passband added; the API keeps v0.1's shape (`DecisionMode`, byte events) plus v0.2's hardening (fences, `queued()`,
@@ -2769,22 +2803,25 @@ float equal_likelihood_ratio(float a_squared);
 }  // namespace unlimited
 ```
 
-### 5.4 Freeze plan (v0.3)
+### 5.4 The v0.3 freeze
 
-- **Now (implemented, not frozen):** §5 and the headers in `src/unlimited/` are the v0.3 API as implemented. Any
-  change goes through this file first (a changelog row), and the §5 listings are regenerated from the headers
-  (private sections removed) so they always match the tree.
-- **Freeze:** when the implementation passes every §8 gate and the open item of §0.7 A8 is decided, the v0.3 public
-  headers are frozen (a changelog row "API freeze v0.3"). *State (2026-09-27):* the unit suite, `check_embedded`,
-  `arduino_check` and `demo_run` pass; the long suite fails L20 (the slow cold joins, an open defect) and one L19 row
-  (one chance bit error, §8.2); A8 is open. `library.properties` already says `version=0.3.0` (the v0.3 release);
-  freezing the headers as they are, or after L20 and A8, is Gustavo's decision (§11.1).
+**In plain words.** The v0.3 API is frozen: what §5 lists stays exactly as it is in every 0.3 release. The receiver
+may still get better inside (its internals and tuning), as long as every test of §8 that passes today still passes.
+
+- **Frozen on 2026-09-27 by Gustavo** (changelog row "API freeze v0.3"), library version 0.3.0
+  (`library.properties`: `version=0.3.0`). First the speed-window limits were exported (§0.7 A8). *State at the
+  freeze:* the unit suite, `check_embedded`, `arduino_check` and `demo_run` pass; the long suite passes everything
+  but L20, the slow cold joins, an open defect of the receiver's internals (§11.2 P2, whose lead is inside `dsp`),
+  which the freeze does not wait for.
 - **Frozen items:** every declaration listed in §5 outside §5.3 (names, signatures, types, enumerator order and values,
-  struct field order, public constant values), the build-wide defines and their defaults, the behavioural contract
-  §5.1 and the on-air format §1–§2.
-- **Free:** comments, private members, `dsp.hpp` and the decoder's internals and tuning (§3.14), provided every §8
-  gate still passes and the events keep §5.1.
-- **Changing a frozen item** needs a changelog row here first, a new version and the `library.properties` version.
+  struct field order, public constant values, `k_min_window_slot_ms` and `k_max_window_slot_ms` included), the
+  build-wide defines and their defaults, the behavioural contract §5.1 and the on-air format §1–§2.
+- **Free:** comments, private members, `dsp.hpp` and the decoder's internals and tuning (§3.14), provided no §8 gate
+  that passes starts failing and the events keep §5.1. Any change still goes through this file first.
+- **Changing a frozen item** needs, in this order: a changelog row here first (what changes and why), a new version,
+  and the `version=` of `library.properties` raised to it.
+- **Listings:** after any change to a public header (a comment included) the §5 listings are regenerated from the
+  headers with the `private:` sections removed and compared line by line; they must match exactly.
 
 ---
 
@@ -2927,8 +2964,8 @@ unlimited/
   `"unlimited/…"`. Code style: CamelCase types, snake_case functions, variables and files, trailing `_` for private
   members, `k_` named constants, `#pragma once`, 4-space indent, attached braces. No doxygen/docstring comments;
   short comments only where the math is not obvious.
-- `README.md` and `docs/` describe v0.3 (rewritten 2026-09-26, refreshed with the final measurements 2026-09-27;
-  `docs/` is generated by `make docs`).
+- `README.md` and `docs/` describe v0.3 (rewritten 2026-09-26, refreshed with the final measurements, Gustavo's gate
+  decisions and the API freeze 2026-09-27; `docs/` is generated by `make docs`).
 - **library.properties** (v0.3 release): `version=0.3.0`; `paragraph=` "Sends data as beeps on one pitch through an
   ordinary SSB, AM or FM transceiver; the receiver learns the pitch, the speed and the bits per package from the
   signal, and only picks the range of speeds it accepts and its audio passband."
@@ -2965,7 +3002,8 @@ Common flags: `-std=c++11 -O2 -Wall -Wextra -Wpedantic -Werror`.
 
 Each run prints what it does, encodes with `--channel` (writing the received and the clean audio) and decodes with
 `--expect`; any exit code other than 0, or any refusal that is not exit 2 with "does not fit", fails `demo_run`.
-*Measured* (2026-09-26): all six runs "result match", the refused run exits 2 with its reason.
+*Measured* (2026-09-26, again 2026-09-27 at the API freeze): all six runs "result match", the refused run exits 2
+with its reason.
 
 **Demos:**
 ```
@@ -2989,7 +3027,8 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
   combination is refused (exit 2) in plain words that name the broken rule of `EncoderConfig::check()` and the
   option to change; when the pitch and T are in range the bandwidth line is printed first. Every `ConfigError` has
   its text (U22).
-- **Decoder options:** `--profile` (default `ssb`), `--min-slot-ms` (4..32), `--passband`, `--rule adaptive|fixed`,
+- **Decoder options:** `--profile` (default `ssb`), `--min-slot-ms` (4..32: `--help` and the refusal print
+  `k_min_window_slot_ms`..`k_max_window_slot_ms`, §0.7 A8), `--passband`, `--rule adaptive|fixed`,
   `--ratio R` (the fixed line's fraction: alone it switches to the fixed line; with `--rule adaptive` it is a usage
   error, §0.7 A2), `--no-blanker`. A refused `DecoderConfig` is explained the same way (exit 2).
 - **The bandwidth line** (both demos, `tx_uno`, `rx_esp32` and the §12 modem), e.g. for `hf`:
@@ -3004,7 +3043,8 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
   preset …", pitch, T, baud, N, net bit/s), `bandwidth` (the line above), `emission` (the −26 dB and −40 dB widths),
   `receivers` (the "heard by" line: the receiver profiles whose window holds T and whose search holds the pitch, e.g.
   `heard by the receiver profiles ssb, am and fm`; when none: `no receiver profile as it stands: give the receiver
-  --min-slot-ms 16 and a --passband that holds the band`, §0.7 A3), `airtime` (duration and its parts), `level`
+  --min-slot-ms 16 and a --passband that holds the band`, §0.7 A3, the suggestion ⌈T/8⌉ ms kept within
+  `k_min_window_slot_ms`..`k_max_window_slot_ms`), `airtime` (duration and its parts), `level`
   (the crest in dBFS and the packages' average power below key-down), `audio` (samples, rate, outputs) and, with
   `--channel`, `channel` (SNR key-down and average power; FM: the CNR; offset, receiver filter, fading, output gain).
 - **What the decoder prints:** `receiver` (profile, window, passband, pitch search range, decision rule, blanker),
@@ -3050,13 +3090,16 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
   value without a gate.
 - BER-only and ratio gates also require ≥ 50 % of the bytes delivered (a run that releases nothing cannot pass).
 - Tests marked ′ were adapted during the implementation (§0.7 I19); the row gives the reason.
-- **Status (2026-09-27, the v0.3 release):** `make test` 219/219 (187 core tests, 32 TUI and demo tests); the whole
-  unit suite under ASan + UBSan: 219/219, no report; `make check_embedded`, `make arduino_check` and `make demo_run` pass.
-  `make test_long`: 31 tests, 29 pass; 370 rows: 259 PASS, 21 FAIL (L20: 20 rows; L19: 1 row), 90 REPORT (§8.3–§8.5
-  give each result; the gate decisions are in §0.8).
-- **Zero-error gates.** L19 and C10/C15 ask 0 bit errors in about 10⁴–2.4·10⁴ bits at gate + 3 dB, where the AWGN BER
-  is a few 1e-6: such a gate can fail by chance (about 1 % per row). The one L19 FAIL is such an event (§8.2 L19′);
-  the gate is kept (a change is Gustavo's decision, §11.1).
+- **Status (2026-09-27, the v0.3 release and the API freeze):** `make test` 219/219 (187 core tests, 32 TUI and demo
+  tests); the whole unit suite under ASan + UBSan: 219/219, no report (again at the freeze); `make check_embedded`,
+  `make arduino_check` and `make demo_run` pass. `make test_long`: 31 tests, 30 pass; 370 rows: 260 PASS, 20 FAIL
+  (all L20), 90 REPORT (§8.3–§8.5 give each result; the gate decisions are in §0.8).
+- **No gate asks for literally 0 bit errors** (§0.8 G5, Gustavo, 2026-09-27). With random noise even a perfect
+  receiver sometimes makes 1 error in 24,000 bits, so a zero-error gate fails by chance about once per 100 rows (one
+  L19 row did, §8.2 L19′). Where a long-suite gate asked for 0 bit errors (L5, L19, C10 and C15 from CNR 8 dB) it
+  asks for **BER ≤ 1e-4 with 0 extra and 0 shifted bytes**, on the same bits (≥ 10⁴ per row); the rest of each gate is
+  unchanged. Integrity stays strict: an extra byte or a byte at a wrong `byte_index` fails the row. The unit suite
+  (`make test`) keeps its criteria.
 
 ### 8.1 Unit tests (`make test`)
 
@@ -3079,7 +3122,7 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | U15 | `decoder_sizes`; `static_assert`s in `decoder.cpp` and `encoder.cpp`, built by `check_embedded` | `sizeof(Event)` ≤ 40; `sizeof(Decoder)` ≤ 7,168 + 576·cap B for caps 16, 32, 64; AVR `sizeof(Encoder) − k_queue_size` ≤ 96 |
 | U16 | `wav_codec_*` (8), `wav_*` (15, through `pc/wav`) | exact RIFF bytes, known/patched/streaming sizes, PCM 8/16/24/32, float 32, EXTENSIBLE, downmix, unknown/odd chunks, malformed/truncated rejected, wrapping `bits_per_sample` rejected |
 | U17 | `audio_io_*` (5), `pc_audio_*` (8), `demo_io_decoder_sink_equals_direct_process` | `EncoderSource` returns exactly `duration_samples(n)` samples then 0; `DecoderSink` equals direct `process()` (slot and package events included); `WavOutput` + memory sink readable; `pc::open_output/open_input` parse and reject specs; resampling sink; stop from a callback |
-| U18 | `decoder_config_profiles_and_check` | the §5.1 profile values; `check()` names each rule in order (min_slot 3 and 33, an inverted or > 4000 Hz passband, a passband narrower than the margins, a bad `DecisionMode`, `fixed_ratio` 0 and 1); `search_range()` = 335–2665 (ssb), 300–2700 (am), 1000–2700 (fm), 318 Hz low edge at `min_slot_ms` 16; an invalid config emits nothing |
+| U18 | `decoder_config_profiles_and_check` | the §5.1 profile values; `check()` names each rule in order (min_slot 3 and 33, an inverted or > 4000 Hz passband, a passband narrower than the margins, a bad `DecisionMode`, `fixed_ratio` 0 and 1); `k_min_window_slot_ms` = 4 and `k_max_window_slot_ms` = 32, both accepted; `search_range()` = 335–2665 (ssb), 300–2700 (am), 1000–2700 (fm), 318 Hz low edge at `min_slot_ms` 16; an invalid config emits nothing |
 | U19 | `resampler_*` (7) | 8000↔48000, 44100→8000, 11025→8000: gain within 0.1 dB, rejection ≥ 60 dB, chunking-invariant, ≥ 500× real time |
 | U20 | `tui_*` (22) | frames render into a string: width/height respected, no line too wide, escapes not counted; the decoder's package picture (START/STOP bars, the reference line following the crests, the decision line, the bits, the byte under its bits, consecutive packages sharing their marker); status counts and text; the encoder rebuilds the sent bytes (short final packages included), shows the package being sent (caret, unsent bits, pending STOP) and gives the END markers their own bracket; the spectrum marks the passband, the occupied band and the pitch; **the status shift follows the receiver's search** (`tui_status_shift_follows_the_search`: the `fm` preset −500/+950 Hz, an `fm` receiver hearing 1100 Hz at 4 ms −100/+1350 Hz); small terminals drop panels; the scope; frames are cursor-home + lines + clear-to-EOL; the pacers; 80×24 when not a TTY; `open()` refuses a non-TTY |
 | U21 | `protocol_hi_packages_bit_exact`, `encoder_packing_all_n`, `encoder_segments_and_status` | the "Hi" packages for N = 8, 4 and 3 (§2.2); for every N in 1..cap and n = 1..64 bytes: P = ⌈8n/N⌉ packages and a last one of 8n − N(P − 1) bits, the stream bits MSB first; `EncoderStatus` fields along a transmission (slot, package_bits, byte, bit_index, package_index, byte_index) |
@@ -3090,7 +3133,7 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | U26′ | `dsp_package_learner` | synthetic marker index sequences: clean train + packages for every N in 1..cap (confirmed at the second STOP, first_start exact); a faded train marker in the middle, the last one (reading B), the last two (a rejection, then N), the first STOP, the START and the first STOP; a gap of 1 after a candidate drops it; **N = 1 whose first marker comes 5 slots after L is refused** (`start_exact()` false; 4 slots are left to the decoder's carrier check); a sub-rate reading (gaps of 2, no gap of 1) reports no train ones; gaps above the cap → `rejected`, then `unsupported` on the second; contradicting spans are counted. *Adapted:* V4's 3 slots became 4 (§0.7 I4) |
 | U27′ | `decoder_u27_noise_estimate` | checked through the SNR report (its crest is exact at these levels): `hf` with N = 1, 2 and 8 from the gate to gate + 10 dB (5 dB steps, 3 runs each): within ±1 dB; N = 1 at 30 dB, where only half-quiet gaps exist: the report ≥ 27 dB (the noise bias ≤ +3 dB) and every byte with 0 bit errors. *Adapted:* the noise estimate is not exposed by the API; and the +3 dB bound at 30 dB contradicted §3.10's own marker-tail analysis until the half-quiet gaps were limited to reports below 15 dB (§0.7 I15) |
 | U28 | through `decoder_l10_relock_after_fade`, `decoder_l6_preamble_fades`, `decoder_l8_flywheel_and_loss` (the byte assembler is private) | packages released with gaps (N ∈ {1, 3, 4, 8, 16}): exactly the complete bytes, each at its `byte_index`, with the OR of its packages' flags; nothing mixes bits across a gap (0 wrong, 0 extra, 0 shifted); a partial byte is discarded at `end`/`lost` |
-| U29 | `protocol_band_functions_exact`, `protocol_width_table`, `protocol_passband_valid_and_fit`, `protocol_presets_in_typical_filters`, `protocol_shift_tolerance_follows_the_search`; the soft-float scans of `check_embedded` and `arduino_check` | `occupied_band`, `width_26db_hz`, `width_40db_hz` equal the integer formulas for every T from 4000 to 128000 µs in 1 ms steps and every tone in 300..2700; the §1.5 tables exactly, the filter's room and the shift tolerance (the 16 ms example: 1362–1638 Hz, margins 1062/1062, tolerance 1062; `fm` at 1200 Hz in 1.8 kHz −200/+350); `passband_fit` negative margins outside; **one search rule** (new, §0.7 A9): `search_range(passband, min_slot_us)` equals `DecoderConfig::search_range()` for `min_slot_ms` 4..32 and passbands on a 50 Hz grid (93,960 cases); for 269,122 valid senders (T 4..128 ms, pitches 300..2700 Hz, six filters) the shift tolerance keeps the moved pitch inside the search of the receiver whose window holds T, never exceeds the filter's room and keeps its `fits`; a receiver's fit stops at its own search (`fm` at 1100 Hz: −100/+1350 Hz) and never goes below 0; no float routine in the AVR encoder objects nor in the linked `tx_uno` |
+| U29 | `protocol_band_functions_exact`, `protocol_width_table`, `protocol_passband_valid_and_fit`, `protocol_presets_in_typical_filters`, `protocol_shift_tolerance_follows_the_search`; the soft-float scans of `check_embedded` and `arduino_check` | `occupied_band`, `width_26db_hz`, `width_40db_hz` equal the integer formulas for every T from 4000 to 128000 µs in 1 ms steps and every tone in 300..2700; the §1.5 tables exactly, the filter's room and the shift tolerance (the 16 ms example: 1362–1638 Hz, margins 1062/1062, tolerance 1062; `fm` at 1200 Hz in 1.8 kHz −200/+350); `passband_fit` negative margins outside; **one search rule** (new, §0.7 A9): `search_range(passband, min_slot_us)` equals `DecoderConfig::search_range()` for every `min_slot_ms` from `k_min_window_slot_ms` to `k_max_window_slot_ms` (4..32) and passbands on a 50 Hz grid (93,960 cases); for 269,122 valid senders (T 4..128 ms, pitches 300..2700 Hz, six filters) the shift tolerance keeps the moved pitch inside the search of the receiver whose window holds T, never exceeds the filter's room and keeps its `fits`; a receiver's fit stops at its own search (`fm` at 1100 Hz: −100/+1350 Hz) and never goes below 0; no float routine in the AVR encoder objects nor in the linked `tx_uno` |
 | – | `dsp_candidate_list_merge`, `demo_cli_numbers_and_names`, `demo_cli_rates_and_numbers_in_words`, `demo_cli_bandwidth_line`, `demo_cli_packetize_and_read_file`, `channel_*` (35) | building blocks; the demo helpers (the §7 bandwidth line exactly, incl. `-1062/+462 Hz` in 300–2100 Hz, "38 Hz below", "25 Hz below and 25 Hz above", the invalid passband, and the received band 1442–1718 Hz for a measured 1580.2 Hz and 15.9996 ms with its shift −1142/+982 Hz; the `fm` preset's line −500/+950 Hz, `hf` in a 3.0 kHz filter ±1200 Hz, an `fm` receiver's −100/+1350 Hz); the channel simulator's physics (§6.4) |
 
 ### 8.2 Loopback and behaviour (`make test`, `tests/test_decoder.cpp` unless stated)
@@ -3101,7 +3144,7 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | L2 | `decoder_l2_chunk_invariance` | `hf_fast` at 8 dB, chunks of 1, 7, 160, 4096: identical event streams, `slot` and `package` events included |
 | L3 | `decoder_l3_no_configuration` | one decoder per profile, back-to-back transmissions (0.5 s apart, 20 bytes) with T = T_min, 2T_min, 4T_min, 8T_min of its window, N ∈ {1, 4, 8, 16, 32} and pitches low/centre/high inside its search range: all decoded, one `end` each, no reconfiguration |
 | L4 | `decoder_l4_pitch_sideband_shift` | pitch sweep 300–2700 Hz in 37 Hz steps where the band fits and the pitch is in the search range (clean); `hf_slow`, `hf`, `hf_fast` in USB and LSB mistuned by −(tolerance − 10), 0 and +(tolerance − 10) Hz at gate + 3 dB: every byte, 0 wrong, 0 extra |
-| L5 | `decoder_l5_clock_error` (30 s); long suite `L5_clock_error_10_min` | ±1000 ppm on TX, on RX, and on both (+/+, −/+) at T = 16 ms, N = 8 and 32, gate + 3 dB: every byte, 0 wrong or extra, one lock, no `lost`, measured T within 0.2 % of the clock-scaled T |
+| L5 | `decoder_l5_clock_error` (30 s); long suite `L5_clock_error_10_min` | ±1000 ppm on TX, on RX, and on both (+/+, −/+) at T = 16 ms, N = 8 and 32, gate + 3 dB: every byte, 0 wrong or extra, one lock, no `lost`, measured T within 0.2 % of the clock-scaled T. The long L5 (10 min per case, 3.3–3.6·10⁴ bits) asks for BER ≤ 1e-4 with 0 extra and 0 shifted bytes instead of 0 wrong bytes (§0.8 G5); no slip, every byte and the T error are unchanged |
 | L6′ | `decoder_l6_preamble_fades` | N ∈ {1, 2, 4, 8, 16} at gate + 3 dB (`hf`, 24 bytes): (a) each of the 56 triples of the 8 sync markers zeroed; (b) the last sync marker (the first START) zeroed; (c) the first STOP zeroed; (d) the START and the first STOP zeroed; (e) the last two sync markers zeroed. (a), (b): every byte, except N = 1 in (b): every byte or none; (c), (d), (e): every byte except those touching packages 0 and 1, which may be missing. Always 0 extra bytes, 0 shifted segments, ≤ 2 bit errors per run and ≤ 8 over all 300 runs. *Adapted:* all 56 triples instead of a sample; a package whose START faded reads its first bits against a low reference line, so a few channel bit errors are allowed (a byte read off the grid is wrong in half its bits and still fails); for N = 1 in (c)–(e) the carrier across the gap places package 0 (§3.8 step 6, where the design refused g1 − L = 4), so its bytes may be missing instead of every-or-none |
 | L7′ | `decoder_l7_alias` | `hf`, 40 bytes at 10 dB, the STOPs of packages 0, 2, 4, 6 at −30 dB (a chain that reads as one of twice the length), 4 seeds: 0 wrong, 0 extra, every byte from byte 20 on. *Adapted:* v0.1b's criterion — the bytes of the attenuated stretch may be missing (the design asked 0 lost) |
 | L8′ | `decoder_l8_flywheel_and_loss` | `hf`, 60 bytes at 15 dB, every 5th STOP zeroed (packages 4, 9, …, 34), the STOP just before the cut kept, the signal cut after package 40's START: every byte before the cut, exactly the flywheeled ones flagged `flywheel_stop`; `lost(signal_gone)` within 5 packages of the cut; no `end`, no byte after. *Adapted:* the STOP right before the cut is kept — a STOP missing right before the signal goes is a loss whose held packages are dropped (§3.9 step 11) |
@@ -3115,7 +3158,7 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | L16 | `decoder_l16_above_the_cap` | senders synthesized in double precision at 8 ms with N = cap + 1, 1.5·cap and 2·cap: `lost(unsupported)`; N = 2·cap + 5: `lost(preamble_timeout)`; 0 `locked`, 0 bytes each; a synthesized N = 8 sender decodes |
 | L17′ | `decoder_l17_chain_read_as_train` | senders with N ∈ {1, 2, 4, 7} at T = 8 ms (the `ssb` T_min, (N + 1)·T inside its window), heard from package 3 on, clean and at 15 dB: 0 `locked`, 0 bytes. *Adapted:* 60 s per case in the unit suite (the design's 5 minutes are not run) |
 | L18 | `decoder_event_fields` | `hf` at 15 dB, 12 bytes: every event type filled as §5.1; slot/package events precede the bytes they complete; DCD = state ≠ SEARCH; `bits_per_package()` N from TRACK on; `reset()` in TRACK gives `lost(reset)`, then `state` |
-| L19′ | `decoder_l19_passband`; long suite `L19_passband` | the channel's receiver filter and the decoder's passband set to 300–2100 Hz (`hf` and `hf_fast` at 1200 Hz), 300–2700 (`hf_fast`), 200–2900 (`hf_slow`), 100–3000 Hz (`hf`); 20 bytes at gate + 3 dB with the pitch shifted down by its printed tolerance below − 10 Hz and up by the tolerance above − 10 Hz (`passband_fit(config)`, which stays inside the receiver's search range, §0.7 A9): every byte, 0 wrong, 0 extra; a station at 2200 Hz and a receiver whose passband ends at 1800 Hz: no lock, no byte. The long L19: the five presets in the four SSB filters, both sides (40 rows, 2.4·10⁴ bits each), gate "0 bit errors, 0 extra, loss ≤ 1 %, ≥ 10⁴ bits"; a shifted pitch outside the receiver's search range (none since A9) would be reported, with an integrity gate (0 wrong, 0 extra, 0 shifted); four stations outside the search: no lock, no byte. *Adapted:* the design's tolerance was the filter's room alone, which the search range (300..2700 Hz, from 1000 Hz below 8 ms) clipped (9 long-suite FAILs); since A9 the printed tolerance is the one the receiver follows, and both sides are tested (the design shifted both by the smaller one). *Measured* (long, 2026-09-27): 43 of 44 rows pass, the 9 formerly out-of-range shifts included (0 errors, 100 % delivered); `hf_fast` in the 1.8 kHz filter shifted −915 Hz (pitch 585 Hz) had 1 bit error in 24,000 (a zero slot read at 54 % of the reference against a 52 % line, package 139 of 200: noise; the same condition over 384,000 more bits: 0 errors) → FAIL by chance, gate kept (§8 status) |
+| L19′ | `decoder_l19_passband`; long suite `L19_passband` | the channel's receiver filter and the decoder's passband set to 300–2100 Hz (`hf` and `hf_fast` at 1200 Hz), 300–2700 (`hf_fast`), 200–2900 (`hf_slow`), 100–3000 Hz (`hf`); 20 bytes at gate + 3 dB with the pitch shifted down by its printed tolerance below − 10 Hz and up by the tolerance above − 10 Hz (`passband_fit(config)`, which stays inside the receiver's search range, §0.7 A9): every byte, 0 wrong, 0 extra; a station at 2200 Hz and a receiver whose passband ends at 1800 Hz: no lock, no byte. The long L19: the five presets in the four SSB filters, both sides (40 rows, 2.4·10⁴ bits each), gate "BER ≤ 1e-4, 0 extra, 0 shifted, loss ≤ 1 %, ≥ 10⁴ bits" (§0.8 G5; it was "0 bit errors, 0 extra"); a shifted pitch outside the receiver's search range (none since A9) would be reported, with an integrity gate (BER ≤ 1e-4, 0 extra, 0 shifted; it was 0 wrong); four stations outside the search: no lock, no byte. *Adapted:* the design's tolerance was the filter's room alone, which the search range (300..2700 Hz, from 1000 Hz below 8 ms) clipped (9 long-suite FAILs); since A9 the printed tolerance is the one the receiver follows, and both sides are tested (the design shifted both by the smaller one). *Measured* (long, 2026-09-27): 44 of 44 rows pass, the 9 formerly out-of-range shifts included (0 errors, 100 % delivered); `hf_fast` in the 1.8 kHz filter shifted −915 Hz (pitch 585 Hz) has 1 bit error in 24,000, BER 4.2e-5, 0 extra, 0 shifted (a zero slot read at 54 % of the reference against a 52 % line, package 139 of 200: noise; the same condition over 384,000 more bits: 0 errors): it failed the former 0-bit-error gate by chance and passes G5's |
 | L20′ | `decoder_l20_cold_late_join`; long suite `L20_cold_late_join` (20 starts per point) | N ∈ {8, 16, 24, 32} × T ∈ {8, 16, 32} ms (within the cap and 1152 ms), 200 bytes, the receiver started at 3 random points between package 2 and 12 packages before the end, at gate + 3 dB and at 20 dB (72 starts at cap 32): ≥ 95 % joined with `late_join`, 0 wrong and 0 extra bytes (bytes aligned); the time to the lock is reported, not gated. N ∈ {3, 4, 5, 7, 12}, started inside package 5, clean and at 20 dB: 0 `locked`, 0 bytes. *Adapted:* the design's "within 6 packages" is not reachable with short packages given the tone lock, the fine AFC's first look (up to 1 s on data), the 3 intervals, 2 folded packages and the full guard (*measured*: 72/72 joined, 42 within 6 packages, the slowest after 26; §11.2). The long L20 still gates "within 6 packages in ≥ 95 % of starts, 0 wrong, 0 shifted" (§0.8 G4). *Measured* (long, 2026-09-27, 480 starts): 466 joined, 267 within 6 packages (55.6 %), 0 wrong, 0 extra, 0 shifted; 4 of 24 joining rows pass, 20 FAIL (the open defect of §11.2); the 30 non-joining rows (N = 3, 4, 5, 7, 12): 0 locks, 0 bytes, pass |
 | R1 | `decoder_r1_watch_ignores_train_lines` | T = 20 ms with 12 markers at 2000 Hz (`ssb`) and T = 8 ms with 32 markers at 2313 Hz (`am`), the shortest tune (6 slots), 160 sample alignments of a tone-search block: no alignment loses a byte |
 | R2 | `decoder_r2_saturated_input` | input clipped ×1.5, ×2, ×4 (`hf_slow`), ×1.8, ×3 (`hf`), ×4 (`hf_fast`): 0 lost, wrong or extra bytes |
@@ -3157,12 +3200,12 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | C7 | `C7_agc` | AGC 1/300 ms: BER at the A1 point ≤ 2× the no-AGC result (v0.1b: 2.12, open) | *measured* PASS: 1.70× |
 | C8 | `C8_carrier_qrm` | a carrier +6 dB above key-down, 250–1000 Hz away: BER ≤ 1e-3 at 0 dB; acquisition ≥ 90 % with a +6 dB carrier 250 Hz away and with a +12 dB carrier 350–1000 Hz away (§0.8 G3); a +12 dB carrier 250–300 Hz away, +9 dB at 250 Hz and 100 Hz away: REPORT (v0.1b: no lock at 100 Hz; §11) | *measured* PASS, 16 of 16: BER ≤ 2.2e-5; acquisition 95–100 %; reported: +12 dB at ±250 Hz 22–32 %, at ±300 Hz 80–83 %, +9 dB at ±250 Hz 79–86 %, no lock 100 Hz away |
 | C9 | `C9_keyed_cw_qrm` | keyed CW (20 WPM, equal PEP, 300 Hz away): BER ≤ 2e-3 at +3 dB | *measured* PASS, 2 of 2: 0 errors |
-| C10 | `C10_fm` | FM (`fm` preset and `hf` over FM): BER ≤ 1e-3 at CNR 6 dB; 0 errors in ≥ 10⁴ bits at CNR ≥ 8 dB, with flat TX + de-emphasis RX and with pre- + de-emphasis; 0 bytes lost at CNR 14 dB (blanker deadlock regression) | *measured* PASS, 8 of 8: `fm` 3.6e-5 at 6 dB, 0 errors from 8 dB |
+| C10 | `C10_fm` | FM (`fm` preset and `hf` over FM): BER ≤ 1e-3 at CNR 6 dB; BER ≤ 1e-4 with 0 extra and 0 shifted bytes in ≥ 10⁴ bits at CNR 8, 10 and 14 dB (§0.8 G5; it was 0 bit errors), with flat TX + de-emphasis RX and with pre- + de-emphasis; 0 bytes lost at CNR 14 dB (blanker deadlock regression) | *measured* PASS, 8 of 8: `fm` 3.6e-5 at 6 dB, 0 errors from 8 dB |
 | C11 | `C11_am` | AM, m = 0.8, 6 kHz IF: BER ≤ 1e-3 at CNR 2 dB for `hf_slow` and at CNR 6 dB for the `am` preset (§0.8 G1); the `am` preset at CNR 2–5 dB: REPORT | *measured* PASS, 2 of 2: `hf_slow` 0 errors at 2 dB, `am` 1.65e-4 at 6 dB; reported: `am` 1.4e-2 / 4.4e-3 / 2.1e-3 / 8.1e-4 at 2 / 3 / 4 / 5 dB |
 | C12 | `C12_flutter` | flutter 0.5 ms / 10 Hz, `hf`, 30 dB: BER and wrong bytes REPORT; extra bytes ≤ 1 per 1000 released | *measured* PASS: 0 extra of 13,420 released (BER 7.2e-2, reported) |
 | C13 | `C13_agc_fading` | AGC + CCIR moderate, 30 dB: BER ≤ 2.5e-2 and ≤ 2× the no-AGC result | *measured* PASS: 2.82e-3, 0.54× |
 | C14 | `C14_sideband_shift_fading` | LSB and shift in CCIR moderate, 30 dB: the preset pitch shifted to ±(tolerance − 10 Hz) in USB and LSB: BER ≤ the C2 gate | *measured* PASS, 8 of 8: 1.91–4.51e-3; `hf_fast` reported (1.7–2.7e-3, 12–19 % lost) |
-| C15 | `C15_fm_emphasis_mismatch` | flat TX / de-emphasis RX: the C10 gates at CNR 6–14 dB | *measured* PASS, 8 of 8: `fm` 6.4e-5 at 6 dB, 0 from 8 dB |
+| C15 | `C15_fm_emphasis_mismatch` | flat TX / de-emphasis RX: the C10 gates at CNR 6–14 dB (from 8 dB: BER ≤ 1e-4, 0 extra, 0 shifted, §0.8 G5) | *measured* PASS, 8 of 8: `fm` 6.4e-5 at 6 dB, 0 from 8 dB |
 
 ### 8.5 Integrity and false locks (`make test_long`)
 
@@ -3177,8 +3220,8 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | F7 | `F7_package_learning` | candidates formed and confirmed per hour in F1–F4, REPORT; any confirmation must still fail the guard (0 `locked`) | *measured* PASS: 109 N confirmations in the gated runs, 0 locks; up to 44 confirmations per hour (`fm`, speech) |
 
 The long suite also runs `L5_clock_error_10_min`, `L19_passband` and `L20_cold_late_join` (§8.2): L5 PASS (12 of 12;
-T 0.162 % off at worst); L19 43 of 44 (one chance bit error, §8.2 L19′); L20 FAIL (20 of the 24 joining rows, §0.8 G4;
-the 30 non-joining rows pass).
+0 bit errors; T 0.162 % off at worst); L19 PASS (44 of 44; one row with 1 bit error in 24,000, below the §0.8 G5
+gate, §8.2 L19′); L20 FAIL (20 of the 24 joining rows, §0.8 G4; the 30 non-joining rows pass).
 
 ### 8.6 Build and embedded (`make check_embedded`, `make arduino_check`)
 
@@ -3236,7 +3279,7 @@ The v0.2 spec, code and results (`make test` 213/213, `make test_long` 155 PASS 
 branch. The general improvements of §0.4 were validated there (AVR ISR max 1,422–1,493 cycles, queue capacity and
 fences, F1–F4 at 0 locks with its confirmation rules, C13 AGC + fading fixed by the recent floor).
 
-### 9.5 v0.3, the implementation (2026-09-26) and the release (2026-09-27)
+### 9.5 v0.3, the implementation (2026-09-26), the release and the API freeze (2026-09-27)
 
 - **Core** (`scratchpad/v03_core/`): the unit suite built from an explicit file list (`build_tests.sh`, before the
   demos and the TUI were adapted) 179/179 in about 31 s, and under ASan + UBSan (`build_asan.sh`) 179/179 with no
@@ -3271,6 +3314,16 @@ fences, F1–F4 at 0 locks with its confirmation rules, C13 AGC + fading fixed b
   checksums (deterministic); against the figures of 2026-09-26 only `bandwidth_filters.svg` (the truthful tolerance),
   `ber_awgn.svg` (the fixed decoder; its 1e-3 points −3.2 / −0.3 / +2.8 dB unchanged) and `protocol_examples.md`
   changed.
+- **Freeze step** (`scratchpad/rel03/`, 2026-09-27: Gustavo's decisions G1–G5, the window constants, the API freeze):
+  `make all`, `make test` (219/219, 33 s), `make check_embedded` (the same ISR figures: max 1,011 cycles, mean
+  494–628), `make arduino_check` (the flash and RAM of §3.15, unchanged) and `make demo_run` pass; the unit suite
+  under ASan + UBSan 219/219, no report. `make test_long` 8 min 52 s on 10 cores (other checks ran beside it): 31
+  tests, 30 pass (L20 fails); 370 rows: 260 PASS / 20 FAIL / 90 REPORT (`test_long.log`). Against the release run
+  every measured number is identical (the suite is deterministic): 64 rows changed only their gate text (L5 12, L19
+  40, C10 6, C15 6) and one row its verdict (the L19 row with 1 bit error in 24,000, FAIL → PASS under G5). The
+  demos' `--help` and refusal texts, now printed from the constants, are byte-identical to the release's. `make docs`
+  twice: identical checksums, and identical to the committed `docs/` (no figure or example depends on the changed
+  code). The §5 listings regenerated from the headers and compared line by line (`listings.py`): all nine match.
 
 ---
 
@@ -3288,7 +3341,7 @@ fences, F1–F4 at 0 locks with its confirmation rules, C13 AGC + fading fixed b
 | Cold late joins are slow (L20 long: 267 of 480 starts within 6 packages; 466 of 480 joined) | the gate stays and fails (§0.8 G4); the lead is in §11.2 |
 | A sender whose preamble is hidden behind an interferer present from its first sample (`hf_fast`) | joined cold with its first bytes missing (R8); §11.2 |
 | F3/F4 false locks and C7/C8 were open in v0.1b | v0.2's single-tone hardening (§0.4), the package learning, the tune rule and the beep-shape guard (§0.7 I20, I25): F3, F4 0 locks in 36 runs of 30 min, C7 1.70× (pass); C8 passes with the gates of §0.8 G3, a strong carrier 250–300 Hz away stays open (§11.2) |
-| Zero-error gates (L19, C10, C15) at gate + 3 dB can fail on one chance bit error | the one L19 FAIL is investigated and reported (§8.2); keep or change: Gustavo (§11.1) |
+| A near-zero BER gate (§0.8 G5: BER ≤ 1e-4 where a few 1e-6 is expected) lets a rare systematic bit error pass unnoticed | every row still prints its bit errors and their 95 % bound; extra and shifted bytes stay gated at 0; F6 gates runs of wrong bytes and reports every byte at a wrong position; a row with bit errors is still investigated (the L19 one: noise, §8.2 L19′) |
 | The v0.2 robustness fixes were validated on the multi-bit signal | re-validated on one pitch by R1–R10 (pass) |
 | Memory: 16.2 KB at the Arduino cap 16, 25.3 KB at cap 32 (*measured*) | the cap is a build define; §1.6 table; the gate of §3.15 (at least 152 B to spare) |
 | The bandwidth constant is a simulation result | U6 measures the real encoder output |
@@ -3331,11 +3384,13 @@ implementation's own decisions are listed in §0.7.
 12. **Honest trade-off:** v0.3's fading floors are v0.1's (about 100× v0.2's in CCIR moderate); FEC is the planned
     cure.
 13. **The gate decisions of §0.8** (C11 `am` at CNR 6 dB, A3 on messages of ≥ 8 packages, C8 by carrier level and
-    distance, L20 kept) were made by Claude for the release: confirm or override.
-14. **Zero-error gates at gate + 3 dB** (L19, C10, C15: 0 bit errors in 10⁴–2.4·10⁴ bits) fail by chance about once
-    per hundred rows at an AWGN BER of a few 1e-6; one L19 row did (§8.2 L19′). Keep them (a FAIL then needs the
-    investigation it got), or gate BER ≤ 1e-4 with 0 wrong-position and 0 extra bytes?
-15. **The API freeze** (§5.4): freeze the v0.3 headers now, with L20 and A8 open, or after them?
+    distance, L20 kept) were made by Claude for the release. **Confirmed by Gustavo (2026-09-27):** G1–G3 kept, L20
+    stays gated as an open defect (G4).
+14. **Zero-error gates at gate + 3 dB** (L5, L19, C10, C15: 0 bit errors in 10⁴–3.6·10⁴ bits) fail by chance about
+    once per hundred rows at an AWGN BER of a few 1e-6; one L19 row did (§8.2 L19′). **Decided by Gustavo
+    (2026-09-27):** they gate BER ≤ 1e-4 with 0 extra and 0 shifted bytes (§0.8 G5).
+15. **The API freeze** (§5.4). **Decided by Gustavo (2026-09-27):** frozen now, with L20 open, after exporting the
+    `min_slot_ms` limits (§0.7 A8).
 
 ### 11.2 Open problems (v0.3 release, 2026-09-27)
 
@@ -3349,16 +3404,16 @@ measurement.
 | P3 | **`hf_fast` behind an interferer present from the first sample** (R8): the preamble is lost; a cold join recovers the transmission with its first bytes missing. | The tone search holds the interferer when the tune starts, and the watch leaves it only at the train — too late to read the train. | R8′; to be studied |
 | P4 | **A strong carrier close to the pitch (C8):** with a carrier 12 dB above the tone 250 Hz away the receiver finds the signal in 22–32 % of the tries, 300 Hz away in 80–83 % (with 155–159 wrong bytes in the 300 Hz trials, none at a wrong position); gated only from 350 Hz (§0.8 G3). A +6 dB carrier 250 Hz away costs about 8 % of the bytes since the tune rule (§0.7 I20). | A loud carrier this close to the pitch keeps the receiver from finding the tune and the sync train in most tries (the first run was no better: 24–32 %). The cause is not analysed in detail; the tune rule removed accidental recoveries the old decoder had next to a +6 dB carrier. | §4.3; no cheap and safe fix found during the integrity fix; P2's candidate-ring lead recovered part of the +6 dB loss in a trial (152 / 150–153 of 168 locks, against 164 / 158 before the tune rule and 144 / 147 after it) |
 | P5 | **ESP32 CPU load not measured** (B4); **no ARM build** (`arm-none-eabi-g++` not installed). | The targets of §3.15 are estimates until a board runs `loopback_esp32`; the core has not been compiled for a Cortex-M. | §3.15, §8.6 |
-| P6 | **`min_slot_ms` range not public** (§0.7 A8). | The demos' messages copy "4..32" instead of naming a constant. | export it from `decoder.hpp` before the freeze (§5) |
-| P7 | **One extra byte after a lost END in QSB (C5):** `hf_slow` at 18 dB in 20 dB-deep QSB released 1 extra byte (the first run too). | When an END falls into a fade, TRACK flywheels on, crosses the 1.7 s gap and reads the next transmission's sync train as the END markers, so one package of noise before it is taken as data. | C5 (report row); to be studied |
-| P8 | **Slow senders miss some locks just below the gate (A3):** at T = 64 and 128 ms and gate − 2 dB, 4 and 7 of 300 transmissions are not locked (98.67 % and 97.67 %; gate 90 %); 3 of the 4 and all 7 since the tune rule. | On a weak signal the search may lock the tone without seeing it steady; the fine AFC's first large correction then forgets the history (§3.3 step 5). When that happens just before the train, the tune is gone from the history and the tune rule (§0.7 I20) refuses the sync. | A3; to be studied |
+| P6 | **One extra byte after a lost END in QSB (C5):** `hf_slow` at 18 dB in 20 dB-deep QSB released 1 extra byte (the first run too). | When an END falls into a fade, TRACK flywheels on, crosses the 1.7 s gap and reads the next transmission's sync train as the END markers, so one package of noise before it is taken as data. | C5 (report row); to be studied |
+| P7 | **Slow senders miss some locks just below the gate (A3):** at T = 64 and 128 ms and gate − 2 dB, 4 and 7 of 300 transmissions are not locked (98.67 % and 97.67 %; gate 90 %); 3 of the 4 and all 7 since the tune rule. | On a weak signal the search may lock the tone without seeing it steady; the fine AFC's first large correction then forgets the history (§3.3 step 5). When that happens just before the train, the tune is gone from the history and the tune rule (§0.7 I20) refuses the sync. | A3; to be studied |
 
 ---
 
 ## 12. Next phase: `unlimited_modem` and full documentation (requested 2026-09-25)
 
 Gustavo's request, scheduled **after the core API is stable** (every §8 gate green and the v0.3 API frozen), to be
-done in one go. Updated for the v0.3 API.
+done in one go. Updated for the v0.3 API. *State (2026-09-27):* the v0.3 API is frozen (§5.4); the one §8 gate
+still failing is L20, the slow cold late joins (§11.2 P2).
 
 ### 12.1 `unlimited_modem` — a real modem on local audio
 
@@ -3394,8 +3449,9 @@ examples) and complete after:
   spectra against the typical filters, channel impairments, BER curves;
 - API reference, audio I/O and drivers, channel simulator, TUI, testing and results, porting to MCUs (caps, memory,
   cycle counts), operating guide (levels, ALC, VOX, PTT, choosing T, N and the passband), modem usage.
-- `README.md` rewritten for v0.3 (**done** 2026-09-26, refreshed with the final measurements 2026-09-27); the
-  generated figures and bit-exact examples of `docs/` are in place; the rest of this list is the next phase.
+- `README.md` rewritten for v0.3 (**done** 2026-09-26, refreshed with the final measurements 2026-09-27 and again
+  for Gustavo's gate decisions and the API freeze the same day); the generated figures and bit-exact examples of
+  `docs/` are in place; the rest of this list is the next phase.
 
 ---
 
@@ -3437,6 +3493,7 @@ examples) and complete after:
 | **FEC** | Forward error correction: redundancy that repairs errors (roadmap). |
 | **Flip** | A detected twist. |
 | **Flywheel** | Carrying on at the predicted position when a marker is not detected. |
+| **Frozen API** | The public declarations of §5 (outside the internal `dsp.hpp`): every 0.3 release keeps them exactly; changing one needs a changelog row, a new version and the `library.properties` version (§5.4). |
 | **Guard** | The check of a new lock's first packages before any byte is released. |
 | **Guard bin** | A tone-search bin just outside the search range where no lock is taken: a tone outside the range peaks there instead of in the edge bin. |
 | **History** | The receiver's memory of recent blocks (prefix sums), long enough for one package at the slowest T. |
@@ -3471,4 +3528,4 @@ examples) and complete after:
 | **Tune tone** | A steady beep ≥ 250 ms at the start: the receiver finds the pitch, the radio settles (ALC, VOX). Its end also places the sync train: the first START is at least 7 slots after the train's first marker (§3.8). |
 | **Twist** | The 180° phase reversal in the middle of a marker: inaudible, but unmistakable for the receiver. |
 | **Watch** | The tone search kept running while the receiver holds a pitch, to switch to a new station's train. |
-| **Window (speed)** | The 8:1 range of slot lengths a receiver accepts: `min_slot_ms` .. 8 × `min_slot_ms`. |
+| **Window (speed)** | The 8:1 range of slot lengths a receiver accepts: `min_slot_ms` .. 8 × `min_slot_ms`, with `min_slot_ms` from 4 to 32 ms (`k_min_window_slot_ms`, `k_max_window_slot_ms`). |

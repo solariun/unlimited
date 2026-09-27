@@ -30,7 +30,7 @@ const Filter k_filters[] = {{"SSB 1.8 kHz", 300, 2100},
                             {"3.0 kHz", 100, 3000}};
 const Preset k_l19_presets[] = {Preset::hf_slow, Preset::hf, Preset::hf_fast, Preset::am, Preset::fm};
 const double k_l19_bits = 2.4e4;
-const double k_zero_bits_gate = 1e4;
+const double k_min_gate_bits = 1e4;
 const std::size_t k_l19_bytes = 200;
 const double k_shift_margin_hz = 10.0;
 const double k_gate_margin_db = 3.0;
@@ -190,18 +190,20 @@ void test_l19_passband() {
                                                       o.misplaced_bytes);
         if (!rows[i].in_range) {
             // A shift the printed tolerance allows but the receiver's search does not hold: decoding is reported, the
-            // integrity still gated (never a wrong, extra or shifted byte).
+            // integrity still gated (gate decision G5: BER <= 1e-4, never an extra or shifted byte).
             result("L19", rows[i].condition, text + "; the shifted pitch is outside the receiver's search range",
                    "report (decoding outside the search range)", true, Kind::report);
             result("L19", rows[i].condition + ", integrity",
-                   format("wrong %zu, extra %zu, shifted %zu", s.wrong_bytes, s.extra_bytes, o.misplaced_bytes),
-                   "0 wrong, 0 extra, 0 shifted bytes",
-                   s.wrong_bytes == 0 && s.extra_bytes == 0 && o.misplaced_bytes == 0);
+                   format("BER %.2e, wrong %zu, extra %zu, shifted %zu", s.ber(), s.wrong_bytes, s.extra_bytes,
+                          o.misplaced_bytes),
+                   "BER <= 1e-4, 0 extra, 0 shifted bytes", near_zero_errors(o));
             continue;
         }
-        const bool enough = static_cast<double>(s.matched * k_bits_per_byte) >= k_zero_bits_gate;
-        const bool pass = s.bit_errors == 0 && s.extra_bytes == 0 && s.loss() <= k_loss_gate && enough;
-        result("L19", rows[i].condition, text, "decodes: 0 bit errors, 0 extra, loss <= 1%, >= 1e4 bits", pass);
+        // Gate decision G5 (spec 0.8): BER <= 1e-4 with 0 extra and 0 shifted bytes, no longer 0 bit errors.
+        const bool enough = static_cast<double>(s.matched * k_bits_per_byte) >= k_min_gate_bits;
+        const bool pass = near_zero_errors(o) && s.loss() <= k_loss_gate && enough;
+        result("L19", rows[i].condition, text, "decodes: BER <= 1e-4, 0 extra, 0 shifted, loss <= 1%, >= 1e4 bits",
+               pass);
     }
     for (std::size_t i = first_outside; i < rows.size(); ++i) {
         const Outcome& o = outcomes[i][0];

@@ -18,12 +18,12 @@ const std::uint32_t k_test_c = 100;
 const double k_bits_gate = 2e5;       // BER-gated usb points
 const double k_bits_side = 1e5;       // loss, F6 and report points
 const double k_bits_rf = 1e5;         // BER-gated AM/FM points (a 4-6x slower channel)
-const double k_bits_zero = 1.2e4;     // "0 errors in >= 1e4 bits"
-const double k_bits_zero_long = 2.4e4;  // the same with more margin (blanker deadlock, evidence rows)
+const double k_bits_low_ber = 1.2e4;       // "BER <= 1e-4 in >= 1e4 bits" (gate decision G5)
+const double k_bits_low_ber_long = 2.4e4;  // the same with more margin (blanker deadlock, evidence rows)
 const double k_bits_blanker = 4e5;    // C6 blanker on/off ratio on clean AWGN at the A1 point
 const std::size_t k_pair = 2;         // the two arms of a comparison (gate point and gate + 3, no AGC and AGC)
 const double k_bits_ratio = 1e6;      // ratio gates at the A1 point (tens of errors per arm)
-const double k_zero_bits_gate = 1e4;
+const double k_min_gate_bits = 1e4;
 const std::size_t k_bytes = 300;      // bytes per transmission (packets)
 const std::size_t k_trial_bytes = 16;  // acquisition trials: one packet
 const std::size_t k_trials = 100;
@@ -645,18 +645,19 @@ void test_c9_cw() {
     }
 }
 
-// C10 (pre- and de-emphasis) and C15 (flat TX, de-emphasising RX): the fm preset and hf over FM, fm profile.
+// C10 (pre- and de-emphasis) and C15 (flat TX, de-emphasising RX): the fm preset and hf over FM, fm profile. From
+// CNR 8 dB on, gate decision G5 (spec 0.8): BER <= 1e-4 with 0 extra and 0 shifted bytes (it was 0 bit errors).
 void run_fm(const char* id, bool preemphasis, std::uint32_t test) {
-    enum Gate { ber_gate, zero_errors, zero_lost };
+    enum Gate { ber_gate, low_ber, low_ber_no_loss };
     struct Row {
         double cnr_db;
         Gate gate;
         double bits;
     };
     const Row rows[] = {{k_fm_gate_cnr_db, ber_gate, k_bits_rf},
-                        {8.0, zero_errors, k_bits_zero},
-                        {10.0, zero_errors, k_bits_zero},
-                        {14.0, zero_lost, k_bits_zero_long}};
+                        {8.0, low_ber, k_bits_low_ber},
+                        {10.0, low_ber, k_bits_low_ber},
+                        {14.0, low_ber_no_loss, k_bits_low_ber_long}};
     const std::size_t row_count = sizeof(rows) / sizeof(rows[0]);
     const Preset presets[] = {Preset::fm, Preset::hf};
     std::vector<CPoint> points;
@@ -678,19 +679,20 @@ void run_fm(const char* id, bool preemphasis, std::uint32_t test) {
             const std::size_t i = p * row_count + r;
             const Outcome& out = o[i][0];
             const loopback::Score& s = out.score;
-            const bool enough = static_cast<double>(s.matched * k_bits_per_byte_count) >= k_zero_bits_gate;
+            const bool enough = static_cast<double>(s.matched * k_bits_per_byte_count) >= k_min_gate_bits;
             switch (rows[r].gate) {
             case ber_gate:
                 result(id, points[i].condition, measured(out), "BER <= 1e-3, delivered >= 50%",
                        s.ber() <= k_ber_gate_awgn && delivered(out));
                 break;
-            case zero_errors:
-                result(id, points[i].condition, measured(out), ">= 1e4 bits, 0 bit errors", s.bit_errors == 0 && enough);
+            case low_ber:
+                result(id, points[i].condition, measured(out), ">= 1e4 bits, BER <= 1e-4, 0 extra, 0 shifted",
+                       near_zero_errors(out) && enough);
                 break;
-            case zero_lost:
+            case low_ber_no_loss:
                 result(id, points[i].condition, measured(out),
-                       ">= 1e4 bits, 0 bit errors, 0 bytes lost (blanker deadlock)",
-                       s.bit_errors == 0 && enough && s.lost_bytes == 0);
+                       ">= 1e4 bits, BER <= 1e-4, 0 extra, 0 shifted, 0 bytes lost (blanker deadlock)",
+                       near_zero_errors(out) && enough && s.lost_bytes == 0);
                 break;
             }
         }
@@ -722,7 +724,7 @@ void test_c11_am() {
                                                          name_of(config).c_str(), cnr, c.snr_db),
                                                   f6 != 0),
                                         config, c, DecoderConfig::for_profile(Profile::am),
-                                        f6 != 0 ? k_bits_zero : k_bits_rf, f6 != 0));
+                                        f6 != 0 ? k_bits_low_ber : k_bits_rf, f6 != 0));
         }
     }
     const std::size_t first_evidence = points.size();
@@ -734,7 +736,7 @@ void test_c11_am() {
             points.push_back(make_point("C11",
                                         format("AM m=0.8, %s, am profile, CNR %.0f dB in the 6 kHz IF (snr %.1f dB)",
                                                name_of(config).c_str(), k_am_sweep_cnr_db[n], c.snr_db),
-                                        config, c, DecoderConfig::for_profile(Profile::am), k_bits_zero_long, false));
+                                        config, c, DecoderConfig::for_profile(Profile::am), k_bits_low_ber_long, false));
         }
     }
     const std::vector<std::vector<Outcome> > o = run_cpoints(points, k_test_c + 11);

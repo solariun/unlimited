@@ -135,6 +135,12 @@ void merge(Outcome& into, const Outcome& from);
 const double k_min_delivered = 0.5;
 bool delivered(const Outcome& outcome);
 
+// Gate decision G5 (spec 0.8): a gate that asked for 0 bit errors asks for BER <= 1e-4 with 0 extra and 0 shifted
+// bytes. With random noise even a perfect receiver sometimes makes 1 error in 24,000 bits, so a zero-error gate failed
+// by chance about once per 100 rows; the integrity checks (extra, shifted) stay strict.
+const double k_near_zero_ber = 1e-4;
+bool near_zero_errors(const Outcome& outcome);  // BER <= k_near_zero_ber, 0 extra bytes, 0 shifted (misplaced) bytes
+
 TxPlan random_tx(const EncoderConfig& config, std::size_t bytes, std::uint32_t seed);
 TxPlan packet_tx(const EncoderConfig& config, std::size_t bytes, std::uint32_t seed);  // >= bytes of packets
 

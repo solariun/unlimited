@@ -66,8 +66,6 @@ const double k_amplitude_db = 20.0;
 const double k_power_db = 10.0;
 const double k_us_per_s = 1e6;
 const uint32_t k_us_per_ms = 1000;
-const uint32_t k_min_profile_slot_ms = 4;   // DecoderConfig::min_slot_ms range
-const uint32_t k_max_profile_slot_ms = 32;
 
 // Samples per Encoder::render() call. A slot has at least 32 samples, so the queue is refilled several
 // times per package (it never runs dry while data remains) and every slot is seen by the TUI.
@@ -368,7 +366,8 @@ std::string heard_by(const EncoderConfig& config) {
     if (names.empty()) {
         const uint32_t needed = (config.slot_us + unlimited::k_speed_span * k_us_per_ms - 1) /
                                 (unlimited::k_speed_span * k_us_per_ms);
-        const uint32_t min_slot_ms = std::max(k_min_profile_slot_ms, std::min(k_max_profile_slot_ms, needed));
+        const uint32_t min_slot_ms = std::max<uint32_t>(unlimited::k_min_window_slot_ms,
+                                                        std::min<uint32_t>(unlimited::k_max_window_slot_ms, needed));
         return "no receiver profile as it stands: give the receiver --min-slot-ms " + std::to_string(min_slot_ms) +
                " and a --passband that holds the band";
     }

@@ -83,10 +83,10 @@ const char* const k_usage =
     "  --in SPEC               the audio: wav:<path>, <path>.wav or null (default rx.wav)\n"
     "  --profile NAME          ssb (default): slots of 8..64 ms, passband 300..2700 Hz, HF SSB (USB or LSB);\n"
     "                          am: 8..64 ms, 100..3000 Hz; fm: 4..32 ms, 300..3000 Hz, pitches from 1000 Hz\n"
-    "  --min-slot-ms N         the shortest slot to hear, 4..32 ms: the receiver then hears N..8N ms\n"
+    "  --min-slot-ms N         the shortest slot to hear, %u..%u ms: the receiver then hears N..%uN ms\n"
     "  --passband LO:HI        the radio's audio filter; the pitch search stays inside it\n"
     "  --rule adaptive|fixed   the decision line between a 0 and a 1: adaptive (the smart line, default)\n"
-    "                          sits at 50..75 % of the START-STOP reference line, about 70 % on weak signals;\n"
+    "                          sits at 50..75 %% of the START-STOP reference line, about 70 %% on weak signals;\n"
     "                          fixed sits at --ratio of it\n"
     "  --ratio R               the fixed decision line, a fraction of the reference line (0.70; implies fixed)\n"
     "  --no-blanker            turn off the impulse (static crash) blanker\n"
@@ -702,7 +702,9 @@ int main(int argc, char** argv) {
     try {
         const Options options = parse_options(argc, argv);
         if (options.help) {
-            std::fputs(k_usage, stdout);
+            std::printf(k_usage, static_cast<unsigned>(unlimited::k_min_window_slot_ms),
+                        static_cast<unsigned>(unlimited::k_max_window_slot_ms),
+                        static_cast<unsigned>(unlimited::k_speed_span));
             return k_exit_ok;
         }
         return run(options);

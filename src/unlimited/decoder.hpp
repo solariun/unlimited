@@ -54,7 +54,8 @@ typedef void (*EventHandler)(const Event& event, void* context);
 
 // The receiver chooses its T range and its audio passband; it learns the tone, T and N from the signal.
 struct DecoderConfig {
-    uint8_t min_slot_ms;           // accepted T = min_slot_ms .. 8 * min_slot_ms; block = min_slot_ms samples
+    uint8_t min_slot_ms;           // k_min_window_slot_ms..k_max_window_slot_ms: accepted T = min_slot_ms ..
+                                   // 8 * min_slot_ms; block = min_slot_ms samples
     Passband passband;             // the radio's audio passband; the tone search stays inside it (spec 3.6)
     DecisionMode decision_mode;
     float fixed_ratio;             // DecisionMode::fixed_ratio: fraction of the reference line

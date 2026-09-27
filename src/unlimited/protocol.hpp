@@ -46,6 +46,10 @@ static const uint32_t k_max_slot_us = 128000;
 static const uint32_t k_max_package_us = 1152000;  // (N + 1) T: START to STOP
 static const uint32_t k_fast_slot_us = 8000;       // below it: FM-like channels only, tone >= k_min_fast_tone_hz
 static const uint8_t k_speed_span = 8;
+// A receiver's T_min (DecoderConfig::min_slot_ms) lies in k_min_window_slot_ms..k_max_window_slot_ms: its window is
+// min_slot_ms .. k_speed_span * min_slot_ms.
+static const uint8_t k_min_window_slot_ms = 4;
+static const uint8_t k_max_window_slot_ms = 32;
 
 // Pitch (spec 1.3).
 static const uint16_t k_min_tone_hz = 300;
@@ -134,7 +138,7 @@ enum class ConfigError : uint8_t {
     outside_passband,  // encoder: the occupied band does not fit the passband
     sync_markers,      // encoder: outside k_min_sync_markers..k_max_sync_markers
     amplitude,         // encoder: not > 0
-    min_slot,          // decoder: min_slot_ms outside 4..32
+    min_slot,          // decoder: min_slot_ms outside k_min_window_slot_ms..k_max_window_slot_ms
     decision_mode,     // decoder: not a DecisionMode value
     fixed_ratio        // decoder: fixed_ratio outside (0, 1)
 };

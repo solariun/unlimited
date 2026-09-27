@@ -26,8 +26,7 @@ using dsp::LearnStep;
 // Profiles (spec 1.7, 5.1).
 const uint8_t k_ssb_min_slot_ms = 8;
 const uint8_t k_fm_min_slot_ms = 4;
-const uint8_t k_min_block_samples = 4;
-const uint8_t k_max_block_samples = 32;
+const uint8_t k_min_block_samples = k_min_window_slot_ms;  // a block is min_slot_ms samples (spec 3.1)
 const float k_default_fixed_ratio = 0.70f;
 
 // Units.
@@ -458,7 +457,7 @@ DecoderConfig DecoderConfig::for_profile(Profile profile) {
 }
 
 ConfigError DecoderConfig::check() const {
-    if (min_slot_ms < k_min_block_samples || min_slot_ms > k_max_block_samples) return ConfigError::min_slot;
+    if (min_slot_ms < k_min_window_slot_ms || min_slot_ms > k_max_window_slot_ms) return ConfigError::min_slot;
     if (!passband_valid(passband)) return ConfigError::passband;
     const Passband range = search_range();
     if (range.low_hz > range.high_hz) return ConfigError::passband;

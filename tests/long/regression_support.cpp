@@ -755,6 +755,10 @@ bool delivered(const Outcome& outcome) {
     return outcome.delivered() >= k_min_delivered;
 }
 
+bool near_zero_errors(const Outcome& outcome) {
+    return outcome.score.ber() <= k_near_zero_ber && outcome.score.extra_bytes == 0 && outcome.misplaced_bytes == 0;
+}
+
 void merge(Outcome& into, const Outcome& from) {
     Score& a = into.score;
     const Score& b = from.score;
