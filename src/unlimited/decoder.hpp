@@ -193,7 +193,12 @@ private:
 
     void set_state(DecoderState state);
     void enter_search(bool keep_statistics = false);
+    void follow_leader();
     void lock_tone(float tone_hz);
+    void retune(float tone_hz, uint8_t mixed_samples);
+    void settle_lock();
+    void exclude_held(float tone_hz);
+    float remix_reach_hz() const;
     void enter_acquire();
     void enter_preamble(float anchor, float slot_blocks, float amplitude, uint8_t marker_bits, int32_t min_start);
     void enter_track(const Marker& start, uint32_t package_index, uint8_t bits, bool late_join);
@@ -207,7 +212,10 @@ private:
     bool harmonic_image(float tone_hz) const;
     void run_acquire();
     void run_afc(int32_t re, int32_t im);
+    void afc_look();
+    void seed_afc();
     void forget_history();
+    bool rescan_history(bool tuned);
     void push_block_noise();
     void run_candidates(bool tuned);
     bool try_sync(const dsp::Candidate& candidate);
@@ -219,14 +227,17 @@ private:
     bool hidden_midpoints(float centre, float slot_blocks, uint8_t hit_bits, uint8_t& hidden_bits) const;
     bool stream_tune(float end, float widest_half) const;
     bool try_late_join(const dsp::Candidate& candidate);
-    bool chain_start(float newest, float period, float slot_blocks, uint8_t intervals, float& start,
+    bool chain_start(float newest, float period, float slot_blocks, float reach, uint8_t intervals, float& start,
                      uint8_t& back) const;
     bool train_behind(const dsp::Candidate& candidate, float slot_blocks) const;
     bool has_candidate_near(float position, float tolerance, float q_min) const;
     float candidate_q_near(float position, float tolerance) const;
+    float marker_q_near(const float* markers, float position, float tolerance) const;
     bool try_cold_join(const dsp::Candidate& candidate);
     void cold_join_step();
     float chain_marker(uint8_t package) const;
+    float chain_slot(uint8_t bits) const;
+    float nearest_candidate(float position, float reach) const;
     bool fold_ratio(uint8_t bits, float& ratio) const;
     bool fold_unrivalled(uint8_t bits) const;
     void fold_package(float start, float stop);
@@ -318,7 +329,9 @@ private:
     float noise_variance() const;
     float marker_noise(float sigma2, float slot_blocks) const;
     float end_position() const;
+    float live_end() const;
     float candidate_position(const dsp::Candidate& candidate) const;
+    float marker_position(const dsp::Candidate& candidate) const;  // its finest detection (the joins)
     float blocks_to_ms(float blocks) const;
     float ms_to_blocks(float ms) const;
     bool in_range(float slot_blocks) const;
@@ -351,6 +364,7 @@ private:
     dsp::FineAfc afc_;
     dsp::Complex afc_sum_;
     uint8_t afc_fill_;
+    uint16_t afc_due_;               // AFC inputs at which the next look is due
     dsp::QuantileTracker noise_;     // SEARCH..PREAMBLE: robust to the signal in its windows
     dsp::NoiseTracker track_noise_;  // TRACK: the quiet gaps of decided zeros
     dsp::CandidateList candidates_;
@@ -361,6 +375,7 @@ private:
 
     // Grid (PREAMBLE, history clock): slot index g sits at grid_position_ + (g - grid_last_) T.
     uint32_t origin_block_;
+    float scan_end_;                 // the history's end as rescan_history() replays it, k_no_scan otherwise
     float slot_blocks_;              // T in history blocks
     float grid_position_;
     int32_t grid_last_;              // grid index of the newest marker
@@ -432,6 +447,8 @@ private:
     bool tone_confirmed_;
     bool tone_steady_;
     bool afc_looked_;
+    bool tuned_;                     // ACQUIRE's joins were on at the last block (spec 3.7)
+    bool rescan_pending_;            // the history is searched again at the next ACQUIRE block
     bool noise_frozen_;
     bool watch_;
     bool searching_;
@@ -450,6 +467,7 @@ private:
     ColdJoin cold_;
     uint32_t state_blocks_;
     uint32_t tone_blocks_;
+    float lock_hz_;                  // the tone search's estimate at the last lock
     float watch_left_hz_;
     float ban_slot_blocks_;
     uint32_t ban_until_block_;

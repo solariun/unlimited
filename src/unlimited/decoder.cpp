@@ -59,6 +59,17 @@ const float k_afc_wait_ms = 1000.0f;  // a lock on data may start joining withou
 const float k_afc_min_offset_hz = 0.2f;
 const float k_afc_reset_rotation = 0.5f;  // radians over the slowest marker half window
 const float k_preamble_afc_limit = 0.25f;  // cycles per slot
+// The history is re-mixed to a new NCO frequency (spec 3.3) while the offset keeps the CIC-2 gain of the blocks mixed
+// at the old one within 5 % (0.45 dB): (pi df B / fs)^2 / 3 <= 0.05, df <= 0.125 fs / B (125 Hz for 8-sample blocks,
+// two search bins).
+const float k_remix_reach = 0.125f;
+// The tone lies within half a search bin of the leading bin's centre, give or take the search estimate's accuracy
+// (spec 3.6): a lock's estimate farther from the provisional tune than this is no better than the tune.
+const float k_leader_reach_hz = 30.0f;
+const float k_no_scan = -1.0f;  // scan_end_: no replay running
+// A replay of the history searches this many of its blocks per block heard (spec 3.15): a full history (2400 blocks at
+// cap 32) in under 40 blocks, each step a bounded cost.
+const uint8_t k_rescan_blocks = 64;
 
 // Watch (spec 3.7).
 const uint8_t k_onset_products = 3;       // steady search products before a train onset (80 ms)
@@ -159,9 +170,11 @@ const float k_reference_alpha = 0.25f;
 const float k_kappa_bridge = 0.5f;
 const uint8_t k_hidden_midpoints = 2;  // reversals between sync hits one T apart that reveal a train of T / 2
 // The tune tone ends where the train begins: two steady slots in a row within this many slots before the sync anchor
-// place the train's first marker, and package 0's START k_min_sync_markers - 1 slots after it or later.
-const int32_t k_tune_search_slots = 12;
+// place the train's first marker, and package 0's START k_min_sync_markers - 1 slots after it or later. The search
+// spans the longest train and the tune's slots (the window a train may follow a tune lock in, spec 3.7 step 8): a
+// history that holds them shows the tune, or that none leads to this train.
 const int32_t k_tune_bound_slots = 2;
+const int32_t k_tune_search_slots = k_max_sync_markers + k_tune_bound_slots;
 const float k_tune_bound_crest = 0.5f;  // of the train's crest
 
 const float k_lookahead_ratio = 2.0f;  // a flip in the data this much weaker than the candidate's STOP is noise
@@ -512,6 +525,7 @@ void Decoder::initialize() {
     afc_sum_.re = 0.0f;
     afc_sum_.im = 0.0f;
     afc_fill_ = 0;
+    afc_due_ = k_afc_min_inputs;
     noise_.reset(0.0f);
     track_noise_.reset(0.0f);
     candidates_.reset();
@@ -520,6 +534,7 @@ void Decoder::initialize() {
     reset_scales();
 
     origin_block_ = history_.end_block();
+    scan_end_ = k_no_scan;
     slot_blocks_ = k_blocks_per_min_slot;
     grid_position_ = 0.0f;
     grid_last_ = 0;
@@ -590,6 +605,9 @@ void Decoder::initialize() {
     tone_confirmed_ = false;
     tone_steady_ = false;
     afc_looked_ = false;
+    tuned_ = false;
+    rescan_pending_ = false;
+    lock_hz_ = 0.0f;
     noise_frozen_ = false;
     watch_ = false;
     searching_ = true;
@@ -725,7 +743,11 @@ void Decoder::on_block(int32_t re, int32_t im, uint32_t energy) {
     case DecoderState::search:
         break;
     case DecoderState::acquire:
-        if (!tone_confirmed_) run_afc(out_re, out_im);  // a confirmed tone is right; do not chase others
+        if (rescan_pending_ && tone_blocks_ <= 1u) {
+            settle_lock();  // the first block after a lock that kept the history
+        } else if (!tone_confirmed_) {
+            run_afc(out_re, out_im);  // a confirmed tone is right; do not chase others
+        }
         run_acquire();
         if (state_ == DecoderState::track) run_track();
         break;
@@ -768,14 +790,17 @@ void Decoder::rebase() {
 
 void Decoder::set_state(DecoderState state) {
     state_blocks_ = 0;
+    scan_end_ = k_no_scan;  // a replay belongs to the ACQUIRE that started it
     if (state == state_) return;
     state_ = state;
     emit(make_event(EventType::state));
 }
 
+// A search starts afresh: the history then holds only what it hears, on the NCO that follows its leading bin.
 void Decoder::enter_search(bool keep_statistics) {
     if (!keep_statistics) search_.reset();
     search_.clear_exclusion();
+    forget_history();
     watch_ = false;
     watch_left_hz_ = 0.0f;
     held_count_ = 0;
@@ -787,20 +812,87 @@ void Decoder::enter_search(bool keep_statistics) {
     set_state(DecoderState::search);
 }
 
+// The history heard before the lock was mixed at the provisional tune (spec 3.6): when the tone lies within the re-mix
+// reach, it is kept (settle_lock() tunes to the tone at the first ACQUIRE block) and searched again; otherwise it is
+// forgotten.
 void Decoder::lock_tone(float tone_hz) {
-    nco_.set_frequency(tone_hz);
-    forget_history();
+    const bool keep = history_.first_block() != history_.end_block() &&
+                      fabsf(tone_hz - nco_.frequency()) <= remix_reach_hz();
+    lock_hz_ = tone_hz;
+    if (!keep) {
+        nco_.set_frequency(tone_hz);
+        forget_history();
+    }
     tone_blocks_ = 0;
+    tuned_ = false;
     // The floor from before this tone appeared: at high SNR the tone's own sidelobes fill every search bin.
     noise_.reset(max_of(search_.onset_floor() / static_cast<float>(dsp::ToneSearch::k_block_samples),
                         k_min_noise_variance));
     tone_confirmed_ = false;
     afc_looked_ = false;
     noise_frozen_ = true;
-    // A train at the fastest accepted T has lines 1 / (2 T_min) away from the tone.
-    search_.exclude(tone_hz, k_ms_per_s / (2.0f * static_cast<float>(config_.min_slot_ms)));
+    exclude_held(tone_hz);
     watch_ = true;
     enter_acquire();
+    rescan_pending_ = keep;
+}
+
+// Moves the NCO to tone_hz and re-mixes the blocks already mixed (the history and the blanker's delay line) to it, as
+// if it had been there all along (spec 3.3): h_i sums samples around the first sample of block i, and its samples turn
+// by 2 pi df per sample from there to the first sample mixed at the new tone. mixed_samples: those of the block being
+// summed that the old tone mixed.
+void Decoder::retune(float tone_hz, uint8_t mixed_samples) {
+    const float before = nco_.frequency();
+    nco_.set_frequency(tone_hz);
+    const float per_sample = k_two_pi * (nco_.frequency() - before) / static_cast<float>(k_decoder_rate_hz);
+    const float per_block = per_sample * static_cast<float>(block_samples_);
+    const uint8_t latency = dsp::ImpulseBlanker::k_latency;
+    const float newest = per_sample * static_cast<float>(mixed_samples) + per_block;  // the delay line's newest
+    for (uint8_t i = 0; i < latency; ++i) {
+        const float angle = newest + per_block * static_cast<float>(latency - 1u - i);
+        const float c = cosf(angle);
+        const float s = sinf(angle);
+        const float re = static_cast<float>(blank_delay_re_[i]);
+        const float im = static_cast<float>(blank_delay_im_[i]);
+        blank_delay_re_[i] = round_to_int(re * c - im * s);
+        blank_delay_im_[i] = round_to_int(re * s + im * c);
+    }
+    history_.rotate(newest + per_block * static_cast<float>(latency), per_block);
+}
+
+// The first ACQUIRE block after a lock that kept the history, still mixed at the provisional tune (the leading bin's
+// centre, at most about half a bin from the tone): the fine AFC, fed from it, measures the tone against that tune,
+// within its +-30 Hz. On keyed data that is surer than the search's own estimate, which may be half a bin off and more.
+// Without a clear peak (keyed data spreads its squared power over the AFC's bins at first), a tune takes the search's
+// estimate (precise on a steady tone) when it lies within k_leader_reach_hz of the provisional tune, and keyed data
+// (or an estimate farther off) stays at the provisional tune, where the AFC's next looks reach it; a stream relock
+// takes its remembered pitch, which the AFC measured already (afc_looked_). The history is then re-mixed to the tone
+// and the AFC fed again from it.
+void Decoder::settle_lock() {
+    seed_afc();
+    const bool near = fabsf(lock_hz_ - nco_.frequency()) <= k_leader_reach_hz;
+    float tone = (tone_steady_ && near) || afc_looked_ ? lock_hz_ : nco_.frequency();
+    float offset = 0.0f;
+    const bool looked = !tone_confirmed_ && !afc_looked_ && afc_.inputs() >= k_afc_min_inputs &&
+                        afc_.offset(offset, true);
+    if (looked) tone = nco_.frequency() + offset;
+    retune(tone, 0);
+    exclude_held(nco_.frequency());
+    seed_afc();
+    if (!looked) return;
+    afc_looked_ = true;
+    const uint16_t period = static_cast<uint16_t>(ms_to_blocks(k_afc_eval_ms) / static_cast<float>(afc_decimation_));
+    afc_due_ = static_cast<uint16_t>(afc_.inputs() + period);
+}
+
+// The search's exclusion around the held tone, which the watch's echo test also reads (its phase advance): a train at
+// the fastest accepted T has lines 1 / (2 T_min) away from the tone.
+void Decoder::exclude_held(float tone_hz) {
+    search_.exclude(tone_hz, k_ms_per_s / (2.0f * static_cast<float>(config_.min_slot_ms)));
+}
+
+float Decoder::remix_reach_hz() const {
+    return k_remix_reach * static_cast<float>(k_decoder_rate_hz) / static_cast<float>(block_samples_);
 }
 
 void Decoder::enter_acquire() {
@@ -808,6 +900,7 @@ void Decoder::enter_acquire() {
     afc_sum_.re = 0.0f;
     afc_sum_.im = 0.0f;
     afc_fill_ = 0;
+    afc_due_ = k_afc_min_inputs;
     reset_scales();
     held_count_ = 0;
     bits_per_package_ = 0;
@@ -957,6 +1050,7 @@ void Decoder::finish(uint32_t last_package) {
 void Decoder::run_search() {
     float tone = 0.0f;
     if (state_ == DecoderState::search) {
+        follow_leader();
         if (!search_.candidate(tone)) return;
         tone_steady_ = search_.steady();
         // An unsteady tone near the pitch of the station heard in the last minute is its stream (spec 3.12).
@@ -980,6 +1074,9 @@ void Decoder::run_search() {
         const uint8_t products = preamble ? k_onset_products_preamble
                                           : (tone_steady_ ? k_onset_products_tune : k_onset_products);
         if (!search_.train_onset(tone, products)) return;
+        // Keyed data ACQUIRE holds has spectral lines k / T from its tone (250 Hz at 8 ms) that turn over with its
+        // carrier at each of its markers: a line that breaks just as the held tone reverses is that data, not a train.
+        if (!preamble && search_.onset_echo()) return;
         // The tone the watch left for this train is not a new transmission: a beep of this one breaks its phase.
         if (preamble && fabsf(tone - watch_left_hz_) <= k_memory_search_margin_hz) return;
         if ((preamble && train_line(tone)) || harmonic_image(tone)) return;
@@ -987,6 +1084,20 @@ void Decoder::run_search() {
         tone_steady_ = true;  // measured on the tune tone before the train began
     }
     lock_tone(tone);
+}
+
+// SEARCH: the NCO follows the bin a fast lock would take (spec 3.6), so that the history holds the signal from the
+// first search block on, mixed at most half a bin from its tone. A move within the re-mix reach (a neighbour bin)
+// re-mixes the history; a farther one (another signal) forgets it.
+void Decoder::follow_leader() {
+    float tone = 0.0f;
+    if (!search_.leading(tone) || tone == nco_.frequency()) return;
+    if (history_.first_block() != history_.end_block() && fabsf(tone - nco_.frequency()) <= remix_reach_hz()) {
+        retune(tone, static_cast<uint8_t>(block_fill_ + 1u));  // the current sample was mixed at the old tune
+        return;
+    }
+    nco_.set_frequency(tone);
+    forget_history();
 }
 
 bool Decoder::watching() const {
@@ -1019,7 +1130,21 @@ void Decoder::run_acquire() {
     // A lock on data (no tune: a mid-stream start) can be tens of Hz off until the fine AFC has had one look; a
     // continuous beep then rotates across a half window and reads as a flip. Weak signals wait a bounded time.
     const uint32_t wait_blocks = static_cast<uint32_t>(ms_to_blocks(k_afc_wait_ms));
-    const bool tuned = tone_steady_ || tone_confirmed_ || afc_looked_ || state_blocks_ >= wait_blocks;
+    const bool measured = tone_steady_ || tone_confirmed_ || afc_looked_;
+    const bool tuned = measured || state_blocks_ >= wait_blocks;
+    // A lock measured just now (the fine AFC's first look): the history is searched again with the joins on.
+    if (measured && !tuned_) rescan_pending_ = true;
+    tuned_ = tuned;
+    if (rescan_pending_) {
+        rescan_pending_ = false;
+        candidates_.reset();
+        reset_scales();
+        cold_.pending = false;
+        scan_end_ = static_cast<float>(static_cast<int32_t>(history_.first_block() - origin_block_));
+    }
+    // A replay still behind the newest block: the blocks heard wait for it.
+    if (scan_end_ > k_no_scan && !rescan_history(tuned)) return;
+    if (state_ != DecoderState::acquire) return;
     if (cold_.pending) {
         cold_join_step();
         if (state_ != DecoderState::acquire) return;
@@ -1064,14 +1189,24 @@ void Decoder::run_afc(int32_t re, int32_t im) {
     afc_sum_.re = 0.0f;
     afc_sum_.im = 0.0f;
     afc_fill_ = 0;
-    // First look after k_afc_min_inputs inputs, then every k_afc_eval_ms.
+    if (afc_.inputs() >= afc_due_) afc_look();
+}
+
+// A look once k_afc_min_inputs inputs are in, then every k_afc_eval_ms; a first look that finds no clear peak is tried
+// again at every input until one does (spec 3.3 step 5).
+void Decoder::afc_look() {
     const uint16_t inputs = afc_.inputs();
     const uint16_t period = static_cast<uint16_t>(ms_to_blocks(k_afc_eval_ms) / static_cast<float>(afc_decimation_));
-    if (inputs < k_afc_min_inputs || (inputs - k_afc_min_inputs) % period != 0) return;
+    afc_due_ = static_cast<uint16_t>(inputs + period);
     // A running stream on the remembered pitch: the AFC measured it already (spec 3.12).
     if (stream_relock()) return;
+    // The first look searches wide (+-30 Hz) whatever the lock: data can pass for a steady tone in the tone search,
+    // and its reading be half a bin (25 Hz) off.
     float offset = 0.0f;
-    if (!afc_.offset(offset, !tone_steady_)) return;
+    if (!afc_.offset(offset, !tone_steady_ || !afc_looked_)) {
+        if (!afc_looked_) afc_due_ = static_cast<uint16_t>(inputs + 1u);
+        return;
+    }
     // The train that started PREAMBLE held its flips over half windows of 0.35 T: the tone is within a fraction of
     // 1 / T. A larger correction there is a noise peak that would walk the lock off the tone.
     if (state_ == DecoderState::preamble && fabsf(offset) * blocks_to_ms(slot_blocks_) / k_ms_per_s > k_preamble_afc_limit) {
@@ -1080,18 +1215,68 @@ void Decoder::run_afc(int32_t re, int32_t im) {
     const bool first_look = !afc_looked_;
     afc_looked_ = true;
     if (fabsf(offset) < k_afc_min_offset_hz) return;
+    if (state_ == DecoderState::acquire) {
+        // ACQUIRE re-mixes the history to the corrected tone and feeds the AFC from it again. A large first correction
+        // (a lock on data can start 25 Hz off) turned the windows across a marker half window, where a steady beep read
+        // as a flip: the candidates are searched again. Later looks follow a drift, a fraction of 1 / T at most on a
+        // signal; a tone that keeps moving (a drifting carrier) is not searched again at every look.
+        const float slowest_s = static_cast<float>(config_.max_slot_ms()) / k_ms_per_s;
+        const float rotation = k_two_pi * fabsf(offset) * k_marker_half * slowest_s;
+        retune(nco_.frequency() + offset, 0);
+        exclude_held(nco_.frequency());
+        seed_afc();
+        if (first_look && rotation > k_afc_reset_rotation) rescan_pending_ = true;
+        return;
+    }
     nco_.adjust_frequency(offset);
     afc_.reset();
-    // Windows mixed before a large first correction rotate across a marker half window and read as flips: a lock on
-    // data (no tune) can start 25 Hz off. In ACQUIRE they are measured again at the new tone.
-    const float slowest_s = static_cast<float>(config_.max_slot_ms()) / k_ms_per_s;
-    const float rotation = k_two_pi * fabsf(offset) * k_marker_half * slowest_s;
-    if (first_look && !tone_steady_ && state_ == DecoderState::acquire && rotation > k_afc_reset_rotation) {
-        forget_history();
+    afc_due_ = k_afc_min_inputs;
+}
+
+// The fine AFC fed from the history, as if it had run over it (the history kept from before the lock, or re-mixed):
+// its inputs are the sums of afc_decimation_ blocks, the newest group ending at the newest block.
+void Decoder::seed_afc() {
+    afc_.reset();
+    afc_sum_.re = 0.0f;
+    afc_sum_.im = 0.0f;
+    afc_fill_ = 0;
+    const uint32_t groups = (history_.end_block() - history_.first_block()) / afc_decimation_;
+    const float group = static_cast<float>(afc_decimation_);
+    const float scale = 1.0f / (static_cast<float>(block_samples_) * group);  // window() is divided by k_mixer_gain
+    float from = live_end() - static_cast<float>(groups) * group;
+    for (uint32_t g = 0; g < groups; ++g) {
+        Complex sum;
+        if (history_.window(origin_block_, from, from + group, sum)) {
+            Complex decimated;
+            decimated.re = sum.re * scale;
+            decimated.im = sum.im * scale;
+            afc_.push(decimated);
+        }
+        from += group;
     }
+    afc_due_ = afc_.inputs() > k_afc_min_inputs ? afc_.inputs() : k_afc_min_inputs;
+}
+
+// Replays ACQUIRE's candidate search over the history (spec 3.7), oldest block first, k_rescan_blocks per block heard:
+// the ring (emptied when the replay started) is filled again in time order, and each candidate may complete a relock or
+// a cold join as it would have when it arrived. A sync train is taken on the blocks heard (its earlier markers are in
+// the ring by then). True once the replay has caught up (the newest block is left to run_acquire()) or joined.
+bool Decoder::rescan_history(bool tuned) {
+    const float last = live_end();
+    for (uint8_t step = 0; step < k_rescan_blocks; ++step) {
+        scan_end_ += 1.0f;
+        if (scan_end_ >= last) break;
+        if (cold_.pending) cold_join_step();
+        if (state_ == DecoderState::acquire) run_candidates(tuned);
+        if (state_ != DecoderState::acquire) return true;
+    }
+    if (scan_end_ < last) return false;
+    scan_end_ = k_no_scan;
+    return true;
 }
 
 void Decoder::forget_history() {
+    scan_end_ = k_no_scan;
     history_.reset();
     origin_block_ = history_.end_block();
     settle_blocks_ = k_settle_blocks;
@@ -1104,7 +1289,7 @@ void Decoder::forget_history() {
 // the estimate are noise); a lock from the search keeps the floor from before its tone (spec 3.3).
 void Decoder::push_block_noise() {
     if (noise_frozen_ && !stream_relock()) return;
-    const float end = end_position();
+    const float end = live_end();
     const float from = end - static_cast<float>(k_noise_blocks);
     Complex sum;
     if (!history_.window(origin_block_, from, end, sum) || history_.any_blanked(origin_block_, from, end)) return;
@@ -1140,12 +1325,18 @@ void Decoder::run_candidates(bool tuned) {
         candidate.fraction = position - whole;
         candidate.q = newer;
         candidate.scale = s;
+        candidate.finest_scale = s;
+        candidate.finest_offset = 0;
         if (!candidates_.add(candidate)) continue;
         // A train on the station's pitch ends its stream: the next transmission (its END may have been missed) or data
         // beeps twisted into one. The station memory's package count must not carry past it.
         if (memory_usable() && train_behind(candidate, memory_.slot_blocks)) memory_.ended = true;
         if (!tuned) continue;
-        if (try_sync(candidate) || try_late_join(candidate) || try_cold_join(candidate)) return;
+        // A replay looks for joins only (rescan_history()). The cold join reads the entry as stored: its finest
+        // position (an echo does not move it).
+        const bool replay = scan_end_ > k_no_scan;
+        if (!replay && try_sync(candidate)) return;
+        if (try_late_join(candidate) || try_cold_join(candidates_.newest(0))) return;
     }
 }
 
@@ -1530,7 +1721,7 @@ bool Decoder::try_late_join(const Candidate& candidate) {
     // TRACK starts at the oldest marker of the chain the history still holds: the guard's packages are there already.
     float start = position;
     uint8_t back = 0;
-    chain_start(position, slots * best, best, k_late_join_intervals, start, back);
+    chain_start(position, slots * best, best, k_position_search * best, k_late_join_intervals, start, back);
     if (back > index) back = static_cast<uint8_t>(index);
     slot_blocks_ = best;
     enter_track(measure_marker(start, best), index - back, memory_.bits_per_package, true);
@@ -1539,16 +1730,12 @@ bool Decoder::try_late_join(const Candidate& candidate) {
 }
 
 // The oldest of the chain's markers newest - j period (j <= intervals) whose package the history still holds whole;
-// each is taken at its candidate when one is near, else where predicted.
-bool Decoder::chain_start(float newest, float period, float slot_blocks, uint8_t intervals, float& start,
+// each is taken at the candidate nearest its prediction within `reach`, else where predicted.
+bool Decoder::chain_start(float newest, float period, float slot_blocks, float reach, uint8_t intervals, float& start,
                           uint8_t& back) const {
     const float half = k_marker_half * slot_blocks;
     for (uint8_t j = intervals; j > 0; --j) {
-        float position = newest - static_cast<float>(j) * period;
-        for (uint8_t age = 0; age < candidates_.count(); ++age) {
-            const float at = candidate_position(candidates_.newest(age));
-            if (fabsf(at - position) <= k_position_search * slot_blocks) position = at;
-        }
+        const float position = nearest_candidate(newest - static_cast<float>(j) * period, reach);
         Complex sum;
         if (history_.window(origin_block_, position - half - 1.0f, position, sum)) {
             start = position;
@@ -1578,6 +1765,16 @@ bool Decoder::has_candidate_near(float position, float tolerance, float q_min) c
     return candidate_q_near(position, tolerance) >= q_min;
 }
 
+// The strongest candidate whose marker (markers[age], its marker_position()) lies within `tolerance` of `position`,
+// 0 = none (the cold join's chain).
+float Decoder::marker_q_near(const float* markers, float position, float tolerance) const {
+    float best = 0.0f;
+    for (uint8_t age = 0; age < candidates_.count(); ++age) {
+        if (fabsf(markers[age] - position) <= tolerance) best = max_of(best, candidates_.newest(age).q);
+    }
+    return best;
+}
+
 // The strongest candidate within `tolerance` of `position`, 0 = none.
 float Decoder::candidate_q_near(float position, float tolerance) const {
     float best = 0.0f;
@@ -1592,26 +1789,31 @@ float Decoder::candidate_q_near(float position, float tolerance) const {
 // longer than any train of the window are a package chain; its slot grid is found by folding the pitch's energy.
 bool Decoder::try_cold_join(const Candidate& candidate) {
     if (cold_.pending || memory_usable() || candidate.q < k_late_join_q) return false;
-    const float centre = candidate_position(candidate);
+    // Each entry's marker, looked up once (marker_position() searches the ring).
+    float markers[dsp::CandidateList::k_size];
+    for (uint8_t age = 0; age < candidates_.count(); ++age) markers[age] = marker_position(candidates_.newest(age));
+    const float centre = marker_position(candidate);
     for (uint8_t age = 1; age < candidates_.count(); ++age) {
-        const float period = centre - candidate_position(candidates_.newest(age));
+        const float period = centre - markers[age];
         if (period <= 0.0f || in_range(period)) continue;
         const float tolerance = k_cold_join_tolerance * period;
         float weakest = min_of(candidate.q, candidates_.newest(age).q);
         for (uint8_t j = 2; j <= k_cold_join_intervals && weakest >= k_late_join_q; ++j) {
-            weakest = min_of(weakest, candidate_q_near(centre - static_cast<float>(j) * period, tolerance));
+            weakest = min_of(weakest, marker_q_near(markers, centre - static_cast<float>(j) * period, tolerance));
         }
         if (weakest < k_late_join_q) continue;
         // No tune or train inside it: data slots never flip, so only noise, far weaker than the chain's markers, may
-        // add a candidate between them.
+        // add a candidate between them. A detection at a scale wider than the marker is its echo: it lies up to
+        // k_candidate_echo_share of that scale's half window from it.
         uint8_t stray = 0;
         for (uint8_t a = 0; a < candidates_.count(); ++a) {
-            if (candidates_.newest(a).q < k_cold_stray_ratio * weakest) continue;
-            const float at = candidate_position(candidates_.newest(a));
-            const float offset = centre - at;
+            const Candidate& other = candidates_.newest(a);
+            if (other.q < k_cold_stray_ratio * weakest) continue;
+            const float offset = centre - markers[a];
             if (offset <= tolerance || offset >= static_cast<float>(k_cold_join_intervals) * period + tolerance) continue;
             const float whole = floorf(offset / period + k_slot_centre);
-            if (fabsf(offset - whole * period) > tolerance) ++stray;
+            const float echo = k_candidate_echo_share * static_cast<float>(k_candidate_scale_blocks[other.scale]);
+            if (fabsf(offset - whole * period) > max_of(tolerance, echo)) ++stray;
         }
         if (stray > k_cold_stray_candidates) continue;
         cold_.period = period;
@@ -1621,8 +1823,8 @@ bool Decoder::try_cold_join(const Candidate& candidate) {
         // Fold from the oldest chain marker whose package the history holds.
         float start = centre;
         uint8_t back = 0;
-        chain_start(centre, period, period / static_cast<float>(k_cold_join_step_bits + 1u), k_cold_join_intervals,
-                    start, back);
+        chain_start(centre, period, period / static_cast<float>(k_cold_join_step_bits + 1u), k_marker_search * period,
+                    k_cold_join_intervals, start, back);
         if (back == 0) continue;
         memset(cold_.edge, 0, sizeof(cold_.edge));
         memset(cold_.centre, 0, sizeof(cold_.centre));
@@ -1658,15 +1860,18 @@ void Decoder::cold_join_step() {
         }
         if (passing == 1) {
             const uint8_t bits = cold_bits(chosen);
-            const float slot = period / static_cast<float>(bits + 1u);
+            const float slot = chain_slot(bits);
             cold_.pending = false;
-            // TRACK from the oldest folded package the history still holds whole.
-            float start = cold_.anchor;
+            // TRACK from the oldest folded package the history still holds whole, at its marker as a flip search at
+            // the chosen T finds it.
+            float start = chain_marker(0);
             for (uint8_t k = 0; k < cold_.folded; ++k) {
+                start = chain_marker(k);
                 Complex sum;
                 if (history_.window(origin_block_, start - k_marker_half * slot - 1.0f, start, sum)) break;
-                start += period;
             }
+            const FlipMeasure found = search_flip(start, k_position_search * slot, k_marker_half * slot, k_kappa_track);
+            if (is_flip(found, k_kappa_track)) start = found.position;
             slot_blocks_ = slot;
             enter_track(measure_marker(start, slot), 0, bits, true);
             return;
@@ -1675,16 +1880,52 @@ void Decoder::cold_join_step() {
     }
 }
 
+// T of the joined chain with `bits` bits per package: its folded markers but the newest, measured by a flip search at
+// that T (spec 3.4) where the history holds them, the span between the oldest and the newest of them over the packages
+// between. The chain's period came from its newest candidate, the one that completed it: it may be an early detection
+// just before its marker, up to the chain's 3 % off.
+float Decoder::chain_slot(uint8_t bits) const {
+    const float slots = static_cast<float>(bits + 1u);
+    const float guess = cold_.period / slots;
+    float first = 0.0f;
+    float last = 0.0f;
+    int16_t first_package = -1;
+    int16_t last_package = -1;
+    for (uint8_t k = 0; k < cold_.folded; ++k) {
+        const float at = chain_marker(k);
+        const FlipMeasure m = search_flip(at, k_position_search * guess, k_marker_half * guess, k_kappa_track);
+        if (!m.valid) continue;
+        const float position = is_flip(m, k_kappa_track) ? m.position : at;
+        if (first_package < 0) {
+            first = position;
+            first_package = k;
+        }
+        last = position;
+        last_package = k;
+    }
+    if (last_package <= first_package) return guess;
+    return (last - first) / (static_cast<float>(last_package - first_package) * slots);
+}
+
 // The chain's marker that starts folded package `package`: taken at a candidate within k_marker_search of the period
 // when one is near, else where the period puts it.
 float Decoder::chain_marker(uint8_t package) const {
     const float period = cold_.period;
-    float position = cold_.anchor + static_cast<float>(package) * period;
+    return nearest_candidate(cold_.anchor + static_cast<float>(package) * period, k_marker_search * period);
+}
+
+// The marker (a candidate's finest position) nearest `position` within `reach`, else `position` itself.
+float Decoder::nearest_candidate(float position, float reach) const {
+    float best = position;
+    float best_distance = reach;
     for (uint8_t age = 0; age < candidates_.count(); ++age) {
-        const float at = candidate_position(candidates_.newest(age));
-        if (fabsf(at - position) <= k_marker_search * period) position = at;
+        const float at = marker_position(candidates_.newest(age));
+        const float distance = fabsf(at - position);
+        if (distance > best_distance) continue;
+        best = at;
+        best_distance = distance;
     }
-    return position;
+    return best;
 }
 
 // The slot-edge energy over the slot-centre energy of the chain's folded packages the history still holds, on the grid
@@ -3424,12 +3665,42 @@ float Decoder::marker_noise(float sigma2, float slot_blocks) const {
     return k_noise_amplitude * sigma2 * 2.0f * dsp::noise_samples(half, block_samples_) / (gain * gain);
 }
 
+// The history's end as the candidate search and the joins see it: a replay's position, else the newest block's.
 float Decoder::end_position() const {
+    if (scan_end_ > k_no_scan) return scan_end_;
+    return live_end();
+}
+
+float Decoder::live_end() const {
     return static_cast<float>(history_.end_block() - origin_block_);
 }
 
 float Decoder::candidate_position(const Candidate& candidate) const {
     return static_cast<float>(static_cast<int32_t>(candidate.block - origin_block_)) + candidate.fraction;
+}
+
+// The marker a candidate belongs to, at its finest detection: an entry within the echo reach of the candidate's finest
+// scale (k_candidate_echo_share of its half window) that was detected at a finer scale is the same marker, and the
+// finest of those gives the position (the ring keeps the echoes of wide scales as entries of their own).
+float Decoder::marker_position(const Candidate& candidate) const {
+    const float own = candidate_position(candidate) + dsp::CandidateList::finest(candidate);
+    const float reach = k_candidate_echo_share * static_cast<float>(k_candidate_scale_blocks[candidate.finest_scale]);
+    float best = own;
+    uint8_t best_scale = candidate.finest_scale;
+    float best_distance = reach;
+    for (uint8_t age = 0; age < candidates_.count(); ++age) {
+        const Candidate& other = candidates_.newest(age);
+        const float at = candidate_position(other) + dsp::CandidateList::finest(other);
+        const float distance = fabsf(at - own);
+        if (distance > reach || other.finest_scale > best_scale ||
+            (other.finest_scale == best_scale && distance >= best_distance)) {
+            continue;
+        }
+        best = at;
+        best_scale = other.finest_scale;
+        best_distance = distance;
+    }
+    return best;
 }
 
 float Decoder::blocks_to_ms(float blocks) const {

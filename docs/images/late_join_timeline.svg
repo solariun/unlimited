@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="820" height="560" viewBox="0 0 820 560" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img">
+<title>Unlimited late join: v0.3.0 and now</title>
+<desc>A cold late join at T 8 ms, N 8, 20 dB: the release threw away the audio heard before its tone lock and locked after 8.2 packages; the current decoder keeps it and locks after 5.2; and the lock times of the 20 starts of the long suite's row, before and after.</desc>
+<rect x="0.5" y="0.5" width="819" height="559" rx="12" fill="#FFFFFF" stroke="#D3D1C7"/>
+<text x="24" y="32" font-size="16" fill="#2C2C2A" font-weight="bold">Joining a transmission already running: v0.3.0 and now</text>
+<text x="24" y="52" font-size="12" fill="#5F5E5A">A receiver switched on inside a 200-byte transmission: T 8 ms, N 8 (72 ms packages), USB, 20 dB; the long suite's L20 starts.</text>
+<text x="24" y="68" font-size="12" fill="#5F5E5A">Time in packages since the receiver was switched on. v0.3.0: the release (spec 4.4); now: measured by make docs.</text>
+<text x="24" y="104" font-size="12" fill="#2C2C2A" font-weight="bold">One start (the 20th of 20): what each receiver kept, and when it locked</text>
+<text x="24" y="140" font-size="12" fill="#2C2C2A" font-weight="bold">the signal</text>
+<rect x="150" y="128" width="57.41" height="16" fill="#F1EFE8" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="207.41" y="128" width="71.11" height="16" fill="#FFFFFF" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="278.52" y="128" width="71.11" height="16" fill="#F1EFE8" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="349.63" y="128" width="71.11" height="16" fill="#FFFFFF" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="420.74" y="128" width="71.11" height="16" fill="#F1EFE8" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="491.85" y="128" width="71.11" height="16" fill="#FFFFFF" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="562.96" y="128" width="71.11" height="16" fill="#F1EFE8" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="634.07" y="128" width="71.11" height="16" fill="#FFFFFF" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="705.19" y="128" width="71.11" height="16" fill="#F1EFE8" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="776.3" y="128" width="13.7" height="16" fill="#FFFFFF" stroke="#D8D6CC" stroke-width="0.5"/>
+<line x1="207.41" y1="125" x2="207.41" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<line x1="278.52" y1="125" x2="278.52" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<line x1="349.63" y1="125" x2="349.63" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<line x1="420.74" y1="125" x2="420.74" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<line x1="491.85" y1="125" x2="491.85" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<line x1="562.96" y1="125" x2="562.96" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<line x1="634.07" y1="125" x2="634.07" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<line x1="705.19" y1="125" x2="705.19" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<line x1="776.3" y1="125" x2="776.3" y2="147" stroke="#7F77DD" stroke-width="2"/>
+<text x="24" y="180" font-size="12" fill="#2C2C2A" font-weight="bold">v0.3.0</text>
+<text x="24" y="193" font-size="10" fill="#5F5E5A">history from its tone lock</text>
+<rect x="150" y="170" width="197.55" height="12" fill="#F1EFE8" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="347.55" y="170" width="442.45" height="12" fill="#9FDDC6" stroke="#1D9E75" stroke-width="0.5"/>
+<line x1="420.72" y1="144" x2="420.72" y2="170" stroke="#7F77DD" stroke-width="0.8" stroke-dasharray="2 2"/>
+<polygon fill="#7F77DD" points="416.72,162 424.72,162 420.72,170"/>
+<polygon fill="#378ADD" points="347.55,170 353.55,176 347.55,182 341.55,176"/>
+<circle cx="736.67" cy="176" r="6" fill="#2C2C2A"/>
+<text x="727.67" y="180" font-size="11" fill="#2C2C2A" text-anchor="end" font-weight="bold">locked after 8.2</text>
+<text x="24" y="218" font-size="12" fill="#2C2C2A" font-weight="bold">now</text>
+<text x="24" y="231" font-size="10" fill="#5F5E5A">history from 20 ms on</text>
+<rect x="150" y="208" width="19.75" height="12" fill="#F1EFE8" stroke="#D8D6CC" stroke-width="0.5"/>
+<rect x="169.75" y="208" width="620.25" height="12" fill="#9FDDC6" stroke="#1D9E75" stroke-width="0.5"/>
+<line x1="207.41" y1="144" x2="207.41" y2="208" stroke="#7F77DD" stroke-width="0.8" stroke-dasharray="2 2"/>
+<polygon fill="#7F77DD" points="203.41,200 211.41,200 207.41,208"/>
+<polygon fill="#378ADD" points="347.53,208 353.53,214 347.53,220 341.53,214"/>
+<circle cx="523.33" cy="214" r="6" fill="#2C2C2A"/>
+<text x="532.33" y="218" font-size="11" fill="#2C2C2A" font-weight="bold">locked after 5.2</text>
+<line x1="576.67" y1="112" x2="576.67" y2="242" stroke="#D85A30" stroke-width="1" stroke-dasharray="5 3"/>
+<text x="576.67" y="108" font-size="10" fill="#D85A30" text-anchor="middle">6-package target</text>
+<line x1="150" y1="242" x2="790" y2="242" stroke="#888780" stroke-width="1"/>
+<line x1="150" y1="242" x2="150" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="150" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">0</text>
+<line x1="221.11" y1="242" x2="221.11" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="221.11" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">1</text>
+<line x1="292.22" y1="242" x2="292.22" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="292.22" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">2</text>
+<line x1="363.33" y1="242" x2="363.33" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="363.33" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">3</text>
+<line x1="434.44" y1="242" x2="434.44" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="434.44" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">4</text>
+<line x1="505.56" y1="242" x2="505.56" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="505.56" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">5</text>
+<line x1="576.67" y1="242" x2="576.67" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="576.67" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">6</text>
+<line x1="647.78" y1="242" x2="647.78" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="647.78" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">7</text>
+<line x1="718.89" y1="242" x2="718.89" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="718.89" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">8</text>
+<line x1="790" y1="242" x2="790" y2="246" stroke="#888780" stroke-width="1"/>
+<text x="790" y="256" font-size="11" fill="#5F5E5A" text-anchor="middle">9</text>
+<text x="470" y="272" font-size="10" fill="#5F5E5A" text-anchor="middle">packages since the switch-on</text>
+<text x="24" y="310" font-size="12" fill="#2C2C2A" font-weight="bold">All 20 starts: when the lock came</text>
+<circle cx="448.48" cy="337" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="566.84" cy="342" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="405.9" cy="347" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="722.63" cy="337" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="644.52" cy="342" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="409.64" cy="347" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="766.42" cy="337" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="602.41" cy="342" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="722.63" cy="347" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="433.05" cy="337" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="722.63" cy="342" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="645.43" cy="347" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="468.11" cy="337" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="766.42" cy="342" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="404.05" cy="347" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="400.31" cy="337" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="463.47" cy="342" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="409.17" cy="347" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="457.84" cy="337" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="427.89" cy="342" r="4" fill="#888780" stroke="#FFFFFF" stroke-width="0.5"/>
+<text x="24" y="346" font-size="12" fill="#2C2C2A" font-weight="bold">v0.3.0</text>
+<text x="24" y="359" font-size="10" fill="#5F5E5A">0 of 20 within 6, median 9.4</text>
+<circle cx="313.74" cy="371" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="331.05" cy="376" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="338.54" cy="381" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="310.94" cy="371" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="341.35" cy="376" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="342.28" cy="381" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="312.34" cy="371" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="332.92" cy="376" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="330.58" cy="381" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="332.46" cy="371" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="312.81" cy="376" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="342.28" cy="381" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="333.39" cy="371" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="311.87" cy="376" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="336.67" cy="381" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="332.92" cy="371" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="328.71" cy="376" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="341.81" cy="381" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="323.1" cy="371" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<circle cx="326.84" cy="376" r="4" fill="#1D9E75" stroke="#FFFFFF" stroke-width="0.5"/>
+<text x="24" y="380" font-size="12" fill="#2C2C2A" font-weight="bold">now</text>
+<text x="24" y="393" font-size="10" fill="#5F5E5A">20 of 20 within 6, median 5.4</text>
+<line x1="352.11" y1="326" x2="352.11" y2="404" stroke="#D85A30" stroke-width="1" stroke-dasharray="5 3"/>
+<line x1="150" y1="404" x2="688.95" y2="404" stroke="#888780" stroke-width="1"/>
+<line x1="150" y1="404" x2="150" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="150" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">0</text>
+<line x1="217.37" y1="404" x2="217.37" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="217.37" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">2</text>
+<line x1="284.74" y1="404" x2="284.74" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="284.74" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">4</text>
+<line x1="352.11" y1="404" x2="352.11" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="352.11" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">6</text>
+<line x1="419.47" y1="404" x2="419.47" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="419.47" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">8</text>
+<line x1="486.84" y1="404" x2="486.84" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="486.84" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">10</text>
+<line x1="554.21" y1="404" x2="554.21" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="554.21" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">12</text>
+<line x1="621.58" y1="404" x2="621.58" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="621.58" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">14</text>
+<line x1="688.95" y1="404" x2="688.95" y2="408" stroke="#888780" stroke-width="1"/>
+<text x="688.95" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">16</text>
+<text x="722.63" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">later</text>
+<text x="766.42" y="418" font-size="11" fill="#5F5E5A" text-anchor="middle">never</text>
+<text x="419.47" y="434" font-size="10" fill="#5F5E5A" text-anchor="middle">packages from the switch-on to the lock</text>
+<line x1="32" y1="458" x2="32" y2="470" stroke="#7F77DD" stroke-width="2"/>
+<text x="42" y="468" font-size="11" fill="#2C2C2A">START</text>
+<polygon fill="#378ADD" points="102.6,458 108.6,464 102.6,470 96.6,464"/>
+<text x="112.6" y="468" font-size="11" fill="#2C2C2A">tone lock</text>
+<polygon fill="#7F77DD" points="192.08,460 200.08,460 196.08,468"/>
+<text x="206.08" y="468" font-size="11" fill="#2C2C2A">first package decoded</text>
+<circle cx="358.2" cy="464" r="6" fill="#2C2C2A"/>
+<text x="368.2" y="468" font-size="11" fill="#2C2C2A">locked (late join)</text>
+<rect x="495.16" y="458" width="12" height="12" fill="#F1EFE8" stroke="#D8D6CC" stroke-width="0.5" rx="2"/>
+<text x="513.16" y="468" font-size="11" fill="#2C2C2A">heard, thrown away</text>
+<rect x="640.12" y="458" width="12" height="12" fill="#9FDDC6" stroke="#1D9E75" stroke-width="0.5" rx="2"/>
+<text x="658.12" y="468" font-size="11" fill="#2C2C2A">heard, kept</text>
+<text x="24" y="512" font-size="11" fill="#5F5E5A">v0.3.0 threw away all it had heard at its tone lock (and again at the fine AFC's first large correction): the join waited for three intervals heard after it.</text>
+<text x="24" y="528" font-size="11" fill="#5F5E5A">Now the history is kept from the first 20 ms tone-search block on, mixed at the pitch the search leads with and re-mixed to the tone it locks on (spec 3.3, 3.6),</text>
+<text x="24" y="544" font-size="11" fill="#5F5E5A">so the join starts from the first whole package heard; the lock follows 4.4 packages after that package's START (the guard's 4 packages and its END check).</text>
+</svg>

@@ -13,16 +13,19 @@ API is frozen for v0.3 (§5.4): the same day Gustavo confirmed the gate decision
 into BER ≤ 1e-4 gates (G5) and froze the API (§11.1 questions 13–15).**
 - v0.3 is Gustavo's original design (v0.1: one bit per tone), made configurable (bits per package, slot length,
   pitch, receiver speed window, passband) and faster by default.
-- **Implemented:** the core (`src/`), the demos, the TUI and the Arduino examples. `make test` passes 219 of 219
-  (187 core tests, 32 TUI and demo tests), and `make check_embedded`, `make arduino_check` and `make demo_run` pass.
+- **Implemented:** the core (`src/`), the demos, the TUI and the Arduino examples. `make test` passes 223 of 223
+  (191 core tests, 32 TUI and demo tests), and `make check_embedded`, `make arduino_check` and `make demo_run` pass.
   No public API signature changed against the design; three functions were added for the truthful shift tolerance
   (§0.7 A9) and two constants for the receiver's speed window (§0.7 A8, §5.2).
-- **Measured:** the long regression suite (`make test_long`, §8.3–§8.5, 8.5 minutes on 10 cores) on the final
-  decoder: 31 tests, 30 pass; 370 result rows: 260 PASS, 20 FAIL, 90 REPORT. The 20 FAILs are L20 (cold late joins
-  slower than 6 packages, an open defect, §11.2). No gate asks for literally 0 bit errors any more (§0.8 G5): the L19
-  row with one AWGN bit error in 24,000 bits at gate + 3 dB now passes. No byte was released at a wrong position in
-  any lock, no CRC-valid wrong packet was delivered, and noise, carriers, keyed CW and speech made no false lock
-  (§4.3). BER at the gates and the fading floors are v0.1b's.
+- **Measured:** the long regression suite (`make test_long`, §8.3–§8.5, 8.8 minutes on 10 cores) on the decoder with
+  the fast cold late join (2026-09-27, §0.7 I29–I34): 31 tests, 30 pass; 370 result rows: 276 PASS, 4 FAIL, 90 REPORT.
+  The 4 FAILs are L20's slowest corner: at T = 32 ms with N = 24 and 32 a receiver switched on in the middle of a
+  transmission locks within 6 packages in 80–90 % of the starts, where the gate asks 95 % (the history cannot hold
+  three intervals of such packages, §11.2 P2). Over all 480 L20 starts, 466 lock within 6 packages (97.1 %; the
+  release: 267, 55.6 %). No gate asks for literally 0 bit errors any more (§0.8 G5). No byte was released at a wrong
+  position in any lock, no CRC-valid wrong packet was delivered, and the gated noise, carrier, keyed-CW and speech runs
+  made no false lock (§4.3); the report runs beyond them show a rare false lock on speech and keyed CW, at the same
+  rate as the release (§11.2 P8). BER at the gates and the fading floors are v0.1b's.
 - The implementation found places where the design's rules contradicted each other or could not work as written,
   and the first long-suite run found integrity defects (bytes at wrong positions, false locks) that the integrity
   fix of 2026-09-27 removed. The rules in this file are the implemented ones; each change and its reason is in §0.7,
@@ -54,6 +57,9 @@ Development). Where this file and the code disagree, the disagreement is a defec
 | 2026-09-27 | **v0.3 release** (library version 0.3.0). The integrity fix of the decoder (§0.7 I20–I28: a sync must follow a tune; the train closes at its gap; a short END needs package 0; no rival package length for a cold join; the beep-shape guard; twisted packages are erasures; confirmation releases up to the newest STOP; the guard's inner-flip limit follows N) with 7 regression tests. The truthful shift tolerance (§0.7 A9, §1.5): `search_range(passband, min_slot_us)`, `passband_fit(tone_hz, slot_us, passband, search)` and `search_range(const EncoderConfig&)` added; `passband_fit(const EncoderConfig&)`, the bandwidth line of the demos, the TUI, `tx_uno` and `rx_esp32` limited to the receiver's pitch search; L19 shifts each side by its printed tolerance − 10 Hz. Gate decisions G1–G4 (§0.8: C11, A3, C8, L20). Stale comments fixed (`event_flag_late_join`, `dsp.hpp`). The long suite measured on the final decoder (§4, §8): 259 PASS / 21 FAIL / 90 REPORT of 370 rows; §5 listings regenerated from the headers; README refreshed. |
 | 2026-09-27 | **Gustavo's decisions** (§0.8, §11.1): G1–G3 kept and G4 confirmed (L20 stays gated, an open defect); **G5**: every long-suite gate that asked for 0 bit errors (L5, L19, C10 and C15 from CNR 8 dB) asks for BER ≤ 1e-4 with 0 extra and 0 shifted bytes, on the same bits; the receiver's speed-window limits exported (§0.7 A8: `k_min_window_slot_ms` = 4, `k_max_window_slot_ms` = 32 in `protocol.hpp`), used by `DecoderConfig::check()`, the demos' messages and `--help`, and the tests (the open problem "`min_slot_ms` range not public" removed from §11.2, the two after it renumbered P6 and P7). The long suite run again: 260 PASS / 20 FAIL (L20) / 90 REPORT of 370 rows (§4, §8). |
 | 2026-09-27 | **API freeze v0.3** (§5.4, Gustavo). The v0.3 public headers are frozen as listed in §5 (library version 0.3.0). Public API added since the first v0.3 headers (2026-09-26): `search_range(const Passband&, uint32_t min_slot_us)` and `passband_fit(uint16_t tone_hz, uint32_t slot_us, const Passband& passband, const Passband& search)` (`protocol.hpp`), `search_range(const EncoderConfig&)` (`encoder.hpp`), `k_min_window_slot_ms` and `k_max_window_slot_ms` (`protocol.hpp`); `passband_fit(const EncoderConfig&)` limits its margins to that search (§0.7 A9); `passband_fit(const Band&, const Passband&)` is the pure filter fit. §5 listings regenerated from the headers and checked line by line. |
+| 2026-09-27 | **Development standards** (§0.9, Gustavo): every change is done only with the spec first, its design explained in plain words with diagrams, proof that it works (tests failing before and passing after, measurements before and after, every target green) and every document updated (D1–D6); **D7**: every text is pedagogic, layered for newcomers first and experts after, with pictures (generated SVG or Mermaid) used extensively, in the documents and in every report to Gustavo. Next: the slow cold late joins (§11.2 P2), then `unlimited_modem` (§12). |
+| 2026-09-27 | **Fast cold late joins** (§11.2 P2; §0.7 I29–I34). The receiver keeps what it hears from its first tone-search block: in SEARCH the NCO follows the search's leading bin (the provisional tune) and the history is re-mixed when the tune moves within 125 Hz; the tone lock re-mixes the history to the tone instead of forgetting it; the fine AFC is fed from it, looks at once, and its corrections re-mix it; the candidate search is replayed over the history (64 blocks per block heard, joins only). The candidate ring keeps each marker's finest detection (a wide scale's echo no longer moves it nor counts as a stray); the cold join takes T from its chain and starts TRACK at the oldest held chain marker; the tone estimate on keyed data is centred; the watch ignores the held data's keying lines; the tune search spans 34 slots. 4 new tests (`make test` 223/223). L20: 466 of 480 starts within 6 packages (the release: 267); the long suite 276 PASS / 4 FAIL (L20 at T = 32 ms with N = 24 and 32, structural, §11.2 P2) / 90 REPORT, no other verdict changed. `sizeof(Decoder)` +36 B on xtensa. New figure `docs/images/late_join_timeline.svg`; the §5.3 listing regenerated. |
+| 2026-09-27 | **Testing guide** `docs/testing.md` (§0.9 D7): how to run every test and check of §8 and how to read what they print, for newcomers first and experts after, with 17 Mermaid diagrams and the generated figures `transmission_timeline.svg`, `channels.svg` and `ber_awgn.svg`. Every command in it was run on the development Mac (Apple M4, 10 cores) with its time measured; the full `make test_long` is quoted from the freeze run's log (§9.5) and its current totals from the late-join run. §8 points to it; `README.md` §11 gains "Running the tests" (and `make docs` takes about 70 s, not 2 minutes). |
 
 ### How to read this document
 
@@ -205,7 +211,8 @@ the rule, and the change is now the rule of §1–§8. None of them changes the 
 signature (the truthful shift tolerance, A9, added three functions; A8 two constants). Each row says what changed
 and why, in plain words; the exact rule is in the section named. Rows I20–I28 are the integrity fix of 2026-09-27:
 the first long-suite run found bytes released at wrong positions (535 in 11 locks at 5 points), a wrong-N cold join
-and false locks on CW and speech; after it, none.
+and false locks on CW and speech; after it, none. Rows I29–I34 are the fast cold late join of the same day (§11.2 P2):
+the receiver keeps and re-mixes what it heard before its tone lock, and reads the markers it heard more exactly.
 
 **Receiver (core).**
 
@@ -239,6 +246,12 @@ and false locks on CW and speech; after it, none.
 | I26 | **Twisted packages are erasures.** A package with more than N/2 data-slot centres flipping at full strength (audit evidence ≥ 8) is an erasure. | Data slots never flip: such a package is a train or a carrier's beat, not data; its bytes are missing rather than wrong. | §3.9 step 8 |
 | I27 | **Confirmation releases up to the newest STOP; the inner-flip limit follows N.** At confirmation only the held packages up to the newest detected STOP are released; later ones stay held like TRACK's flywheel packages and LOST discards them. The full guard's inner-flip limit becomes min(max(2, ⌈¼·packages·max(1, (2N + 1)/17)⌉), packages). | A lock confirmed after a faded END released a phantom package measured past the end. A package of 2N + 1 = 65 audit positions (N = 32) meets noise flips in proportion to its positions: 5 of 400 correct short messages were refused as aliases (A3). | §3.9 step 9, §3.11 |
 | I28 | **Cold join: no rival package length.** The chosen N is refused when another N′ whose slot lies in the window (and whose grid is not one of N's, N′ + 1 not dividing N + 1) reads the chain's slot edges less than half as loud relative to its centres. | A sender with N = 12 (no cold join allowed, V7) was joined as N = 8 at T′ = 13T/9 (L20: 14 wrong and 18 extra bytes, and 70 wrong). | §3.12 |
+| I29 | **The history is kept through the tone lock (2026-09-27).** In SEARCH the NCO follows the bin a fast lock would take (the *provisional tune*, §3.6), so the history holds the signal from the first 20 ms search block on, mixed at most half a bin from its tone. A move of the tune within the re-mix reach (0.125·fs/B: 125 Hz for the `ssb` profile's 8-sample blocks, where the CIC-2 gain of the blocks mixed at the old tune stays within 5 %) re-mixes the history in place (`PrefixHistory::rotate`: each block turned by 2π·Δf times its distance to the first sample mixed at the new tune, the prefix sums rebuilt); a farther move forgets it. The tone lock re-mixes the history to the tone instead of forgetting it, and the candidate search is replayed over it (§3.7). | The release forgot everything heard before its tone lock (at least 200 ms after the switch-on) and again at the fine AFC's first large correction: a cold join needed three intervals and two folded packages heard after that, 7 to 134 packages at T = 8 ms, N = 8 (L20). Rejected: keeping the raw audio instead (two bytes per sample: twice the history's memory at 8-sample blocks); re-mixing only at the lock, with the NCO wherever the last lock left it (a tone far from the NCO leaves the CIC-2 blocks nearly empty); a second history per candidate tone (memory). | §3.3, §3.6, §3.7 |
+| I30 | **The fine AFC is fed from the history, and its corrections re-mix it (2026-09-27).** At the first ACQUIRE block after a lock that kept the history, the AFC is seeded with the history's decimated groups and looks at once (wide, ±30 Hz: the provisional tune is at most half a bin off); the tone becomes the tune plus its measure (without a clear peak: the search's estimate when the lock was steady and the estimate lies within 30 Hz of the tune, else the tune). A correction in ACQUIRE re-mixes the history and seeds the AFC again (the release adjusted the NCO and reset the AFC); a first look without a clear peak is tried again at every input; a first correction that turned the slowest marker half window by more than 0.5 rad replays the candidate search. The replay runs oldest block first, 64 history blocks per block heard (`k_rescan_blocks`), and looks for joins only: a sync train is taken on the blocks heard, with its earlier markers already in the ring. | The release's first large correction forgot the history (and with it the tune: §11.2 P7), and the AFC started again from 16 new inputs. Rejected: a replay at every correction (a sweeping carrier replayed the history at every look: 45× real time instead of 3,000×); a replay in one call (a full history took up to 1 ms on the PC, 100 ms or more on an ESP32, and up to 17 ms with the sync search); `try_sync` in the replay (on speech one replay step took 5 ms). | §3.3, §3.7 |
+| I31 | **A lock on keyed data is tuned by the fine AFC, not by the search's estimate (2026-09-27).** The tone estimate for a signal with reversals and gaps takes the doubled-phase alias nearest the neighbours' balance (keyed data spreads a tone's power evenly into both neighbour bins; the power interpolation read it a third of a bin off), and the half-block estimate only within half a bin of it; the lock takes the estimate only within 30 Hz of the provisional tune (`k_leader_reach_hz`), and the fine AFC's first look measures the rest. | On keyed data between two search bins the release tuned up to a bin off, beyond the AFC's ±30 Hz: of 2640 data locks 5.5 % were 31 Hz off or more (now 1.3 %), and such a lock never joined; off the 50 Hz grid 18 % of the cold joins came within 6 packages (now 320 of 320). | §3.6 |
+| I32 | **The watch ignores the held data's keying lines (2026-09-27).** Keyed data held in ACQUIRE has spectral lines k/T from its tone (250 Hz at T = 8 ms) that stay steady within a package and turn over with its carrier at each marker. A train onset whose first break comes in the search block where the held tone reversed its carrier is such a line and is ignored; when the held tone's bin is weak in that block but its sidebands (±0.75/T, inside the exclusion) are loud — a marker's twist nulls its carrier — the decision waits for the held tone's next reading, at most 3 search blocks. | The release left the held data for a line of its own keying (and forgot its history), joining 4–14 packages late at T = 8 ms, N = 24 and 32. Rejected: 10 steady products before an onset (R8's tune has only 5 behind CW); waiting whenever the held tone is weak (a keyed CW held when a transmission starts delayed its train onset by 60–80 ms: 13 of 84 C9 preambles were missed). | §3.7 |
+| I33 | **Markers at their finest detection; the chain's T and TRACK start from its markers (2026-09-27).** A scale wider than a marker also holds the data beeps around it, so its peak lies up to 0.55 of its half window from the marker (an *echo*). Each ring entry keeps, besides its strongest detection, its finest one; the cold join reads a candidate at its finest position, snapped to the finest-scale entry within its echo reach; a candidate within the echo reach of a chain marker is its echo, not a stray; a chain marker is the candidate nearest its prediction (the release took the last one within reach). The joined chain's T comes from its folded markers but the newest (each measured by a flip search at the chosen T), and TRACK starts at the oldest held chain marker, refined by a flip search. | Echoes counted as strays or moved the chain's markers by several blocks: chains were refused, or T came out 2–3 % off and the guard refused the lock. Rejected: merging a detection into any entry of the ring (it broke R8: next to a carrier the preamble walk sits on a knife edge); a 24-entry ring (memory). | §3.7, §3.12 |
+| I34 | **The tune search spans the whole fallback window (2026-09-27).** The look back from a sync anchor for the tune (§3.8 step 1) covers `k_max_sync_markers` + `k_tune_bound_slots` = 34 slots (it was 12): a history that holds them places the train on its tune or shows that no tune leads to it, and the fallback of I20 (a tone locked on a tune at most 34 slots before the sync) applies only when the history does not reach back, as §3.7 step 8 says. | With the history kept, a false train read in package 0's data next to a +9 dB carrier (C8, one trial of 100) lay more than 12 slots after its tune and passed the fallback: 42 bytes shifted by one package. After it: 0. | §3.7 step 8, §3.8 step 1 |
 
 **Demos, TUI and examples.**
 
@@ -269,6 +282,23 @@ through this file first.
 | G3 | C8: a strong carrier close to the pitch | Acquisition gated with a +6 dB carrier from 250 Hz away and with a +12 dB carrier from 350 Hz away; a +12 dB carrier 250–300 Hz away (and +9 dB at 250 Hz) is reported. | *Measured*: +6 dB at ±250 Hz 95–98 %, +12 dB at ±350 Hz 96–99 %, but +12 dB at ±250 Hz 22–32 % and at ±300 Hz 80–83 %. No cheap and safe fix was found; it stays an open problem (§11.2). | Confirmed: kept |
 | G4 | L20: a cold late join within 6 packages | Unchanged: gated, and it fails. | The slow joins are a real defect, not a wrong gate. Its lead: duplicate detections of one marker fill the 16-entry candidate ring and push out the older chain markers (§11.2). | Confirmed: the gate stays, an open defect |
 | G5 | Every long-suite gate that asked for 0 bit errors: L5 (10 min with clock errors), L19 (filters and shifts), C10 and C15 (FM, from CNR 8 dB) | **BER ≤ 1e-4 with 0 extra and 0 shifted bytes**, on the same bits (at least 10⁴ per row). The rest of each gate is unchanged: L5 still asks for no slip, every byte and T within 0.2 %, L19 for loss ≤ 1 %, C10/C15 at CNR 14 dB for 0 bytes lost. | With random noise even a perfect receiver sometimes makes 1 error in 24,000 bits, so zero-error gates fail by chance about once per 100 rows: one L19 row did (1 bit error in 24,000; the same condition over 384,000 more bits: 0). A bit error is noise; an extra byte or a byte at a wrong place is a defect, so those stay at 0. | His decision |
+
+### 0.9 Development standards: the definition of done (Gustavo, 2026-09-27)
+
+**In plain words.** Every change to Unlimited — a fix, a feature, a redesign, a new tool — is finished only when
+anyone can see what changed, why, and the proof that it works. Gustavo set this standard on 2026-09-27 ("do not forget
+documentation with diagrams, design and all proof that it works, and please also add those kind of requirements as
+standards"). A change that lacks any item below is not done, whatever its code does.
+
+| # | Standard | What it asks for |
+|---|---|---|
+| D1 | **Spec first** | The change is written in this file before or together with the code: plain words first, exact rules after; each decision and its reason in §0 (with the alternatives rejected), a changelog row, and the affected sections (rules, constants, sizes, tests, measured results, open problems). Where code and spec disagree, the spec is settled first. |
+| D2 | **Design explained, with diagrams** | What changed and why, in accessible language first and complete after, with at least one picture: a Mermaid diagram, or an SVG generated from the real encoder and decoder by `make docs` (never drawn by hand from memory). A design choice that changes behaviour, a gate or the protocol is shown to Gustavo in plain words and pictures and confirmed **before** it is built. |
+| D3 | **Proof that it works** | Tests that fail before the change and pass after it; measured numbers **before and after** (the long suite, `make test_long`, for anything the receiver or the signal touches: no row may regress); every target green: `make test`, `make check_embedded`, `make arduino_check`, `make demo_run`, `make docs` (deterministic output). Limits, misses and open problems are stated in §11.2, never hidden; a gate changes only by Gustavo's decision (§0.8). |
+| D4 | **Every document updated** | This file, `README.md` (plain words first, complete after), the generated figures and examples in `docs/`, the demos' `--help`, the Arduino examples and the code comments describe the code as it is after the change. |
+| D5 | **Clarity** | Accessible to radio amateurs, programmers and scholars alike: every term defined where it first appears and in the glossary (§14); numbers carry their units and whether they are *measured* or *expected*. |
+| D6 | **Git** | Commit and push only when Gustavo asks; the author is Gustavo Campos, with no co-author lines. |
+| D7 | **Pedagogic, with pictures everywhere** (Gustavo, 2026-09-27) | Every text is written in layers: first what a newcomer sees and why it matters, lossless (nothing left out, only said simply), then the depth an expert or scholar needs (formulas, constants, measured numbers, references to the exact rules). Pictures are used extensively — SVG generated from the real code, or Mermaid — because people need to see what they read. This holds for the documents **and** for every explanation and report given to Gustavo. |
 
 ---
 
@@ -867,8 +897,16 @@ stateDiagram-v2
    - A beep cannot trigger the spike stage: its full width at half maximum is 0.75 T ≥ 6 blocks, so p_{k±2} lie
      inside it.
 3. **History:** `PrefixHistory::push(h, blanked)`: P_{k+1} = P_k + h_k (uint32 wrap), plus a blank bitmap; a window
-   [a, b) = (int32)(P[⌊b⌋] − P[⌊a⌋]) + frac(b)·h[⌊b⌋] − frac(a)·h[⌊a⌋]. After the NCO is set (`lock_tone()`) or
-   after a large AFC correction, the history is forgotten and 3 settle blocks are skipped.
+   [a, b) = (int32)(P[⌊b⌋] − P[⌊a⌋]) + frac(b)·h[⌊b⌋] − frac(a)·h[⌊a⌋]. **Re-mix (new, §0.7 I29):** when the NCO
+   moves by Δf within the re-mix reach (`k_remix_reach`·fs/B: 125 Hz for 8-sample blocks, where the CIC-2 gain of a
+   block mixed at the old frequency stays within 5 %), the blocks already mixed are turned as if they had been mixed
+   at the new frequency all along. h_i sums samples centred on the first sample of block i, so block i turns by
+   2π·Δf·(n₀ − c_i)/fs, n₀ being the first sample mixed at the new frequency: the history's newest block by
+   2π·Δf·(3B + m)/fs (m: the samples of the block being summed that the old frequency mixed) and each older one by
+   2π·Δf·B/fs more; the blanker's two delayed blocks likewise. `PrefixHistory::rotate` rebuilds the prefix sums in one
+   pass from the oldest held prefix, which stays (each block from the prefix difference, turned, rounded to int32 and
+   summed again; the rotator is recomputed from cos/sin every 64 blocks, `k_rotate_reseed_blocks`). A move beyond the
+   reach (another signal) forgets the history and skips 3 settle blocks.
 4. **Noise σ²:**
    - SEARCH, ACQUIRE, PREAMBLE: the 25 % `QuantileTracker` (mean = q·3.476) of |S_8|²/n_eff(8) every 8 blocks,
      skipping windows that hold a blank or exceed 4× the estimate. On a lock from the search the estimate is seeded
@@ -883,12 +921,17 @@ stateDiagram-v2
 5. **Fine AFC** (ACQUIRE unless the tone is already confirmed, and PREAMBLE): decimate to 125 Hz; 65 leaky DFT bins
    on w² (squaring removes the marker sign and the data): 1 Hz apart within ±20 Hz of the squared signal (±10 Hz on
    the tone), 3.33 Hz apart out to ±60 Hz (±30 Hz on the tone), λ 0.984 (outer bins 0.95). The peak must reach 8×
-   the mean of the bins outside ±3 bins of it; the search is ±16.7 Hz on the tone for a steady (tune) lock and
-   ±30 Hz otherwise. First look after 16 inputs, then every 0.25 s; a correction ≥ 0.2 Hz is applied with
-   `nco.adjust(offset)`. In PREAMBLE a correction above 0.25 cycles per slot is ignored (the train already holds the
-   tone within a fraction of 1/T). A first large correction on a lock without a tune (rotation over the slowest
-   marker half-window > 0.5 rad) forgets the history. The fine AFC is frozen on a stream relock and reset on every
-   ACQUIRE entry.
+   the mean of the bins outside ±3 bins of it; the search is ±30 Hz on the tone for the first look and on a lock
+   without a tune, ±16.7 Hz afterwards on a steady (tune) lock (**changed**, §0.7 I30: data can pass for a steady tone
+   in the tone search, and its reading be half a bin off). First look after 16 inputs — at the first ACQUIRE block
+   after a lock that kept the history, at once, on inputs **seeded** from the history (its sums of `afc_decimation`
+   blocks, the newest group ending at the newest block) — then every 0.25 s; a first look without a clear peak is
+   tried again at every input. A correction ≥ 0.2 Hz: in ACQUIRE (**new**) the history is re-mixed to the corrected
+   tone (step 3) and the AFC seeded from it again, and a first correction that turned the slowest marker half window
+   by more than 0.5 rad replays the candidate search (§3.7; the release forgot the history there); in PREAMBLE
+   `nco.adjust(offset)` and an AFC reset, a correction above 0.25 cycles per slot being ignored (the train already
+   holds the tone within a fraction of 1/T). The fine AFC is frozen on a stream relock and reset on every ACQUIRE
+   entry.
 6. Run the state machine.
 
 ### 3.4 Flip measurement at centre c with half-window W
@@ -950,6 +993,11 @@ pitches that grabbed it before without leading anywhere.
   bin instead of in the edge bin at a wrong 50 Hz alias (§0.7 I17). int16 Q14 coefficients, int32 state, int64
   products. Bins on whole multiples of 50 Hz are exact DFT bins of the 160-sample block, which the phase
   estimates rely on.
+- **Provisional tune (new, §0.7 I29).** From the first search block on, the NCO follows the bin a fast lock would take
+  now (`ToneSearch::leading()`: the strongest eligible local peak of the fast averages at the fast-lock level — 4× the
+  lock floor in a quiet bin, 6× otherwise — with no warm-up and no run), at the bin's centre. A move within the
+  re-mix reach re-mixes the history (§3.3 step 3), a farther one (another signal) forgets it. The history then holds
+  the signal from the first search block on, mixed at most half a bin (25 Hz) from its tone.
 - **Range check (new):** a lock candidate and a train onset count only when the tone estimate lies inside the range
   ± 5 Hz (`k_estimate_accuracy_hz`, the estimate's accuracy between bins).
 - fast_b = EMA(1/8) of the bin power P_b; slow_b = EMA(1/128); slow_sq_b = EMA(1/128) of P_b² (1/n warm-up).
@@ -969,15 +1017,22 @@ pitches that grabbed it before without leading anywhere.
 - **Tone estimate:** for a steady tune, the block-to-block phase product gives the offset modulo one bin; the
   whole-bin alias comes from the half-block phase when the run's half-block products are coherent (≥ 0.3), otherwise
   from the sinc² pattern fit. For a signal with flips and gaps: the doubled phase modulo half a bin, the alias
-  nearest the power interpolation (a wrong one is 25 Hz off, inside the fine AFC's pull-in).
+  nearest the neighbours' balance (P₊ − P₋)/(P₋ + P₀ + P₊), floor subtracted (**changed**, §0.7 I31: keyed data
+  spreads a tone's power evenly into both neighbours, which the power interpolation read a third of a bin off), or
+  nearest the half-block estimate when that lies within half a bin of the balance (a marker between the halves of a
+  block moves the half-block estimate by a whole bin).
 - **Train onset** (`train_onset(tone, min_products)`): a tone steady over at least `min_products` block products
   (coherence ≥ 0.9) whose product then breaks off its steady phase by > 37° and > 3.6σ (both blocks ≥ 10× the floor).
 - **Exclusion:** no lock within ½ bin + 1/(2·T_min) of the tone ACQUIRE holds (its own train's first spectral lines).
 - **Ban:** `ban(tone, 10 s << min(strikes, 3))` on the bin and its neighbours; strikes decay one per 5 min.
 - **`present(tone)`:** level ≥ 4× the lock floor now.
 - **On lock:** a tone within 50 Hz of the remembered station's pitch (§3.12) that is not steady locks the remembered
-  pitch instead (stream relock). Otherwise: tone estimate, `nco.set_frequency`, history, candidates and AFC reset,
-  noise seeded from the onset floor and frozen, exclusion set, watch on, ACQUIRE.
+  pitch instead (stream relock). Otherwise (**changed**, §0.7 I29–I31): when the tone lies within the re-mix reach
+  of the provisional tune, the history is kept; at the first ACQUIRE block it is re-mixed to the tone — the provisional
+  tune plus the fine AFC's measure on the seeded history, or, without a clear peak, the search's estimate when the lock
+  was steady and the estimate lies within 30 Hz (`k_leader_reach_hz`) of the tune, else the tune itself — and replayed
+  (§3.7). A tone farther away: `nco.set_frequency(estimate)` and the history forgotten. Then candidates and AFC reset,
+  noise seeded from the onset floor and frozen, exclusion set around the NCO's tone, watch on, ACQUIRE.
 
 ### 3.7 ACQUIRE
 
@@ -1002,7 +1057,13 @@ Then SEARCH.
 
 **Watch** (while a lock taken from the search has not reached its first package): the tone search keeps running
 (§3.2) and moves to another tone as soon as that one turns from steady into a marker train:
-- in ACQUIRE: a train onset of ≥ 3 steady products (≥ 4 while ACQUIRE holds a tune);
+- in ACQUIRE: a train onset of ≥ 3 steady products (≥ 4 while ACQUIRE holds a tune), **unless it is a keying line
+  of the held data** (**new**, §0.7 I32): its first break came in the search block where the held tone reversed its
+  carrier — its output against its last strong block (at most 3 blocks back) within the break angle of a reversal of
+  the advance its frequency gives (the search bins are exact DFT bins: 2π·f/50 Hz per block), or its second half
+  against its first (a reversal inside the block). When the held tone's bin is weak in that block but a bin of its
+  exclusion is loud (a marker's twist moves the beep's energy 0.75/T away), the onset waits for the held tone's next
+  reading, at most 3 search blocks (`k_held_gap_blocks`); a held tone already silent before plays no keying line;
 - in PREAMBLE, while no package candidate exists: ≥ 10 steady products, not the tone it left (±50 Hz), and not one of
   the preamble's own train lines (2m + 1)/(2T) from the tone, m ≤ 7, ±5 Hz;
 - never an odd harmonic image (3rd, 5th, 7th of the held tone folded at 8 kHz, ±50 Hz) of a saturated input;
@@ -1012,13 +1073,26 @@ The watch is off after a loss from TRACK and on a stream relock.
 
 **Candidates:** per block and per scale W_s ∈ {3, 4, 6, 8, 11, 16, 22} blocks (0.35 T for T = 8..64 blocks), local
 maxima in time with q_bal ≥ 3 and κ ≥ 0.5, parabolic position, merged within 0.35·8 blocks into a 16-entry ring (a
-detection merges only into the newest entry: detections of one marker at several scales that arrive after another
-marker's take entries of their own, the lead of the slow cold joins, §11.2). On a stream relock only candidates with
+detection merges only into the newest entry: the stronger one's position and q). **New** (§0.7 I33): an entry also
+keeps its *finest* detection (the smallest scale that saw it, and its position as an int16 offset in 1/64 block,
+`k_candidate_offset_scale`): a scale wider than the marker holds the data beeps around it too, so its peak lies up to
+`k_candidate_echo_share` = 0.55 of its half window from the marker (an *echo*); a chain of ever wider echoes, each
+within the merge distance of the last, moves the strongest position but not the finest. The joins read a candidate at
+its finest position, snapped to the finest-scale entry within 0.55 of its finest scale's half window (the ring keeps
+the echoes that arrive after another marker's detection as entries of their own). On a stream relock only candidates with
 A_mk ≥ 0.35 × the remembered crest enter. **New** (§0.7 I21): while the station memory is usable, a new candidate
 with candidates (q_bal ≥ 3) within ±0.1 T_mem of c − k·T_mem for k = 1..4 (a train, `k_sync_min_hits` in a row)
 marks the memory's transmission as ended. Each new candidate triggers `try_sync`, then `try_late_join`, then
 `try_cold_join` (§3.12), once the lock is *tuned* (a steady tune, a confirmed tone, an AFC look, or 1 s elapsed). A
 pending cold-join fold advances first, every block.
+
+**Replay (new, §0.7 I29, I30).** At the first ACQUIRE block after a lock that kept the history, when the lock becomes
+*measured* (the fine AFC's first look on a lock without a tune), and after a first AFC correction that turned the
+windows by more than 0.5 rad, the ring is emptied and the candidate search runs again over the history, oldest block
+first: its end position steps through the history, 64 blocks per block heard (`k_rescan_blocks`; a full history of
+2400 blocks at cap 32 in 38 blocks), and the blocks heard wait until it has caught up. Each replayed candidate may
+complete a relock (`try_late_join`) or a cold join as it would have when it arrived, and a pending fold advances at
+each replayed block; `try_sync` runs on the blocks heard only (a train's earlier markers are in the ring by then).
 
 **try_sync(c)**:
 1. **Hypotheses.** T = (c − b)/m for older candidates b and m = 1..7, within the window (±6 % at its ends) and not
@@ -1054,7 +1128,8 @@ pending cold-join fold advances first, every block.
 8. **The train must follow a tune (new, §0.7 I20).** A transmission starts with its tune (§2.1): the tune's bound of
    §3.8 step 1 must place the train, or — when the history no longer reaches back to the tune, and the slots it does
    hold do not show that none leads to this train — the tone must have been locked at most (`k_max_sync_markers` +
-   `k_tune_bound_slots`)·T = 34 slots of the sync's T before the sync, and on a tune (the search saw it steady, the
+   `k_tune_bound_slots`)·T = 34 slots of the sync's T before the sync (the look back of §3.8 step 1 spans those 34
+   slots, **changed**, §0.7 I34), and on a tune (the search saw it steady, the
    watch saw a steady tone turn into this train, or, on a stream relock, a tune was seen on the held pitch). Otherwise the sync is refused, and on a stream
    relock the station memory is dropped (a cold join may take the transmission further on). This replaces the
    design's "on a stream relock T must be within 10 % of the remembered T". Go to PREAMBLE with the train's crest
@@ -1107,7 +1182,8 @@ markers:       ◆     ◆     ◆    □ ■ □ ■ □ ■ □ ■       ◆ 
    With a full train T is known to about 0.5 % near threshold; from 5 markers, when 3 of 8 faded, it can be 1.7 %
    off, and a first STOP may then fall outside the ±0.29 T search: §11.2).
    **The tune places the train (new, §0.7 I3).** At the sync (§3.7 step 8) the receiver looks back from the anchor,
-   over up to 12 slots, for two steady slots in a row (q ≤ −4, κ ≤ −0.5, steady ≥ 0.5 × the train's crest: the tune
+   over up to 34 slots (`k_tune_search_slots` = `k_max_sync_markers` + `k_tune_bound_slots`; **changed**, §0.7 I34:
+   12, which a train of up to 32 markers, or a false train in package 0, could outrun), for two steady slots in a row (q ≤ −4, κ ≤ −0.5, steady ≥ 0.5 × the train's crest: the tune
    tone) with a steady slot edge between them (**new**, §0.7 I20: the boundary excess of §3.7 step 4 ≥ 0.25,
    `k_tune_edge_energy`; two data ones read steady at their centres too, but fall silent at the edge between them).
    The newer one is the tune's last slot, the slot after it holds the train's first marker, and package 0's START
@@ -1464,8 +1540,8 @@ knows exactly which bits it missed, so the bytes after the fade stay in their pl
   is idx_mem + round((c − c_mem)/P_mem), P_mem = (N_mem + 1)·T_mem, accepted only when the fraction is within ±0.2 of
   a whole number and at most 64 packages have passed. Then TRACK with `late_join`, the full guard, and bytes placed by
   package index. **New** (§0.7 I18): TRACK starts at the oldest of the chain's markers c − j·P, j = 3..1 (each taken
-  at a candidate within ±0.1 T when one is near), whose half window the history still holds, with package index
-  idx − j: the guard's packages are in the history already.
+  at the candidate nearest it within ±0.1 T, **changed**, §0.7 I33: the last one within reach), whose half window the
+  history still holds, with package index idx − j: the guard's packages are in the history already.
 - **Stream relock** (ACQUIRE on the remembered pitch with no tune heard, after a LOST from TRACK or when the search
   found an unsteady tone within 50 Hz of the remembered pitch): only marker-like candidates (A_mk ≥ 0.35 × the remembered
   crest); a sync must follow a tune (§3.7 step 8, **changed**, §0.7 I20: the design asked T within 10 % of the
@@ -1481,18 +1557,37 @@ knows exactly which bits it missed, so the bytes after the fade stay in their pl
   stop, and, because each package then begins on a byte boundary, hands out whole bytes from there on. It also makes
   sure the grid it found is not a third, a fifth or a seventh of the true one (such grids have quiet slot edges
   too). With any other N it cannot know where the bytes begin, so it waits for the next transmission.
+  **New** (§0.7 I29–I34): the receiver keeps what it hears from its first moments. While it still searches for the
+  pitch, it mixes the audio at the pitch its search leads with and keeps it; when it locks on the tone it turns that
+  audio to the exact tone instead of throwing it away, and then looks through it for the START twists it missed. So
+  the three equal intervals are usually heard already when the tone locks, and the join starts from the first whole
+  package the receiver heard (`docs/images/late_join_timeline.svg`: 5.3 packages to the lock instead of 8.3 in the
+  example drawn, 20 of 20 starts within 6 packages instead of 0):
+
+  ```mermaid
+  flowchart LR
+      A["switch-on: SEARCH<br/>NCO on the leading bin,<br/>history kept from 20 ms on"] --> B["tone lock:<br/>history re-mixed<br/>to the tone"]
+      B --> C["fine AFC fed from the history:<br/>tone measured,<br/>history re-mixed again"]
+      C --> D["replay: the history's<br/>candidates, oldest first"]
+      D --> E["3 equal intervals,<br/>fold on N = 8, 16, 24, 32"]
+      E --> F["TRACK from the oldest<br/>held chain marker"]
+      F --> G["full guard:<br/>4 packages, then locked<br/>(late_join)"]
+  ```
+
   *Rules:*
   1. **Trigger:** ACQUIRE with no usable station memory; a new candidate c with q_bal ≥ 4 (`k_late_join_q`) and an
      older one at a distance P that is longer than any train of the window (P outside the T window ±6 %), with
      candidates of q_bal ≥ 4 within ±3 % of P at c − 2P and c − 3P: `k_cold_join_intervals` (3) equal intervals.
      **New** (§0.7 I18): among the candidates between c − 3P and c, at most one that is not on the chain may be at
      least half as strong (q_bal) as the chain's weakest marker (data slots never flip, so only noise, far weaker,
-     may add a candidate between the chain's markers).
+     may add a candidate between the chain's markers). **Changed** (§0.7 I33): every candidate is read at its finest
+     position (§3.7), and one within 0.55 of its scale's half window of a chain position is that marker's echo, not
+     a stray.
   2. **Hypotheses:** for each N ∈ {8, 16, 24, 32} with N ≤ the cap: T = P/(N + 1), kept only if T lies in the
      receiver window (±6 %) and P ≤ 1.06·`k_max_package_us`. At least one must be kept.
   3. **Slot-edge fold:** from the oldest chain marker whose package the history still holds (up to 3 packages back),
-     each package is folded when the history holds it, bounded by the chain's markers (taken at a candidate within
-     ±5 % of P when one is near): on each hypothesis grid, and on its 3rd, 5th and 7th sub-grids (slots of T/3, T/5,
+     each package is folded when the history holds it, bounded by the chain's markers (each taken at the candidate
+     nearest its prediction within ±5 % of P, **changed**, §0.7 I33): on each hypothesis grid, and on its 3rd, 5th and 7th sub-grids (slots of T/3, T/5,
      T/7, used while they are at least 0.94·T_min long), the energy in windows of ±0.1 of that grid's slot at its
      slot edges and at its slot centres, each less the noise of its window. A grid **passes** when its mean centre energy is ≥ 2× the noise
      of a window (a chain of zeros gives nothing to judge) and its mean edge energy ≤ `k_fold_edge_ratio` (0.35) ×
@@ -1502,8 +1597,11 @@ knows exactly which bits it missed, so the bytes after the fade stay in their pl
      also pass for N'), and none of the other package lengths may rival it (**new**, §0.7 I28): for every N′ in
      1..cap other than N whose grid is not one of N's (N′ + 1 does not divide N + 1) and whose slot P/(N′ + 1) lies
      in the window, the ratio of mean edge to mean centre energy over the folded packages on N′'s grid must not be
-     below `k_fold_rival_ratio` (0.5) × N's; then TRACK with that N and T = P/(N + 1) from the oldest folded package the history still
-     holds whole, package index 0, flagged `late_join`. After `k_cold_join_max_packages` (4) packages without one:
+     below `k_fold_rival_ratio` (0.5) × N's; then TRACK with that N from the oldest folded package the history still
+     holds whole, package index 0, flagged `late_join`. **Changed** (§0.7 I33): T is measured on the chain's folded
+     markers but the newest (the candidate that completed the chain may be an early detection, up to the chain's 3 %
+     off), each found by a flip search at P/(N + 1): the span from the oldest to the newest of them over the slots
+     between; TRACK's first START is refined by a flip search (±0.1 T) at that T. After `k_cold_join_max_packages` (4) packages without one:
      give up (no lock, no bytes; later candidates may start a new fold).
   4. **Guard:** the full guard of §3.11 (at least 4 packages and 36 slots, ≥ 80 % of its markers detected, ≥ 2
      balanced, the audit clean); the guard packages' bytes are held and released after confirmation, flagged
@@ -1513,9 +1611,15 @@ knows exactly which bits it missed, so the bytes after the fade stay in their pl
      0xD4.
   6. **Otherwise** (N not a multiple of 8, or no hypothesis confirmed): no `locked`, no bytes; the receiver waits for
      the next tune.
-  7. **Timing** (*measured*, L20, §4.4): a join needs the tone lock, the fine AFC's first look (up to 1 s on data),
-     three intervals, two folded packages and the full guard. With short packages that is more than the 6 packages
-     the design aimed for (§11.2).
+  7. **Timing** (*measured*, L20, §4.4; **changed**, §0.7 I29–I34): the history reaches back to the first 20 ms
+     search block, so the join starts from the first whole package heard after it — its START U packages after the
+     switch-on, U between 0.3 and 1.3 — and the lock follows once the full guard's 4 packages and its END check are
+     in: 4.2–4.5 packages after that START. That is within 6 packages wherever the history holds three intervals
+     (L20: 466 of 480 starts; medians 4.6–5.8 packages; the release: 267, medians 5.1–11.8). **Structural floor:** the
+     chain is complete when its fourth marker comes, 3P after the first; the history holds (cap + 5)·64 + 32 blocks
+     (2400 at cap 32). At T = 32 ms with N = 24 (P = 800 blocks: 3P and the candidate's detection delay exceed 2400)
+     and N = 32 (P = 1056) the first marker has left the history by then, TRACK starts one package later, and the lock
+     comes at about 5.1–5.2 + U packages: within 6 in 80–90 % of the starts (§11.2 P2).
 
 ### 3.13 Bytes: putting the bits back in place
 
@@ -1547,12 +1651,12 @@ Values in the code are normative; this table lists every named constant of the d
 | Profiles | `k_ssb_min_slot_ms` 8, `k_fm_min_slot_ms` 4, `k_min_block_samples` = `k_min_window_slot_ms` 4 (the block size an invalid configuration keeps while it stays idle), `k_default_fixed_ratio` 0.70; `check()` bounds `min_slot_ms` with the public `k_min_window_slot_ms` 4 and `k_max_window_slot_ms` 32 of `protocol.hpp` (§0.7 A8; they replaced the private `k_min_block_samples`/`k_max_block_samples` limits). The search range, from `k_min_fast_tone_hz` 1000 for slots under `k_fast_slot_us`, is the shared `search_range()` of `protocol.cpp` (§1.5) |
 | Units and limits | `k_ms_per_s` 1000, `k_us_per_ms` 1000, `k_samples_per_ms` 8, `k_pi` 3.14159265, `k_two_pi` 2π, `k_count_limit` 0xFFFFFFFF, `k_count_limit_u8` 0xFF, `k_reference_bandwidth_hz` 2500, `k_snr_floor_db` −99, `k_db_per_decade` 10, `k_no_value` −1e30, `k_no_guard_q` 1e30, `k_percent` 100, `k_percent_limit` 255, `k_top_bit` 0x80 |
 | Front end | `k_energy_shift` 4, `k_energy_scale` 256, `k_in_bin_scale` 2/(32²·256) (e_k = p_k for a steady in-bin tone), `k_settle_blocks` 3 (blanker latency + 1), `k_noise_blocks` 8, `k_noise_outlier` 4, `k_noise_drop` 0.5 |
-| Fine AFC (control) | `k_afc_decimation_samples` 64 (8 ms: 125 Hz input), `k_afc_eval_ms` 250, `k_afc_min_inputs` 16, `k_afc_wait_ms` 1000, `k_afc_min_offset_hz` 0.2, `k_afc_reset_rotation` 0.5 rad, `k_preamble_afc_limit` 0.25 cycles/slot |
+| Fine AFC (control), re-mix and replay | `k_afc_decimation_samples` 64 (8 ms: 125 Hz input), `k_afc_eval_ms` 250, `k_afc_min_inputs` 16, `k_afc_wait_ms` 1000, `k_afc_min_offset_hz` 0.2, `k_afc_reset_rotation` 0.5 rad (a first correction above it replays the candidates), `k_preamble_afc_limit` 0.25 cycles/slot; **new** (§0.7 I29–I31): `k_remix_reach` 0.125 (× fs/B: the largest NCO move that re-mixes the history, 125 Hz for 8-sample blocks), `k_leader_reach_hz` 30 (a lock's estimate farther from the provisional tune is not taken), `k_no_scan` −1 (no replay running), `k_rescan_blocks` 64 (history blocks replayed per block heard) |
 | Watch | `k_onset_products` 3, `k_onset_products_tune` 4, `k_onset_products_preamble` 10, `k_train_line_orders` 7, `k_train_line_hz` 5, `k_first_image_order` 3, `k_last_image_order` 7, `k_image_reach_hz` 50, `k_memory_search_margin_hz` 50 |
 | Geometry (× T) | `k_marker_half` 0.35, `k_slot_window` 0.75, `k_gap_window` 0.15, `k_search_step` 0.05, `k_position_search` 0.10, `k_first_stop_search` 0.25, `k_stop_search_growth` 0.005 per slot beyond `k_stop_search_after` 9 slots, `k_stop_search_max` 0.35, `k_track_search` 0.15, `k_track_search_miss` 0.5, `k_max_search_steps` 10, `k_boundary_half` 0.1, `k_slot_centre` 0.5, `k_audit_step` 0.5, `k_audit_edge_half` 0.3, `k_search_edge` 0.25 (of a search step), `k_anti_half` 0.7 |
 | Flips | `k_q_candidate` 3 (on q_bal), `k_kappa_candidate` 0.5, `k_q_track` 4, `k_q_expected_stop` 0 (q_bal), `k_kappa_track` 0.3, `k_kappa_after_miss` 0.5, `k_q_present` 1, `k_evidence_clip` 8, `k_kappa_spread` 4.2, `k_kappa_floor_max` 0.75 |
 | Sync | `k_sync_positions` 8, `k_sync_midpoints` 4, `k_sync_max_midpoint_flips` 2, `k_boundary_max` 0.25, `k_sync_min_positions` 5, `k_sync_min_hits` 5, `k_sync_dense_hits` 4, `k_sync_dense_mask` 0x1F (positions 0..4), `k_sync_odd_mask` 0xAA, `k_sync_min_parity_hits` 2, `k_sync_weak_q` 2, `k_sync_min_strong` 3, `k_sync_min_parity_strong` 1, `k_sync_missing_markers` 1, `k_sync_evidence` 24, `k_prefer_smaller_t` 0.8, `k_hypothesis_merge` 0.03, `k_max_hypotheses` 64, `k_hypothesis_passes` 2, `k_max_accepted` 16, `k_refine_passes` 2, `k_refine_min_points` 3, `k_refine_max_change` 0.1, `k_range_tolerance` 0.06, `k_half_rate_odd_hits` 1, `k_marker_edge_sigmas` 3 |
-| Preamble | `k_train_nudge` 0.2, `k_fit_min_weight` 1, `k_fit_min_points` 3, `k_train_amplitude_ratio` 0.5, `k_flip_amplitude_ratio` 0.3, `k_reference_alpha` 0.25, `k_kappa_bridge` 0.5, `k_hidden_midpoints` 2, `k_tune_search_slots` 12, `k_tune_bound_slots` 2, `k_tune_bound_crest` 0.5, `k_lookahead_ratio` 2, `k_lookahead_q` 16, `k_faded_marker_q` 16, `k_faded_marker_kappa` 0.8, `k_faded_marker_ratio` 0.2, `k_faded_marker_offset` 0.05, `k_faded_train_bits` 3, `k_sub_chain_evidence` 3, `k_recovered_packages` 4, `k_slot_count_tolerance` 0.25, `k_min_train_ones` 3, `k_sub_rate_gaps` 2, `k_sub_rate_ratio` 2, `k_max_rejections` 4, `k_preamble_base_slots` 40, `k_preamble_packages` 4, `k_package_slots_max` cap + 1, `k_preamble_max_slots` 40 + 4·(cap + 1), `k_marker_gap_limit` 2·(cap + 1) + 1, `k_train_min_markers` 6 |
+| Preamble | `k_train_nudge` 0.2, `k_fit_min_weight` 1, `k_fit_min_points` 3, `k_train_amplitude_ratio` 0.5, `k_flip_amplitude_ratio` 0.3, `k_reference_alpha` 0.25, `k_kappa_bridge` 0.5, `k_hidden_midpoints` 2, `k_tune_search_slots` 34 (`k_max_sync_markers` + `k_tune_bound_slots`; 12 before §0.7 I34), `k_tune_bound_slots` 2, `k_tune_bound_crest` 0.5, `k_lookahead_ratio` 2, `k_lookahead_q` 16, `k_faded_marker_q` 16, `k_faded_marker_kappa` 0.8, `k_faded_marker_ratio` 0.2, `k_faded_marker_offset` 0.05, `k_faded_train_bits` 3, `k_sub_chain_evidence` 3, `k_recovered_packages` 4, `k_slot_count_tolerance` 0.25, `k_min_train_ones` 3, `k_sub_rate_gaps` 2, `k_sub_rate_ratio` 2, `k_max_rejections` 4, `k_preamble_base_slots` 40, `k_preamble_packages` 4, `k_package_slots_max` cap + 1, `k_preamble_max_slots` 40 + 4·(cap + 1), `k_marker_gap_limit` 2·(cap + 1) + 1, `k_train_min_markers` 6 |
 | Track | `k_timing_gain` 0.2, `k_stop_reach_min` 0.10, `k_stop_reach_per_slot` 0.02, `k_stop_reach_slots` 9, `k_stop_reach_per_miss` 0.05, `k_stop_reach_miss_max` 0.25, `k_stop_reach_misses` 4, `k_afc_gain` 0.1, `k_afc_min_q` 8, `k_afc_clamp` 0.1 cycles/slot (AFC only while (N + 1)·T ≤ `k_max_package_us`); rotation: `k_rotation_energy` 16, `k_rotation_min_rad` 0.6, `k_rotation_span` 0.383, `k_rotation_agreement` 0.5, `k_rotation_gain` 0.75, `k_rotation_min_slot_ms` 32, `k_rotation_balance` 0.25, `k_rotation_max_level` 1.5; `Decoder::k_held_packages` 22 |
 | End, loss | `k_end_reach` 2.35 (`k_end_markers` + `k_marker_half`), `k_end_evidence` 10, `k_end_single_evidence` 4 (N = 1), `k_end_single_quiet_slot` 4, `k_end_single_last_slot` 6, `k_end_clean_slot` 3, `k_short_eot_evidence` 15, `k_short_eot_min` 3, `k_short_eot_first` 2, `k_short_eot_flips` 3, `k_presence_slots` 36, `k_min_presence_stops` 4, `k_loss_numerator` 3, `k_loss_denominator` 4, `k_tune_edge_energy` 0.25, `k_tune_kappa` −0.5, `k_tune_edges` 3 |
 | Guard, audit | `k_guard_slots` 18, `k_full_guard_slots` 36, `k_min_guard_packages` 2, `k_full_guard_packages` 4, `k_quick_stop_q` 16, `k_quick_audit` 4, `k_guard_min_detected` 0.8, `k_guard_min_balanced` 2, `k_guard_max_inner` 2, `k_guard_inner_share` 0.25, `k_guard_share_positions` 17 (2·`k_hf_bits_per_package` + 1: the audit positions the share was set for), `k_guard_max_level` 2.0, `k_marker_edge_max` 0.3, `k_model_slot_ms` 32, `k_model_snr_db` −3.2, `k_confirm_margin_db` 5; `k_audit_low` −4, `k_audit_high` 8, `k_audit_threshold` 12, `k_strong_packages` 3, `k_strong_window_mask` 0x0F (the last 4 packages), `k_anti_packages` 2, `k_kappa_anti` 0.5, `k_loud_zero` 10 |
@@ -1566,7 +1670,7 @@ Values in the code are normative; this table lists every named constant of the d
 | Block | Constants |
 |---|---|
 | Front end, history | `k_decoder_rate_hz` 8000, `k_blocks_per_min_slot` 8, `k_history_margin_slots` 5, `k_history_slots` cap + 5, `k_history_guard_cells` 32, `k_history_cells` (cap + 5)·64 + 32, `k_mix_shift` 10, `k_rebase_blocks` 8192, `k_mixer_gain` 32, `k_cic_overlap` 1/3, `k_g_slot` 0.9394, `k_g_marker` 0.8355, `k_min_noise_variance` 1/12 |
-| Candidates, audit | `k_candidate_scales` 7, `k_candidate_scale_blocks` {3, 4, 6, 8, 11, 16, 22}, `k_candidate_merge_blocks` 2.8, `CandidateList::k_size` 16; `k_audit_scale` 15, `AuditRing::k_max_positions` 2·cap + 1, `AuditRing::k_packages` 4 |
+| Candidates, audit | `k_candidate_scales` 7, `k_candidate_scale_blocks` {3, 4, 6, 8, 11, 16, 22}, `k_candidate_merge_blocks` 2.8, `k_candidate_echo_share` 0.55 (of a scale's half window: its echo of a marker, §0.7 I33), `k_candidate_offset_scale` 64 (`Candidate::finest_offset` units per block), `CandidateList::k_size` 16; `k_audit_scale` 15, `AuditRing::k_max_positions` 2·cap + 1, `AuditRing::k_packages` 4 |
 | Blocks | `ImpulseBlanker::k_latency` 2 (`k_delay` 5); `ToneSearch::k_max_lock_bins` 49, `ToneSearch::k_max_bins` 51, `ToneSearch::k_block_samples` 160, `ToneSearch::k_long_run_blocks` 8 (`k_phase_bins` 3, `k_half_bins` 50); `FineAfc::k_bins` 65 |
 | Package learner | `dsp::k_no_start` −0x7FFFFFFF (no bound on package 0's START) |
 
@@ -1578,21 +1682,23 @@ Values in the code are normative; this table lists every named constant of the d
 | QuantileTracker | `k_quantile_scale` 3.476, `k_quantile_step` 1/64, `k_quantile_warmup_step` 1/8, `k_quantile_warmup` 32, `k_quantile_down_ratio` 3, `k_quantile_primed` 16 |
 | NoiseTracker | `k_noise_clip` 10, `k_noise_seed_weight` 8, `k_noise_average` 64 |
 | ImpulseBlanker | `k_spike_ratio` 10, `k_spike_floor` 10, `k_residual_ratio` 8, `k_residual_tone` 2, `k_residual_run` 2, `k_residual_adapt` 0.2, `k_residual_alpha` 1/64, `k_residual_prime_blocks` 64, `k_min_block_energy` 16, `k_fill_limit` 0xFF |
-| ToneSearch | `k_search_step_hz` 50, `k_estimate_accuracy_hz` 5, `k_goertzel_shift` 14, `k_goertzel_one` 16384, `k_fast_alpha` 1/8, `k_slow_alpha` 1/128, `k_lower_half_bias` 0.8, `k_slow_blocks` 255, `k_min_floor` 160 (1 LSB rms), `k_block_floor_bias` 0.309, `k_recent_alpha` 1/4, `k_fast_lock` 6, `k_fast_lock_quiet` 4, `k_quiet_bin` 2, `k_half_block_samples` 80, `k_half_coherence` 0.3, `k_present_lock` 2, `k_slow_lock` 2, `k_keyed_min` 1, `k_steady_max` 0.05, `k_steady_level` 4, `k_steady_after_blocks` 128, `k_slow_after_blocks` 96, `k_lock_blocks` 3, `k_warmup_blocks` 8, `k_strike_decay_blocks` 15000 (5 min), `k_max_strike_shift` 3, `k_strike_limit` 0xFF, `k_ban_limit` 0xFFFF, `k_blocks_limit` 0xFFFFFFFF, `k_max_alias` 0.75, `k_phase_aliases` 2, `k_half_bin` 0.5, `k_min_phase_coherence` 0.9, `k_steady_cosine` 0.8, `k_break_sigmas` 3.6, `k_break_snr` 10, `k_train_breaks` 1, `k_train_steady_products` 3, `k_resume_blocks` 2 |
+| ToneSearch | `k_search_step_hz` 50, `k_estimate_accuracy_hz` 5, `k_goertzel_shift` 14, `k_goertzel_one` 16384, `k_fast_alpha` 1/8, `k_slow_alpha` 1/128, `k_lower_half_bias` 0.8, `k_slow_blocks` 255, `k_min_floor` 160 (1 LSB rms), `k_block_floor_bias` 0.309, `k_recent_alpha` 1/4, `k_fast_lock` 6, `k_fast_lock_quiet` 4, `k_quiet_bin` 2, `k_half_block_samples` 80, `k_half_coherence` 0.3, `k_present_lock` 2, `k_slow_lock` 2, `k_keyed_min` 1, `k_steady_max` 0.05, `k_steady_level` 4, `k_steady_after_blocks` 128, `k_slow_after_blocks` 96, `k_lock_blocks` 3, `k_warmup_blocks` 8, `k_strike_decay_blocks` 15000 (5 min), `k_max_strike_shift` 3, `k_strike_limit` 0xFF, `k_ban_limit` 0xFFFF, `k_blocks_limit` 0xFFFFFFFF, `k_max_alias` 0.75, `k_phase_aliases` 2, `k_half_bin` 0.5, `k_min_phase_coherence` 0.9, `k_steady_cosine` 0.8, `k_break_sigmas` 3.6, `k_break_snr` 10, `k_train_breaks` 1, `k_train_steady_products` 3, `k_resume_blocks` 2, `k_held_gap_blocks` 3 (the watch's echo test waits at most this many blocks for the held tone, §0.7 I32) |
 | FineAfc | `k_afc_default_rate_hz` 125, `k_afc_bin_step_hz` 1, `k_afc_centre_bin` 32, `k_afc_fine_bins` 20, `k_afc_span_hz` 60, `k_afc_outer_step_hz` 3.33 (40/12), `k_afc_narrow_bins` 24, `k_afc_lobe_bins` 3, `k_afc_lambda` 0.984, `k_afc_outer_lambda` 0.95, `k_afc_peak_ratio` 8, `k_afc_min_inputs` 16, `k_squared_to_tone` 0.5 |
-| Helpers, smart line | `k_parabola_limit` 0.5; `k_rho_min` 0.50, `k_rho_max` 0.75, `k_rho_seed` 0.6, `k_rho_iterations` 3, `k_rho_offset` 0.5 |
+| Helpers, smart line | `k_parabola_limit` 0.5; `k_rotate_reseed_blocks` 64 (`PrefixHistory::rotate` recomputes its rotator this often, §0.7 I29); `k_rho_min` 0.50, `k_rho_max` 0.75, `k_rho_seed` 0.6, `k_rho_iterations` 3, `k_rho_offset` 0.5 |
 | PackageLearner | `k_no_marker` 0, `k_exact_start_slots` 4, `k_gap_limit` 0xFF |
 
 ### 3.15 Memory and CPU
 
 **Memory.** The history holds cap + 5 slots at the slowest T of the window — the longest package, its END check and
 the search margins: (cap + 5)·64 + 32 cells of two uint32 prefix sums and one blank bit (§1.6). The rest: tone
-search 1.64 KB (51 bins with the two guard bins), fine AFC 1.04 KB, and the candidates, audit ring, PREAMBLE
-readings, held packages (22), cold-join folds and state (≈ 2.3 KB at cap 16, 3.1 KB at cap 32).
+search 1.66 KB (51 bins with the two guard bins, and the watch's held-tone state, §0.7 I32), fine AFC 1.04 KB, and
+the candidates, audit ring, PREAMBLE readings, held packages (22), cold-join folds and state (≈ 2.3 KB at cap 16,
+3.1 KB at cap 32). The fast late join (§0.7 I29–I34) added 36 B on xtensa (the held-tone state, the AFC and replay
+bookkeeping; the ring's finest positions fit in `Candidate`'s padding: still 16 B).
 
 | Item | Size (*measured* on the implementation) | Gate |
 |---|---|---|
-| `sizeof(Decoder)`, cap 16 / 24 / 32 / 48 / 64 (xtensa-esp32; the 64-bit host is 8–12 B larger: 16,232 / 20,768 / 25,304 / 34,480 / 43,552 B) | 16,224 / 20,760 / 25,296 / 34,468 / 43,540 B | ≤ 7,168 + 576·cap B (`static_assert` in `decoder.cpp`): 16,384 / 20,992 / 25,600 / 34,816 / 44,032 B (160–492 B to spare on xtensa, 152 B on the host at cap 16) |
+| `sizeof(Decoder)`, cap 16 / 24 / 32 / 48 / 64 (xtensa-esp32; the 64-bit host is 8–12 B larger: 16,272 / 20,808 / 25,344 / 34,512 / 43,584 B) | 16,260 / 20,796 / 25,332 / 34,504 / 43,576 B (the release: 16,224 / 20,760 / 25,296 / 34,468 / 43,540 B) | ≤ 7,168 + 576·cap B (`static_assert` in `decoder.cpp`): 16,384 / 20,992 / 25,600 / 34,816 / 44,032 B (124–456 B to spare on xtensa, 112 B on the host at cap 16) |
 | `sizeof(Event)` | 40 B (39 on AVR) | ≤ 40 |
 | `sizeof(Encoder)` with the 64-byte queue | 145 B on AVR (81 B without the queue), 148 B on xtensa and the 64-bit host | AVR: `sizeof(Encoder) − k_queue_size` ≤ 96 |
 | `sizeof(PacketReader)` | 1,056 B on xtensa, 1,064 B on the 64-bit host (`UNLIMITED_PACKET_MAX` 1024), 282 B on AVR (256) | – |
@@ -1601,8 +1707,10 @@ readings, held packages (22), cold-join folds and state (≈ 2.3 KB at cap 16, 3
 The private members in the headers are the implementation's layout; they may change within the gate.
 
 **Arduino sketches** (`make arduino_check`, *measured* 2026-09-27): `tx_uno` 9,380 B of flash (29 %; +504 B since
-its bandwidth line limits the tolerance by the receiver's search, §0.7 A9), 535 B of RAM (26 %); `rx_esp32` 349,456 B
-/ 44,492 B; `wav_sd_esp32` 347,106 B / 23,712 B; `loopback_esp32` 339,440 B / 73,924 B (one decoder per profile).
+its bandwidth line limits the tolerance by the receiver's search, §0.7 A9), 535 B of RAM (26 %); `rx_esp32` 353,480 B
+/ 44,524 B; `wav_sd_esp32` 347,394 B / 23,712 B; `loopback_esp32` 343,460 B / 74,028 B (one decoder per profile).
+The fast late join added about 4 KB of flash to the receiving sketches (the release: `rx_esp32` 349,456 B / 44,492 B,
+`loopback_esp32` 339,440 B / 73,924 B).
 
 **CPU** (at 8 kHz; v0.1's budget with v0.2's search):
 - per sample: ≈ 20 integer operations (NCO, mixer, CIC-2), plus the tone search in SEARCH and during the watch
@@ -1611,6 +1719,21 @@ its bandwidth line limits the tolerance by the receiver's search, §0.7 A9), 535
   fine AFC (≈ 65 kflop/s); in TRACK < 20 kflop/s (a package costs O(N) window sums and 2N + 1 flip measures).
 - *Measured* on the development PC (macOS, one core; the final decoder, 2026-09-27): 7,400–16,400× real time while
   tracking, 4,000× on noise (gate B4: ≥ 500×).
+- **The fast late join** (§0.7 I29–I34), *measured* on the same PC (Apple M4, one core, best of 3 runs; the release
+  on the same audio in brackets): the five presets decoded from the start 7,900–16,300× real time (8,000–16,400×);
+  60 s of noise 4,260× (4,290×); keyed CW 3,340× (3,480×); a speech-like voice 297× (306×: speech is the slowest
+  input of both); a carrier sweeping 800 → 2400 Hz in 60 s 2,090× (3,230×: every AFC correction in ACQUIRE re-mixes
+  the history and feeds the AFC again); L20 late starts 8,800–9,100× (1,030–8,900×). The longest single
+  `process_sample()` call: 127 µs (169 µs). **One-time costs** of a lock that keeps the history: re-mixing a full
+  history (2400 blocks at cap 32) ≤ 13 µs, feeding the AFC from it ≤ 10 µs, `settle_lock()` ≤ 17 µs, one replay step
+  (64 blocks) 16–61 µs (the most on speech-like audio, whose history holds many candidates); a full replay 0.7 ms
+  (2.3 ms on speech), spread over 38 blocks heard. *Expected* on an ESP32 at 240 MHz (assuming 50–200× the PC's
+  time for this code; no board measured, §11.2 P5): a replay step 1–12 ms per block heard, a full replay 35–140 ms
+  (up to 0.5 s on speech) over 38 ms of audio, so once per lock that kept a full history the decoder falls up to
+  about 0.1 s (0.4 s on speech) behind real time and then catches up: the audio input must buffer that much
+  (`rx_esp32`'s DMA pool holds 80 ms). A smaller `k_rescan_blocks` spreads the burst but lengthens the catch-up,
+  during which a short sync train could pass unsynced (every preset's tune lasts about 256 ms; its train lasts 64 ms
+  at T = 8 ms and 32 ms at 4 ms).
 - *Measured* AVR encoder ISR (B5, ATmega328P cycle model at 16 MHz): max 1,011 of the 2,000 cycles per 8 kHz tick,
   mean 494–628 cycles (load 25–32 %), no lost tick, output identical to the host encoder.
 - Targets: ESP32 and STM32F4 < 5 % in TRACK and < 10 % in ACQUIRE with the watch; ESP8266 at 160 MHz ≈ 10–12 % in
@@ -1705,24 +1828,31 @@ v0.3 *measured* by the long suite (2026-09-27; v0.1b's values in brackets):
   blanker and without; on clean AWGN at the A1 point the blanker changes nothing (36 against 36 bit errors, ratio
   1.00) (v0.1b: the same).
 - **C7** receiver AGC 1/300 ms at the A1 point: 1.70× the no-AGC BER, pass (v0.1b: 2.12, open); `hf`: 2.00 (reported).
-- **C8** steady carrier (§0.8 G3): +6 dB at 250–1000 Hz away, 0 dB SNR: BER ≤ 2.2e-5 with 82–100 % of the bytes
-  delivered (pass); acquisition with +6 dB at ±250 Hz 95 % / 98 %, with +12 dB at ±350 Hz 96 % / 99 %, ±400 Hz
-  97 % / 98 %, ±500 Hz 97 % / 100 %, ±1000 Hz 100 % (pass). Reported: +12 dB at ±250 Hz 22 % / 32 %, at ±300 Hz
-  80 % / 83 % (with 155–159 wrong bytes), +9 dB at ±250 Hz 79 % / 86 %; 100 Hz away no lock (v0.1b: the same).
+- **C8** steady carrier (§0.8 G3): +6 dB at 250–1000 Hz away, 0 dB SNR: BER ≤ 1.9e-5 with 85–100 % of the bytes
+  delivered (pass); acquisition with +6 dB at ±250 Hz 96 % / 97 %, with +12 dB at ±350 Hz 98 % / 99 %, ±400 Hz
+  96 % / 97 %, ±500 Hz 99 % / 100 %, ±1000 Hz 100 % (pass). Reported: +12 dB at ±250 Hz 27 % / 30 %, at ±300 Hz
+  80 % / 73 % (with 140–164 wrong bytes, none at a wrong position), +9 dB at ±250 Hz 82 % / 88 %; 100 Hz away no lock
+  (v0.1b: the same). Since the fast late join (§0.7 I29–I34) single rows moved by up to 10 trials either way (−10 at
+  −300 Hz, +5 at +250 Hz); over the 13 acquisition rows of 100 trials the total is unchanged: 1,062 locks before and
+  after.
 - **C9** keyed CW (20 WPM, equal PEP, ±300 Hz) at +3 dB: 0 errors. **C10** FM with pre- and de-emphasis: the `fm`
   preset 3.6e-5 at CNR 6 dB, 0 errors from 8 dB, 0 bytes lost at 14 dB; `hf` over FM 0 errors (pass). **C15** flat
   transmitter, de-emphasising receiver: `fm` 6.4e-5 at 6 dB, 0 from 8 dB; `hf` 0 (pass). (From 8 dB the gate is BER
   ≤ 1e-4 with 0 extra and 0 shifted bytes, §0.8 G5.)
 - **C11** AM (m = 0.8, 6 kHz IF): `hf_slow` at CNR 2 dB 0 errors (pass); the `am` preset at CNR 6 dB 1.65e-4 (pass,
-  §0.8 G1), below it 8.1e-4 at 5 dB, 2.1e-3 at 4 dB, 4.4e-3 at 3 dB, 1.4e-2 at 2 dB (reported).
+  §0.8 G1), below it 8.1e-4 at 5 dB, 2.1e-3 at 4 dB, 4.4e-3 at 3 dB, 1.4e-2 at 2 dB (reported; since the fast late
+  join 94 % and 55 % of the bytes are delivered at 3 and 2 dB, where the release delivered 90 % and 37 %).
 - **C12** flutter (0.5 ms, 10 Hz), `hf`, 30 dB: BER 7.2e-2 (reported: the level changes inside a package); 0 extra
   bytes of 13,420 released (pass).
 - **L5** clock error ±1000 ppm (TX, RX, both ways), 10 min at T = 16 ms, N = 8 and 32, gate + 3 dB: 0 slips, 0
   errors, one lock and one END each, the measured T 0.007–0.026 % off on average, 0.162 % at worst (pass; the gate
   asks for BER ≤ 1e-4 with 0 extra and 0 shifted bytes, §0.8 G5).
 - **F1, F2** (noise, drifting carriers; 30 min per profile): 0 locks. **F3** keyed CW and **F4** speech-like bursts:
-  0 locks and 0 bytes in the 6 gated runs of 30 min and in the 30 more (15 hours) (pass; v0.1b: 1 lock each; the
-  first v0.3 run: 39 false locks in these 36 runs, before §0.7 I20 and I25). **F5**: 0 CRC-valid wrong packets over F1–F4 and
+  0 locks and 0 bytes in the 6 gated runs of 30 min (pass; v0.1b: 1 lock each; the first v0.3 run: 39 false locks in
+  36 runs, before §0.7 I20 and I25). In the 30 report runs (15 hours) the release had 0 locks, the decoder with the
+  fast late join 1 (speech, `fm`, 3 bytes). Both decoders over 70 more hours of the same scenes (20 more seeds per
+  scene and profile, 40 for speech in `fm`): 12 false locks for the release, 11 now — a rare false lock of both on
+  speech and keyed CW that the 15 hours had not shown (§11.2 P8). **F5**: 0 CRC-valid wrong packets over F1–F4 and
   every C point (166 runs, 28,460 of 41,203 packets delivered). **F6**: longest run of wrong bytes 5 at ≥ gate + 3 dB
   (92 points); below it 15 (A3 `hf` N = 1 at gate − 2 dB, reported); **0 bytes released at a wrong `byte_index` in
   every lock of the 238 L5, A and C points** (the first v0.3 run: 535 in 11 locks). **F7**: 109 N confirmations in the
@@ -1740,12 +1870,35 @@ v0.3 *measured* by the long suite (2026-09-27; v0.1b's values in brackets):
 - **Relock after a fade** (L10, 5 packages faded at 20 dB): every preset and N = 1, 3, 4, 8, 16 either holds the lock
   through the fade (when the fade is shorter than ¾ of the loss window, as for N ≤ 4) or relocks with `late_join`
   within 10 packages; bytes at their exact `byte_index`, 0 wrong, 0 extra.
-- **Cold late join** (L20 unit version, 72 starts at cap 32: N = 8, 16, 24, 32 × T = 8, 16, 32 ms × gate + 3 dB and
-  20 dB, implementation step): 72 of 72 joined, 0 wrong and 0 extra bytes; 42 of 72 within 6 packages of the
-  receiver's start, the slowest after 26 packages. **L20 long** (*measured* 2026-09-27, 20 random starts per point,
-  480 starts): 466 joined (97.1 %), 267 within 6 packages (55.6 %); medians 5.1–11.8 packages (the slowest at
-  T = 8 ms, N = 8); 4 of the 24 joining rows meet the 6-package gate, which stays (§0.8 G4, §11.2); 0 wrong, 0 extra,
-  0 shifted bytes; N = 3, 4, 5, 7, 12 (30 rows): no lock, no byte.
+- **Cold late join, L20 long** (20 random starts per point, 480 starts; *measured* 2026-09-27 with the fast late join
+  of §0.7 I29–I34, the release in brackets): 480 joined (466), **466 within 6 packages, 97.1 %** (267, 55.6 %);
+  medians 4.6–5.8 packages (5.1–11.8), 95 % of the starts within 5.1–6.1 packages (5.4 packages to never); 20 of the
+  24 joining rows meet the 6-package gate (4); 0 wrong, 0 extra, 0 shifted bytes; N = 3, 4, 5, 7, 12 (30 rows): no
+  lock, no byte. The 4 rows below the gate are T = 32 ms with N = 24 and 32 (16, 16, 18 and 16 of 20 within 6
+  packages): the history cannot hold three intervals of those packages, so TRACK starts one package later (§3.12
+  rule 7, §11.2 P2).
+
+| T | N | SNR | joined | within 6 packages | median | 95 % of starts |
+|---|---|---|---|---|---|---|
+| 8 ms | 8 | 7.5 / 20 dB | 19 → 20 / 18 → 20 | 0 → 20 / 0 → 20 | 11.8 → 5.4 / 9.4 → 5.4 | 23.4 → 5.8 / never → 5.7 |
+| 8 ms | 16 | 7.5 / 20 dB | 19 → 20 / 19 → 20 | 2 → 20 / 3 → 20 | 7.2 → 5.0 / 6.8 → 4.9 | 13.3 → 5.4 / 44.4 → 5.4 |
+| 8 ms | 24 | 7.5 / 20 dB | 20 → 20 / 20 → 20 | 9 → 20 / 13 → 20 | 6.4 → 4.8 / 5.8 → 4.7 | 9.6 → 5.3 / 8.3 → 5.1 |
+| 8 ms | 32 | 7.5 / 20 dB | 19 → 20 / 20 → 20 | 15 → 20 / 12 → 20 | 5.6 → 4.6 / 5.8 → 4.9 | 7.5 → 5.1 / 9.5 → 5.2 |
+| 16 ms | 8 | 4.5 / 20 dB | 20 → 20 / 20 → 20 | 2 → 20 / 1 → 20 | 6.4 → 5.3 / 6.5 → 5.2 | 8.9 → 5.6 / 7.7 → 5.6 |
+| 16 ms | 16 | 4.5 / 20 dB | 19 → 20 / 20 → 20 | 17 → 20 / 16 → 20 | 5.7 → 4.9 / 5.7 → 4.8 | 6.1 → 5.3 / 23.9 → 5.3 |
+| 16 ms | 24 | 4.5 / 20 dB | 19 → 20 / 20 → 20 | 14 → 20 / 20 → 20 | 5.6 → 4.9 / 5.3 → 4.6 | 7.5 → 5.2 / 5.7 → 5.1 |
+| 16 ms | 32 | 4.5 / 20 dB | 20 → 20 / 19 → 20 | 16 → 20 / 19 → 20 | 5.1 → 4.7 / 5.2 → 4.9 | 7.4 → 5.1 / 5.7 → 5.2 |
+| 32 ms | 8 | 1.5 / 20 dB | 20 → 20 / 19 → 20 | 15 → 20 / 11 → 20 | 5.7 → 5.3 / 5.9 → 5.3 | 6.5 → 5.7 / 59.0 → 5.4 |
+| 32 ms | 16 | 1.5 / 20 dB | 20 → 20 / 20 → 20 | 20 → 20 / 20 → 20 | 5.3 → 4.7 / 5.1 → 5.0 | 5.7 → 5.2 / 5.4 → 5.3 |
+| 32 ms | 24 | 1.5 / 20 dB | 19 → 20 / 19 → 20 | 8 → 16 / 11 → 16 | 6.1 → 5.6 / 5.8 → 5.7 | 24.3 → 6.1 / 6.6 → 6.1 |
+| 32 ms | 32 | 1.5 / 20 dB | 18 → 20 / 20 → 20 | 11 → 18 / 12 → 16 | 6.0 → 5.7 / 5.9 → 5.8 | never → 6.1 / 6.2 → 6.1 |
+
+  Packages counted from the receiver's switch-on to its `locked`; the SNR pairs are gate + 3 dB and 20 dB.
+- **Where the time goes** (*measured* on the 20 starts of L20's row T = 8 ms, N = 8, 20 dB;
+  `docs/images/late_join_timeline.svg`): the tone lock comes 2.8–4.4 packages (200–320 ms) after the switch-on in both
+  decoders. The release then held only what it heard after that, decoded from the START of a package heard after it
+  (3.0–129 packages after the switch-on) and locked after 7.4–134 packages (2 of 20 never); the decoder now decodes
+  from the first whole package it heard (its START 0.3–1.3 packages after the switch-on) and locks after 4.8–5.7.
 - **Interference from the first sample** (R8): `hf_slow` and `hf` lock at once with every byte; `hf_fast` behind an
   interferer 600 Hz away loses its preamble and joins cold, with its first bytes missing and nothing wrong (§11.2).
 
@@ -2580,9 +2733,12 @@ static const uint8_t k_candidate_scales = 7;
 static const uint8_t k_candidate_scale_blocks[k_candidate_scales] = {3, 4, 6, 8, 11, 16, 22};
 // Detections of one marker at several scales agree within a block; distinct markers are at least T_min
 // (8 blocks) apart. Merging within the T_min half-window keeps every marker of a T_min train. A detection merges only
-// into the newest entry, so one that arrives after another marker's takes an entry of its own: duplicates of one
-// marker can fill the ring (the lead of the slow cold joins, spec 11.2).
+// into the newest entry, so one that arrives after another marker's takes an entry of its own. A scale wider than the
+// marker also holds the data beeps around it (the marker turns their carrier over): its peak moves to an edge of the
+// marker's slot or beyond, up to 0.55 of its own half window away (an echo of the marker; spec 3.7).
 static const float k_candidate_merge_blocks = 0.35f * k_blocks_per_min_slot;
+static const float k_candidate_echo_share = 0.55f;
+static const float k_candidate_offset_scale = 64.0f;  // Candidate::finest_offset units per block
 
 static const float k_mixer_gain = 32.0f;          // Q15 table >> k_mix_shift
 static const float k_cic_overlap = 1.0f / 3.0f;   // n_eff = (M - 1/3) * B for a window of M blocks
@@ -2651,9 +2807,13 @@ public:
     PrefixHistory();
     void reset();  // forgets the contents; the block count continues
     void push(int32_t re, int32_t im, bool blanked);
-    uint32_t end_block() const;  // one past the newest block
+    uint32_t end_block() const;    // one past the newest block
+    uint32_t first_block() const;  // the oldest block held (== end_block() when none is)
     bool window(uint32_t origin_block, float from, float to, Complex& sum) const;  // divided by k_mixer_gain
     bool any_blanked(uint32_t origin_block, float from, float to) const;
+    // Re-mixes the held blocks to another NCO frequency (spec 3.3): the newest block turns by newest_radians, each
+    // older one by angle_per_block more; the prefixes are rebuilt in place (one pass, int32 blocks rounded).
+    void rotate(float newest_radians, float angle_per_block);
 };
 
 // Tone search (spec 3.6): up to 49 Goertzel bins 50 Hz apart over 160-sample blocks, plus a guard bin on each side,
@@ -2683,7 +2843,13 @@ public:
     void clear_exclusion();
     // A tone steady over at least min_products (>= 3) block products turned into a marker train.
     bool train_onset(float& tone_hz, uint8_t min_products) const;
+    // The train onset's first break came in the block where the excluded (held) tone reversed its carrier: a line of
+    // the held signal's own keying, which turns over with it at each of its markers (spec 3.7).
+    bool onset_echo() const;
     bool long_run() const;  // the lock has held k_long_run_blocks blocks (160 ms)
+    // The bin a fast lock would take now, from the first block on (no warm-up, no run): the provisional tune before a
+    // lock (spec 3.6). Its centre frequency.
+    bool leading(float& tone_hz) const;
 };
 
 class FineAfc {
@@ -2700,11 +2866,15 @@ public:
     static float bin_lambda(uint8_t bin);
 };
 
+// A flip candidate (spec 3.7): the position of its strongest detection (block + fraction) and, for the joins, of its
+// finest one, which a wider scale's echo never moves: `finest_offset` 1/k_candidate_offset_scale blocks from it.
 struct Candidate {
     uint32_t block;
     float fraction;
     float q;
     uint8_t scale;
+    uint8_t finest_scale;
+    int16_t finest_offset;
 };
 
 class CandidateList {
@@ -2713,7 +2883,10 @@ public:
 
     CandidateList();
     void reset();
-    bool add(const Candidate& candidate);  // false when merged into a stronger newest entry
+    // Merges a detection into the newest entry within k_candidate_merge_blocks (the stronger one's position and q; the
+    // finer one's finest position), else adds it. False when merged into a stronger newest entry.
+    bool add(const Candidate& candidate);
+    static float finest(const Candidate& candidate);  // its finest detection, blocks after candidate.block
     uint8_t count() const;
     const Candidate& newest(uint8_t age) const;
 };
@@ -3090,16 +3263,26 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
   value without a gate.
 - BER-only and ratio gates also require ≥ 50 % of the bytes delivered (a run that releases nothing cannot pass).
 - Tests marked ′ were adapted during the implementation (§0.7 I19); the row gives the reason.
-- **Status (2026-09-27, the v0.3 release and the API freeze):** `make test` 219/219 (187 core tests, 32 TUI and demo
-  tests); the whole unit suite under ASan + UBSan: 219/219, no report (again at the freeze); `make check_embedded`,
-  `make arduino_check` and `make demo_run` pass. `make test_long`: 31 tests, 30 pass; 370 rows: 260 PASS, 20 FAIL
-  (all L20), 90 REPORT (§8.3–§8.5 give each result; the gate decisions are in §0.8).
+- **Status (2026-09-27, the fast cold late join, §0.7 I29–I34):** `make test` 223/223 (191 core tests, 32 TUI and
+  demo tests); the whole unit suite under ASan + UBSan: 223/223, no report; `make check_embedded`,
+  `make arduino_check`, `make demo_run` and `make docs` (twice, identical) pass. `make test_long`: 31 tests, 30 pass;
+  370 rows: 276 PASS, 4 FAIL (L20 at T = 32 ms with N = 24 and 32), 90 REPORT (§8.3–§8.5 give each result; the gate
+  decisions are in §0.8). At the release and the API freeze: 219/219, and 260 PASS / 20 FAIL (all L20) / 90 REPORT.
 - **No gate asks for literally 0 bit errors** (§0.8 G5, Gustavo, 2026-09-27). With random noise even a perfect
   receiver sometimes makes 1 error in 24,000 bits, so a zero-error gate fails by chance about once per 100 rows (one
   L19 row did, §8.2 L19′). Where a long-suite gate asked for 0 bit errors (L5, L19, C10 and C15 from CNR 8 dB) it
   asks for **BER ≤ 1e-4 with 0 extra and 0 shifted bytes**, on the same bits (≥ 10⁴ per row); the rest of each gate is
   unchanged. Integrity stays strict: an extra byte or a byte at a wrong `byte_index` fails the row. The unit suite
   (`make test`) keeps its criteria.
+- **How to run the tests: the testing guide.** [`docs/testing.md`](docs/testing.md) explains, plain words first and
+  exact details after (§0.9 D7), how to run every check of this plan and how to read what it prints: `make test`
+  (§8.1, §8.2), `make test_long` (§8.3 to §8.5, and the long L5, L19 and L20), `make check_embedded` and
+  `make arduino_check` (§8.6), `make demo_run` (L14), `make tables`, `make docs` and the sanitizer run (B6). For each
+  target it gives the command, what it needs, how long it took on the development Mac and real output; then the
+  harness lines and exit statuses, `FILTER`, a `RESULT` row taken apart, PASS, FAIL and REPORT, the SNR convention and
+  the gates, G5 (§0.8), seeds, determinism and parallelism, the AVR interrupt gate, and how to reproduce a row from its
+  seed and compare runs before and after a change (§0.9 D3). The guide follows this section; where they differ, this
+  file wins.
 
 ### 8.1 Unit tests (`make test`)
 
@@ -3113,7 +3296,7 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | U6 | `protocol_bandwidth_constants_against_encoder_spectrum`, `protocol_transmission_power_inside_band` | (a) one isolated data slot rendered by the encoder (a lone 1 between zeros) at T = 4, 16 and 32 ms: 99 % energy width 4.34/T ± 2 %, −26 dB width 7.0/T ± 2 %, −40 dB width 9.87/T ± 2 %, so `k_band_99_milli` ≥ the measured 99 % width and the −26/−40 dB constants within 2 %; a marker's −40 dB width ≤ 1.1× the data slot's; (b) whole transmissions of 64 random bytes, N ∈ {1, 4, 8, 16, 32}, T = 16 ms: power inside `occupied_band()` ≥ 98.5 %, inside the −26 dB width ≥ 99.0 %; (c) the widths scale as 1/T within 1 % (8 kHz sampling) |
 | U7 | `encoder_energies_and_window_gains` | from encoder output: E1 0.6875, Em 0.5625, g_s 0.9394, g_m 0.8355, each ±0.5 % |
 | U8′ | `dsp_nco_frequency`, `dsp_cic2_response` | NCO within 0.01 Hz; CIC-2 response = analytic sinc² ±0.1 dB; image rejection ≥ 24.9 dB at 800 Hz for B = 8 and 16. *Adapted:* the analytic CIC-2 value at B = 8 is 24.95 dB; the design's "≥ 25 dB" was that value rounded |
-| U9 | `dsp_prefix_history_windows`, `dsp_prefix_history_wrap_and_soak`, `dsp_prefix_history_blank_bits`, `dsp_history_cells_follow_the_cap` | fractional windows = brute force; correct after the 2³² wrap; 24 h-equivalent soak bounded (< 1e-4 relative); blank bits; the cell count (cap + 5)·64 + 32 of this build's cap (caps 16 and 64 compile in `check_embedded`) |
+| U9 | `dsp_prefix_history_windows`, `dsp_prefix_history_wrap_and_soak`, `dsp_prefix_history_blank_bits`, `dsp_history_cells_follow_the_cap`, `dsp_prefix_history_rotate` | fractional windows = brute force; correct after the 2³² wrap; 24 h-equivalent soak bounded (< 1e-4 relative); blank bits; the cell count (cap + 5)·64 + 32 of this build's cap (caps 16 and 64 compile in `check_embedded`); **`rotate()`** (new, §0.7 I29): a zero turn changes nothing, and after turning 900 blocks by newest + step·(newest − k) every window of 1–60 blocks equals the brute-force sum of the turned blocks within 1e-5 of the blocks' magnitude (*measured* 8.4e-7), blocks pushed afterwards continue the rebuilt sums, blank bits stay, `first_block()` is the origin |
 | U10 | `dsp_quantile_tracker`, `dsp_noise_tracker` | QuantileTracker mean ±5 % on exponential noise after 10⁴ inputs; NoiseTracker unbiased on impulsive noise, bounded moves on one impulse, fast start from a far seed |
 | U11 | `dsp_smart_line` | `equal_likelihood_ratio`: the §3.10 table ±0.005; clamps at 0.50 and 0.75; 0.75 for a² ≤ 0 |
 | U12 | `dsp_flip_measure` | balanced flip κ > 0.9; continuous tone κ < −0.9; a one-sided onset q_bal < 0 |
@@ -3134,7 +3317,7 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | U27′ | `decoder_u27_noise_estimate` | checked through the SNR report (its crest is exact at these levels): `hf` with N = 1, 2 and 8 from the gate to gate + 10 dB (5 dB steps, 3 runs each): within ±1 dB; N = 1 at 30 dB, where only half-quiet gaps exist: the report ≥ 27 dB (the noise bias ≤ +3 dB) and every byte with 0 bit errors. *Adapted:* the noise estimate is not exposed by the API; and the +3 dB bound at 30 dB contradicted §3.10's own marker-tail analysis until the half-quiet gaps were limited to reports below 15 dB (§0.7 I15) |
 | U28 | through `decoder_l10_relock_after_fade`, `decoder_l6_preamble_fades`, `decoder_l8_flywheel_and_loss` (the byte assembler is private) | packages released with gaps (N ∈ {1, 3, 4, 8, 16}): exactly the complete bytes, each at its `byte_index`, with the OR of its packages' flags; nothing mixes bits across a gap (0 wrong, 0 extra, 0 shifted); a partial byte is discarded at `end`/`lost` |
 | U29 | `protocol_band_functions_exact`, `protocol_width_table`, `protocol_passband_valid_and_fit`, `protocol_presets_in_typical_filters`, `protocol_shift_tolerance_follows_the_search`; the soft-float scans of `check_embedded` and `arduino_check` | `occupied_band`, `width_26db_hz`, `width_40db_hz` equal the integer formulas for every T from 4000 to 128000 µs in 1 ms steps and every tone in 300..2700; the §1.5 tables exactly, the filter's room and the shift tolerance (the 16 ms example: 1362–1638 Hz, margins 1062/1062, tolerance 1062; `fm` at 1200 Hz in 1.8 kHz −200/+350); `passband_fit` negative margins outside; **one search rule** (new, §0.7 A9): `search_range(passband, min_slot_us)` equals `DecoderConfig::search_range()` for every `min_slot_ms` from `k_min_window_slot_ms` to `k_max_window_slot_ms` (4..32) and passbands on a 50 Hz grid (93,960 cases); for 269,122 valid senders (T 4..128 ms, pitches 300..2700 Hz, six filters) the shift tolerance keeps the moved pitch inside the search of the receiver whose window holds T, never exceeds the filter's room and keeps its `fits`; a receiver's fit stops at its own search (`fm` at 1100 Hz: −100/+1350 Hz) and never goes below 0; no float routine in the AVR encoder objects nor in the linked `tx_uno` |
-| – | `dsp_candidate_list_merge`, `demo_cli_numbers_and_names`, `demo_cli_rates_and_numbers_in_words`, `demo_cli_bandwidth_line`, `demo_cli_packetize_and_read_file`, `channel_*` (35) | building blocks; the demo helpers (the §7 bandwidth line exactly, incl. `-1062/+462 Hz` in 300–2100 Hz, "38 Hz below", "25 Hz below and 25 Hz above", the invalid passband, and the received band 1442–1718 Hz for a measured 1580.2 Hz and 15.9996 ms with its shift −1142/+982 Hz; the `fm` preset's line −500/+950 Hz, `hf` in a 3.0 kHz filter ±1200 Hz, an `fm` receiver's −100/+1350 Hz); the channel simulator's physics (§6.4) |
+| – | `dsp_candidate_list_merge` (a stronger detection within the merge distance takes the entry's position, the finest one keeps its finest position: a chain of wider echoes never walks it off the marker, §0.7 I33), `demo_cli_numbers_and_names`, `demo_cli_rates_and_numbers_in_words`, `demo_cli_bandwidth_line`, `demo_cli_packetize_and_read_file`, `channel_*` (35) | building blocks; the demo helpers (the §7 bandwidth line exactly, incl. `-1062/+462 Hz` in 300–2100 Hz, "38 Hz below", "25 Hz below and 25 Hz above", the invalid passband, and the received band 1442–1718 Hz for a measured 1580.2 Hz and 15.9996 ms with its shift −1142/+982 Hz; the `fm` preset's line −500/+950 Hz, `hf` in a 3.0 kHz filter ±1200 Hz, an `fm` receiver's −100/+1350 Hz); the channel simulator's physics (§6.4) |
 
 ### 8.2 Loopback and behaviour (`make test`, `tests/test_decoder.cpp` unless stated)
 
@@ -3159,7 +3342,7 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | L17′ | `decoder_l17_chain_read_as_train` | senders with N ∈ {1, 2, 4, 7} at T = 8 ms (the `ssb` T_min, (N + 1)·T inside its window), heard from package 3 on, clean and at 15 dB: 0 `locked`, 0 bytes. *Adapted:* 60 s per case in the unit suite (the design's 5 minutes are not run) |
 | L18 | `decoder_event_fields` | `hf` at 15 dB, 12 bytes: every event type filled as §5.1; slot/package events precede the bytes they complete; DCD = state ≠ SEARCH; `bits_per_package()` N from TRACK on; `reset()` in TRACK gives `lost(reset)`, then `state` |
 | L19′ | `decoder_l19_passband`; long suite `L19_passband` | the channel's receiver filter and the decoder's passband set to 300–2100 Hz (`hf` and `hf_fast` at 1200 Hz), 300–2700 (`hf_fast`), 200–2900 (`hf_slow`), 100–3000 Hz (`hf`); 20 bytes at gate + 3 dB with the pitch shifted down by its printed tolerance below − 10 Hz and up by the tolerance above − 10 Hz (`passband_fit(config)`, which stays inside the receiver's search range, §0.7 A9): every byte, 0 wrong, 0 extra; a station at 2200 Hz and a receiver whose passband ends at 1800 Hz: no lock, no byte. The long L19: the five presets in the four SSB filters, both sides (40 rows, 2.4·10⁴ bits each), gate "BER ≤ 1e-4, 0 extra, 0 shifted, loss ≤ 1 %, ≥ 10⁴ bits" (§0.8 G5; it was "0 bit errors, 0 extra"); a shifted pitch outside the receiver's search range (none since A9) would be reported, with an integrity gate (BER ≤ 1e-4, 0 extra, 0 shifted; it was 0 wrong); four stations outside the search: no lock, no byte. *Adapted:* the design's tolerance was the filter's room alone, which the search range (300..2700 Hz, from 1000 Hz below 8 ms) clipped (9 long-suite FAILs); since A9 the printed tolerance is the one the receiver follows, and both sides are tested (the design shifted both by the smaller one). *Measured* (long, 2026-09-27): 44 of 44 rows pass, the 9 formerly out-of-range shifts included (0 errors, 100 % delivered); `hf_fast` in the 1.8 kHz filter shifted −915 Hz (pitch 585 Hz) has 1 bit error in 24,000, BER 4.2e-5, 0 extra, 0 shifted (a zero slot read at 54 % of the reference against a 52 % line, package 139 of 200: noise; the same condition over 384,000 more bits: 0 errors): it failed the former 0-bit-error gate by chance and passes G5's |
-| L20′ | `decoder_l20_cold_late_join`; long suite `L20_cold_late_join` (20 starts per point) | N ∈ {8, 16, 24, 32} × T ∈ {8, 16, 32} ms (within the cap and 1152 ms), 200 bytes, the receiver started at 3 random points between package 2 and 12 packages before the end, at gate + 3 dB and at 20 dB (72 starts at cap 32): ≥ 95 % joined with `late_join`, 0 wrong and 0 extra bytes (bytes aligned); the time to the lock is reported, not gated. N ∈ {3, 4, 5, 7, 12}, started inside package 5, clean and at 20 dB: 0 `locked`, 0 bytes. *Adapted:* the design's "within 6 packages" is not reachable with short packages given the tone lock, the fine AFC's first look (up to 1 s on data), the 3 intervals, 2 folded packages and the full guard (*measured*: 72/72 joined, 42 within 6 packages, the slowest after 26; §11.2). The long L20 still gates "within 6 packages in ≥ 95 % of starts, 0 wrong, 0 shifted" (§0.8 G4). *Measured* (long, 2026-09-27, 480 starts): 466 joined, 267 within 6 packages (55.6 %), 0 wrong, 0 extra, 0 shifted; 4 of 24 joining rows pass, 20 FAIL (the open defect of §11.2); the 30 non-joining rows (N = 3, 4, 5, 7, 12): 0 locks, 0 bytes, pass |
+| L20′ | `decoder_l20_cold_late_join`; long suite `L20_cold_late_join` (20 starts per point) | N ∈ {8, 16, 24, 32} × T ∈ {8, 16, 32} ms (within the cap and 1152 ms), 200 bytes, the receiver started at 3 random points between package 2 and 12 packages before the end, at gate + 3 dB and at 20 dB (72 starts at cap 32): ≥ 95 % joined with `late_join`, 0 wrong and 0 extra bytes (bytes aligned); the time to the lock is reported, not gated. N ∈ {3, 4, 5, 7, 12}, started inside package 5, clean and at 20 dB: 0 `locked`, 0 bytes. *Adapted:* the design's "within 6 packages" is not reachable with short packages given the tone lock, the fine AFC's first look (up to 1 s on data), the 3 intervals, 2 folded packages and the full guard (*measured* at the release: 72/72 joined, 42 within 6 packages, the slowest after 26; with the fast late join, §0.7 I29–I34: 72/72, 69 within 6, the slowest after 17.9; §11.2). The long L20 still gates "within 6 packages in ≥ 95 % of starts, 0 wrong, 0 shifted" (§0.8 G4). *Measured* (long, 2026-09-27, 480 starts, with the fast late join of §0.7 I29–I34): 480 joined, 466 within 6 packages (97.1 %; the release: 466 joined, 267 within 6), 0 wrong, 0 extra, 0 shifted; 20 of 24 joining rows pass, 4 FAIL (T = 32 ms with N = 24 and 32, structural: §3.12 rule 7, §11.2 P2); the 30 non-joining rows (N = 3, 4, 5, 7, 12): 0 locks, 0 bytes, pass. Table in §4.4 |
 | R1 | `decoder_r1_watch_ignores_train_lines` | T = 20 ms with 12 markers at 2000 Hz (`ssb`) and T = 8 ms with 32 markers at 2313 Hz (`am`), the shortest tune (6 slots), 160 sample alignments of a tone-search block: no alignment loses a byte |
 | R2 | `decoder_r2_saturated_input` | input clipped ×1.5, ×2, ×4 (`hf_slow`), ×1.8, ×3 (`hf`), ×4 (`hf_fast`): 0 lost, wrong or extra bytes |
 | R3 | `decoder_r3_retry_after_a_lone_tune` | a tune heard alone (its train and packages faded), the station's retry 5.3, 8 and 12 s later on the same pitch, 15 dB: every retry byte, 0 wrong or extra |
@@ -3177,6 +3360,9 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | R15 | `decoder_guard_long_packages` (§0.7 I27) | the five N = 32 short messages at the `hf` gate that the full guard refused as aliases: 0 `lost(alias)`, 0 extra bytes |
 | R16 | `decoder_late_tune_lock` (§0.7 I20) | T = 128 ms, the tune cut to its last 2 slots, 16 bytes, 20 dB, 3 seeds: one lock from the preamble (no late join), every byte, 0 wrong, 0 extra |
 | R17 | `decoder_no_phantom_package_past_a_faded_end` (§0.7 I27) | N = 16, 6 bytes, 3 train markers and both END markers faded, 20 dB, 3 seeds: 0 wrong, 0 extra (a package measured past the end was released) |
+| R18 | `decoder_cold_join_from_the_first_block` (§0.7 I29, I30, I33) | T = 8 ms, N = 8, 200 bytes, 20 dB, pitches 1500, 1522 and 1544 Hz (on a search bin and between two), 8 random starts each: all 24 joined with `late_join`, 0 wrong, 0 extra, median ≤ 5.6 packages and ≥ 20 of 24 within 6 (*measured*: 24 joined, 21 within 6, median 5.43; the release: 22 joined, none within 6, median 9.67) |
+| R19 | `decoder_lock_on_data_is_tuned` (§0.7 I31) | a lock on keyed data between two search bins (1512, 1525, 1531, 1538 Hz; T = 8 and 16 ms; 5 starts each): after the lock the NCO stays within the fine AFC's ±30 Hz of the pitch, and within 2 Hz 300 ms later (*measured*: 25.0 Hz and 0.47 Hz; the release: 76 Hz, and 76 Hz at 300 ms) |
+| R20 | `decoder_watch_ignores_keying_lines` (§0.7 I32) | N = 24 and 32 at T = 8 ms, 20 dB, 12 random starts each: the watch never leaves the held data (a tone jump over 100 Hz) within 6 packages (*measured*: 0 of 24; the release: 4 of 24, which then joined 4–14 packages late) |
 
 ### 8.3 AWGN regression (`make test_long`, ≥ 2·10⁵ bits per point)
 
@@ -3214,14 +3400,15 @@ unlimited_decode [--in SPEC] [--profile ssb|am|fm] [--min-slot-ms N] [--passband
 | F1 | `F1_noise_false_lock` | 30 min of receiver noise per profile (ssb: USB noise; am/fm: unmodulated carrier, 6 levels): 0 `locked`, 0 bytes | *measured* PASS, 3 of 3: 0 locks, 0 bytes |
 | F2 | `F2_carrier_false_lock` | 30 min of noise + a steady carrier at +20 dB with slow drift, per profile: 0 `locked` | *measured* PASS, 3 of 3: 0 locks |
 | F3 | `F3_cw_false_lock` | 30 min of noise + keyed CW, 12–30 WPM, random pitches and levels, per profile: 0 `locked` (v0.1b: 1 lock in ssb, open); 5 more seeds × 30 min REPORT | *measured* PASS, 3 of 3: 0 locks; the 5 more seeds: 0 locks, 0 bytes |
-| F4 | `F4_speech_false_lock` | 30 min of noise + speech-like bursts (4 Hz syllabic), per profile: 0 `locked` (v0.1b: 1 lock in fm, open); 5 more seeds × 30 min REPORT | *measured* PASS, 3 of 3: 0 locks; the 5 more seeds: 0 locks, 0 bytes |
+| F4 | `F4_speech_false_lock` | 30 min of noise + speech-like bursts (4 Hz syllabic), per profile: 0 `locked` (v0.1b: 1 lock in fm, open); 5 more seeds × 30 min REPORT | *measured* PASS, 3 of 3: 0 locks; the 5 more seeds: 0 locks at the release, 1 lock (3 bytes, `fm`) with the fast late join — the rare false lock both decoders share (70 more hours: 12 and 11, §11.2 P8) |
 | F5 | `F5_crc_valid_wrong_packets` | everything in F1–F4 and every C point: 0 CRC-valid wrong packets | *measured* PASS: 0 in 166 runs (28,460 of 41,203 packets delivered) |
 | F6 | `F6_wrong_byte_runs` | all L5, A and C points at ≥ gate + 3 dB: no run of more than 8 consecutive wrong bytes (the alias signature); below gate + 3: REPORT | *measured* PASS: longest run 5 (92 points); below gate + 3 dB: 15 (report); bytes at a wrong `byte_index` in any lock of the 238 L5/A/C points (report): 0 |
-| F7 | `F7_package_learning` | candidates formed and confirmed per hour in F1–F4, REPORT; any confirmation must still fail the guard (0 `locked`) | *measured* PASS: 109 N confirmations in the gated runs, 0 locks; up to 44 confirmations per hour (`fm`, speech) |
+| F7 | `F7_package_learning` | candidates formed and confirmed per hour in F1–F4, REPORT; any confirmation must still fail the guard (0 `locked`) | *measured* PASS: 101 N confirmations in the gated runs (the release: 109), 0 locks; up to 40 confirmations per hour (`fm`, speech) |
 
 The long suite also runs `L5_clock_error_10_min`, `L19_passband` and `L20_cold_late_join` (§8.2): L5 PASS (12 of 12;
 0 bit errors; T 0.162 % off at worst); L19 PASS (44 of 44; one row with 1 bit error in 24,000, below the §0.8 G5
-gate, §8.2 L19′); L20 FAIL (20 of the 24 joining rows, §0.8 G4; the 30 non-joining rows pass).
+gate, §8.2 L19′); L20 FAIL (4 of the 24 joining rows, T = 32 ms with N = 24 and 32, §0.8 G4, §11.2 P2; at the
+release 20 of 24; the 30 non-joining rows pass).
 
 ### 8.6 Build and embedded (`make check_embedded`, `make arduino_check`)
 
@@ -3230,9 +3417,9 @@ gate, §8.2 L19′); L20 FAIL (20 of the 24 joining rows, §0.8 G4; the 30 non-j
 | B1 | Warning-clean builds | host clang; `avr-g++` (the whole of `src/`); `xtensa-esp32-elf-g++`; `arm-none-eabi-g++` when installed; the decoder at caps 16 and 64 besides the default 32; queues 16, 64, 128 on AVR; no heap, exception or RTTI symbol in the core | pass; `arm-none-eabi-g++` not installed (skipped) |
 | B2 | Heap trap | a link with trapping `malloc`/`new` decodes every preset, N = 1 and N = 32 at 16 ms, a packet and a WAV round trip: 0 wrong, 0 extra, 1 lock and 1 end each | pass |
 | B3 | Arduino | `tx_uno` for uno and every `*_esp32` example compile with no library or sketch warning | pass (flash and RAM in §3.15) |
-| B4 | Speed | PC decode ≥ 500× real time; ESP32 ≤ 5 % in TRACK; ESP8266 and STM32 cycle counts go to the porting guide | PC 7,400–16,400× real time tracking, 4,000× on noise (the final decoder); ESP32 not measured (no hardware, §11.2) |
+| B4 | Speed | PC decode ≥ 500× real time; ESP32 ≤ 5 % in TRACK; ESP8266 and STM32 cycle counts go to the porting guide | PC 7,400–16,400× real time tracking, 4,000× on noise (the final decoder); with the fast late join 7,900–16,300× on the presets, 4,260× on noise, 2,090× on a sweeping carrier and 8,800–9,100× on L20 starts; a speech-like voice 297× (the release 306×; an input the gate's measurement did not include), §3.15; ESP32 not measured (no hardware, §11.2) |
 | B5 | AVR encoder | `sizeof(Encoder) − k_queue_size` ≤ 96 B; no soft-float symbol in the ISR images nor in the linked `tx_uno`; ISR on the ATmega328P model: output identical to the host encoder, max ≤ 1,600 cycles, mean load ≤ 50 %, no lost 8 kHz tick | 81 B; no soft float; max 1,011 cycles, mean 494–628 (load 25.0–31.7 %), 0 mismatches, 0 lost ticks |
-| B6 | Sanitizers (manual) | the unit suite under ASan + UBSan: all pass, no report | the whole unit suite, 219/219 (the TUI and demo tests included), no report |
+| B6 | Sanitizers (manual) | the unit suite under ASan + UBSan: all pass, no report | the whole unit suite, 223/223 (the TUI and demo tests included), no report |
 
 ---
 
@@ -3324,6 +3511,17 @@ fences, F1–F4 at 0 locks with its confirmation rules, C13 AGC + fading fixed b
   demos' `--help` and refusal texts, now printed from the constants, are byte-identical to the release's. `make docs`
   twice: identical checksums, and identical to the committed `docs/` (no figure or example depends on the changed
   code). The §5 listings regenerated from the headers and compared line by line (`listings.py`): all nine match.
+- **Fast cold late join** (`scratchpad/l20fix/`, 2026-09-27, §0.7 I29–I34): `make test` 223/223; the unit suite under
+  ASan + UBSan 223/223, no report; `make check_embedded` (the same ISR figures), `make arduino_check`, `make demo_run`
+  and `make docs` twice (identical checksums; against the committed `docs/`, `ber_awgn.svg` changed in its points
+  below the gates — more transmissions locked there, the 1e-3 points unchanged —, `receiver_decision.svg` in one bar,
+  and `late_join_timeline.svg` is new) pass. `make test_long` 8 min 50 s on 10 cores: 276 PASS / 4 FAIL / 90 REPORT;
+  against the freeze run row by row: 16 L20 rows FAIL → PASS, no other verdict changed, 121 rows changed only their
+  values (§4, §8; the one integrity count that grew is F4's report row, 1 false lock: §11.2 P8). The four new unit
+  tests fail on the release. Probes (scratch): an exact replica of L20's rows, a timeline probe (tone lock, TRACK,
+  first package decoded, lock), the off-grid join survey (320 starts), the tone-estimate survey (2640 data locks),
+  replicas of C8, C9 and F3/F4 (the false-lock statistics: 70 hours per decoder), a CPU probe (speed, the longest
+  call, the one-time costs), and the sizes at every cap on the host and on xtensa.
 
 ---
 
@@ -3338,12 +3536,13 @@ fences, F1–F4 at 0 locks with its confirmation rules, C13 AGC + fading fixed b
 | N ≤ 7 loses the 8:1 alias protection by construction at the fast end of a window | learning, guard and audit; L17; the presets use N ≥ 8 |
 | N = 1 is fragile (a faded marker can shift every bit; half the slots are markers, the 99 % band is 6.5/T) | exact-start rule with the carrier parity (V4, §0.7 I4), the 9-package guard, the N = 1 END rule (V16); L6, L9 |
 | Short messages at N = 32 (4 packages) lock less often near the gate (98.75 % / 86.67 %) | reported (§0.8 G2); 64-byte messages 100 % / 97 %; the presets use N ≤ 16 |
-| Cold late joins are slow (L20 long: 267 of 480 starts within 6 packages; 466 of 480 joined) | the gate stays and fails (§0.8 G4); the lead is in §11.2 |
+| Cold late joins at T = 32 ms with N = 24 and 32 take more than 6 packages in 10–20 % of the starts (L20 long: 466 of 480 starts within 6 packages overall) | the gate stays and fails on those 4 rows (§0.8 G4); the options are in §11.2 P2 |
+| The replay after a lock that kept a full history costs an ESP32 an estimated 35–140 ms (up to 0.5 s on speech-like audio) within 38 ms of audio | spread over the blocks heard (`k_rescan_blocks`, §3.15); the audio input must buffer the backlog; to be measured on a board (§11.2 P5) |
 | A sender whose preamble is hidden behind an interferer present from its first sample (`hf_fast`) | joined cold with its first bytes missing (R8); §11.2 |
-| F3/F4 false locks and C7/C8 were open in v0.1b | v0.2's single-tone hardening (§0.4), the package learning, the tune rule and the beep-shape guard (§0.7 I20, I25): F3, F4 0 locks in 36 runs of 30 min, C7 1.70× (pass); C8 passes with the gates of §0.8 G3, a strong carrier 250–300 Hz away stays open (§11.2) |
+| F3/F4 false locks and C7/C8 were open in v0.1b | v0.2's single-tone hardening (§0.4), the package learning, the tune rule and the beep-shape guard (§0.7 I20, I25): F3, F4 0 locks in the 6 gated runs of 30 min; longer runs show a rare false lock on speech and keyed CW, about 1 in 6 hours for the release and now (§11.2 P8); C7 1.70× (pass); C8 passes with the gates of §0.8 G3, a strong carrier 250–300 Hz away stays open (§11.2) |
 | A near-zero BER gate (§0.8 G5: BER ≤ 1e-4 where a few 1e-6 is expected) lets a rare systematic bit error pass unnoticed | every row still prints its bit errors and their 95 % bound; extra and shifted bytes stay gated at 0; F6 gates runs of wrong bytes and reports every byte at a wrong position; a row with bit errors is still investigated (the L19 one: noise, §8.2 L19′) |
 | The v0.2 robustness fixes were validated on the multi-bit signal | re-validated on one pitch by R1–R10 (pass) |
-| Memory: 16.2 KB at the Arduino cap 16, 25.3 KB at cap 32 (*measured*) | the cap is a build define; §1.6 table; the gate of §3.15 (at least 152 B to spare) |
+| Memory: 16.3 KB at the Arduino cap 16, 25.3 KB at cap 32 (*measured*) | the cap is a build define; §1.6 table; the gate of §3.15 (112 B to spare on the host at cap 16, 124 B on xtensa) |
 | The bandwidth constant is a simulation result | U6 measures the real encoder output |
 | Long packages at slow T (AFC, reference line) | (N + 1)·T ≤ 1152 ms (V8); R5 |
 | ALC or compression flattens the beeps and the twist | the tune tone sets the level; operating guide (§12.2) |
@@ -3394,18 +3593,19 @@ implementation's own decisions are listed in §0.7.
 
 ### 11.2 Open problems (v0.3 release, 2026-09-27)
 
-None of them releases a byte at a wrong position; C5's costs one extra byte, the others cost bytes, time or a missing
-measurement.
+None of them releases a byte at a wrong position of a real transmission; C5's costs one extra byte, P8's false locks
+release a few bytes nobody sent, the others cost bytes, time or a missing measurement.
 
 | # | Problem | In plain words | Evidence, next step |
 |---|---|---|---|
 | P1 | **N = 16 with 3 faded sync markers:** 1 of 2800 preamble-fade transmissions at gate + 3 dB lost its first 8 bytes (the transmission was then joined cold). | With 3 of 8 sync markers gone, T measured from 5 markers can be about 1.7 % off (the design assumed 0.5 %); over the 17 slots to the first STOP that exceeds the ±0.29 T search, so the STOP is missed. No wrong byte. | §4.4; to be studied (e.g. a wider search for the first STOP after a short train) |
-| P2 | **Slow cold late joins (L20):** in the long suite 267 of 480 starts lock within 6 packages (55.6 %), 466 of 480 join at all; medians 5.1–11.8 packages, some starts need 7–19 s or never join. The gate stays and fails (§0.8 G4). | Joining needs the tone lock, the fine AFC's first look (up to 1 s on data), three intervals, two folded packages and the full guard. Beyond that: the receiver notes every candidate twist in a ring of 16; one marker seen at several scales can take up to 5 entries (a detection merges only into the newest entry), and they push the older markers of the chain out of the ring before the join can use them. | §4.4, L20′. Lead: de-duplicate the candidate ring in `dsp` (merge a detection into any entry within the merge distance). Tried during the integrity fix on the two C8 points with a +6 dB carrier 250 Hz below / above (168 transmissions each): merging into any entry locked 152 / 150–153 (144 / 147 without), a 24-entry ring 149 / 152; an earlier merge attempt broke R8, so it needs its own full validation. |
+| P2 | **Slow cold late joins at T = 32 ms with N = 24 and 32 (L20):** 16, 16, 18 and 16 of 20 starts lock within 6 packages (80–90 %); the gate asks 95 % and stays (§0.8 G4). Everywhere else L20 passes: 466 of 480 starts within 6 packages, medians 4.6–5.8 (the release: 267, medians 5.1–11.8), since the fast late join (§0.7 I29–I34). | A join needs three equal intervals between START markers, and TRACK starts at the oldest of them the history holds. A package of 25 or 33 slots of 32 ms is 800 or 1056 history blocks, and the history holds 2400 at cap 32 (§3.15): when the fourth marker completes the chain, the first has left, TRACK starts one package later, and the lock comes at about 5.1–5.2 + U packages (U: where the first START fell, uniform over a package). A structural floor of the history's length, not a defect of the search. | §3.12 rule 7, §4.4, L20′. Options, each Gustavo's decision: (a) a longer history — about 20 more blocks let N = 24 join from its first marker, N = 32 needs about 790 more (≈ 6.4 KB at cap 32, above the size gate of §3.15); (b) per-package fold measurements kept instead (≈ 250 B per package and hypothesis: above the gate too); (c) a join on two intervals with the third required before `locked` (a rule change of §3.12 and a new false-lock exposure to validate on F3/F4); (d) a gate decision for these rows. |
 | P3 | **`hf_fast` behind an interferer present from the first sample** (R8): the preamble is lost; a cold join recovers the transmission with its first bytes missing. | The tone search holds the interferer when the tune starts, and the watch leaves it only at the train — too late to read the train. | R8′; to be studied |
-| P4 | **A strong carrier close to the pitch (C8):** with a carrier 12 dB above the tone 250 Hz away the receiver finds the signal in 22–32 % of the tries, 300 Hz away in 80–83 % (with 155–159 wrong bytes in the 300 Hz trials, none at a wrong position); gated only from 350 Hz (§0.8 G3). A +6 dB carrier 250 Hz away costs about 8 % of the bytes since the tune rule (§0.7 I20). | A loud carrier this close to the pitch keeps the receiver from finding the tune and the sync train in most tries (the first run was no better: 24–32 %). The cause is not analysed in detail; the tune rule removed accidental recoveries the old decoder had next to a +6 dB carrier. | §4.3; no cheap and safe fix found during the integrity fix; P2's candidate-ring lead recovered part of the +6 dB loss in a trial (152 / 150–153 of 168 locks, against 164 / 158 before the tune rule and 144 / 147 after it) |
+| P4 | **A strong carrier close to the pitch (C8):** with a carrier 12 dB above the tone 250 Hz away the receiver finds the signal in 27–30 % of the tries, 300 Hz away in 73–80 % (with 140–164 wrong bytes in the 300 Hz trials, none at a wrong position; the release: 22–32 % and 80–83 %); gated only from 350 Hz (§0.8 G3). A +6 dB carrier 250 Hz away costs about 8 % of the bytes since the tune rule (§0.7 I20). | A loud carrier this close to the pitch keeps the receiver from finding the tune and the sync train in most tries (the first run was no better: 24–32 %). The cause is not analysed in detail; the tune rule removed accidental recoveries the old decoder had next to a +6 dB carrier. | §4.3; no cheap and safe fix found during the integrity fix; P2's candidate-ring lead recovered part of the +6 dB loss in a trial (152 / 150–153 of 168 locks, against 164 / 158 before the tune rule and 144 / 147 after it) |
 | P5 | **ESP32 CPU load not measured** (B4); **no ARM build** (`arm-none-eabi-g++` not installed). | The targets of §3.15 are estimates until a board runs `loopback_esp32`; the core has not been compiled for a Cortex-M. | §3.15, §8.6 |
 | P6 | **One extra byte after a lost END in QSB (C5):** `hf_slow` at 18 dB in 20 dB-deep QSB released 1 extra byte (the first run too). | When an END falls into a fade, TRACK flywheels on, crosses the 1.7 s gap and reads the next transmission's sync train as the END markers, so one package of noise before it is taken as data. | C5 (report row); to be studied |
-| P7 | **Slow senders miss some locks just below the gate (A3):** at T = 64 and 128 ms and gate − 2 dB, 4 and 7 of 300 transmissions are not locked (98.67 % and 97.67 %; gate 90 %); 3 of the 4 and all 7 since the tune rule. | On a weak signal the search may lock the tone without seeing it steady; the fine AFC's first large correction then forgets the history (§3.3 step 5). When that happens just before the train, the tune is gone from the history and the tune rule (§0.7 I20) refuses the sync. | A3; to be studied |
+| P7 | **Slow senders miss some locks just below the gate (A3):** at T = 64 and 128 ms and gate − 2 dB, 0 and 1 of 300 transmissions are not locked since the fast late join (100 % and 99.67 %; gate 90 %; the release: 4 and 7). | On a weak signal the search may lock the tone without seeing it steady; the release's fine AFC then forgot the history at its first large correction, and with it the tune the sync must follow (§0.7 I20). It now re-mixes the history instead (§0.7 I30). | A3; the one miss left to be studied |
+| P8 | **A rare false lock on speech and keyed CW beyond the gated runs.** 70 more hours of the F3/F4 scenes (20 more seeds per scene and profile, 40 for speech in `fm`): 12 false locks for the release, 11 with the fast late join (speech: `fm` 6 and 6 in 20 hours, `ssb` 2 and 1, `am` 1 and 0; keyed CW: `fm` 3 and 3, `am` 0 and 1, `ssb` 0 and 0), each releasing 1–10 bytes. The gated runs (6 × 30 min) have none; the long suite's 15 report hours had none at the release and 1 now (speech, `fm`, 3 bytes). | Speech and keyed CW now and then form a tune, a train and a package that pass the package learning and the guard: about once in 6 hours for both decoders, so the release's 0 in 15 hours was luck. The packet layer's CRC keeps such bytes out of applications (F5: 0 CRC-valid wrong packets). | §4.3, F3/F4; to be studied (a longer false-lock soak in the long suite, and what lets these short locks through the guard) |
 
 ---
 
@@ -3413,7 +3613,7 @@ measurement.
 
 Gustavo's request, scheduled **after the core API is stable** (every §8 gate green and the v0.3 API frozen), to be
 done in one go. Updated for the v0.3 API. *State (2026-09-27):* the v0.3 API is frozen (§5.4); the one §8 gate
-still failing is L20, the slow cold late joins (§11.2 P2).
+still failing is L20, now only at T = 32 ms with N = 24 and 32 (§11.2 P2).
 
 ### 12.1 `unlimited_modem` — a real modem on local audio
 
@@ -3486,6 +3686,7 @@ examples) and complete after:
 | **Carrier sign** | Whether the wave is currently upright or upside down; it flips after every marker. |
 | **CIC-2** | A cheap two-stage integrator that turns the mixed samples into blocks. |
 | **Crest** | The peak height of a beep (A); data "1"s and markers share it. |
+| **Echo (of a marker)** | A candidate twist found by a flip window much wider than the marker: the window also holds the beeps around it, so it peaks up to 0.55 of its half window away from the marker (§3.7, §0.7 I33). |
 | **DCD** | Data carrier detect: the receiver is busy with a signal (state ≠ SEARCH). A modem waits for it to clear before transmitting. |
 | **Decision line** | The level a slot must reach to be a 1: the smart line (50–75 % of the reference, ≈ 70 % when weak) or the fixed line (70 %). |
 | **END** | Two markers right after the last STOP: the end of a transmission. |
@@ -3496,7 +3697,7 @@ examples) and complete after:
 | **Frozen API** | The public declarations of §5 (outside the internal `dsp.hpp`): every 0.3 release keeps them exactly; changing one needs a changelog row, a new version and the `library.properties` version (§5.4). |
 | **Guard** | The check of a new lock's first packages before any byte is released. |
 | **Guard bin** | A tone-search bin just outside the search range where no lock is taken: a tone outside the range peaks there instead of in the edge bin. |
-| **History** | The receiver's memory of recent blocks (prefix sums), long enough for one package at the slowest T. |
+| **History** | The receiver's memory of recent blocks (prefix sums), long enough for one package at the slowest T. It is kept from the first tone-search block on, and re-mixed when the receiver's oscillator moves (§3.3). |
 | **Key-down** | A steady beep at full crest; the SNR convention uses its power. |
 | **Late join / relock** | Joining a transmission that is already running: a relock after a fade, from the station memory, or a cold late join without it (N a multiple of 8). Flagged `late_join`. |
 | **LOST** | The receiver gave up the current lock (signal gone, alias, timeout, unsupported, reset). |
@@ -3512,9 +3713,12 @@ examples) and complete after:
 | **Peak / beep** | A data "1": the smooth Tukey-shaped burst of the pitch in one slot. |
 | **PEP** | Peak envelope power: the power at the crest. |
 | **Pitch / tone** | The one audio frequency everything is sent on (300–2700 Hz). |
+| **Provisional tune** | Where the receiver's oscillator sits while it still searches: the centre of the search bin a lock would take now, at most half a bin (25 Hz) from the tone, so that what it hears is kept usable (§3.6). |
 | **PTT / VOX** | Push-to-talk / voice-operated switch: what keys the transmitter; the lead-in and the tune tone give them time. |
 | **QRM / QRN / QSB** | Interference from other stations / atmospheric noise (impulses) / fading. |
+| **Re-mix** | Turning the blocks already in the history as if they had been mixed at a new oscillator frequency all along, instead of forgetting them (§3.3). |
 | **Reference line** | The straight line from the START crest to the STOP crest: how tall a "1" should be at each slot. |
+| **Replay** | Running the candidate search again over the history, oldest block first, so that twists heard before the lock can still complete a join (§3.7). |
 | **Shift tolerance** | How far the radio may be mistuned before the signal leaves the passband or the receiver's pitch search (the room on each side, §1.5). |
 | **Slot, slot length T** | The time unit of the signal; each slot holds one beep, one silence or one marker. T sets the speed. |
 | **Smart line** | The default decision line: the point where a "1" and a "0" are equally likely, between 50 % and 75 % of the reference. |

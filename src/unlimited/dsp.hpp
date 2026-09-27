@@ -23,9 +23,12 @@ static const uint8_t k_candidate_scales = 7;
 static const uint8_t k_candidate_scale_blocks[k_candidate_scales] = {3, 4, 6, 8, 11, 16, 22};
 // Detections of one marker at several scales agree within a block; distinct markers are at least T_min
 // (8 blocks) apart. Merging within the T_min half-window keeps every marker of a T_min train. A detection merges only
-// into the newest entry, so one that arrives after another marker's takes an entry of its own: duplicates of one
-// marker can fill the ring (the lead of the slow cold joins, spec 11.2).
+// into the newest entry, so one that arrives after another marker's takes an entry of its own. A scale wider than the
+// marker also holds the data beeps around it (the marker turns their carrier over): its peak moves to an edge of the
+// marker's slot or beyond, up to 0.55 of its own half window away (an echo of the marker; spec 3.7).
 static const float k_candidate_merge_blocks = 0.35f * k_blocks_per_min_slot;
+static const float k_candidate_echo_share = 0.55f;
+static const float k_candidate_offset_scale = 64.0f;  // Candidate::finest_offset units per block
 
 static const float k_mixer_gain = 32.0f;          // Q15 table >> k_mix_shift
 static const float k_cic_overlap = 1.0f / 3.0f;   // n_eff = (M - 1/3) * B for a window of M blocks
@@ -127,9 +130,13 @@ public:
     PrefixHistory();
     void reset();  // forgets the contents; the block count continues
     void push(int32_t re, int32_t im, bool blanked);
-    uint32_t end_block() const;  // one past the newest block
+    uint32_t end_block() const;    // one past the newest block
+    uint32_t first_block() const;  // the oldest block held (== end_block() when none is)
     bool window(uint32_t origin_block, float from, float to, Complex& sum) const;  // divided by k_mixer_gain
     bool any_blanked(uint32_t origin_block, float from, float to) const;
+    // Re-mixes the held blocks to another NCO frequency (spec 3.3): the newest block turns by newest_radians, each
+    // older one by angle_per_block more; the prefixes are rebuilt in place (one pass, int32 blocks rounded).
+    void rotate(float newest_radians, float angle_per_block);
 
 private:
     bool holds(uint32_t block) const;  // prefix P[block] is stored
@@ -173,7 +180,13 @@ public:
     void clear_exclusion();
     // A tone steady over at least min_products (>= 3) block products turned into a marker train.
     bool train_onset(float& tone_hz, uint8_t min_products) const;
+    // The train onset's first break came in the block where the excluded (held) tone reversed its carrier: a line of
+    // the held signal's own keying, which turns over with it at each of its markers (spec 3.7).
+    bool onset_echo() const;
     bool long_run() const;  // the lock has held k_long_run_blocks blocks (160 ms)
+    // The bin a fast lock would take now, from the first block on (no warm-up, no run): the provisional tune before a
+    // lock (spec 3.6). Its centre frequency.
+    bool leading(float& tone_hz) const;
 
 private:
     enum class Lock : uint8_t { none, fast, slow };
@@ -188,6 +201,8 @@ private:
     void update_lock();
     void update_phase(bool continued, bool resumed, uint8_t bin);
     void update_breaks(const Complex& product, const Complex& half, float magnitude, float break_cosine);
+    void update_held();
+    bool held_sidebands() const;
     Complex bin_output(uint8_t bin) const;
     Complex dft_output(uint8_t bin) const;
     Complex half_product(uint8_t bin) const;
@@ -200,6 +215,7 @@ private:
     bool steady_carrier(uint8_t bin) const;
     float excess_variance(uint8_t bin) const;
     float power_offset(const float* power) const;
+    float centre_offset(const float* power) const;
     float coherence() const;
     float pattern_fit(const float* power, float offset) const;
     float steady_offset(const float* power, const Complex& product, const Complex& half, float half_weight,
@@ -240,6 +256,15 @@ private:
     uint16_t since_strike_;
     int16_t excluded_bin_;
     int16_t excluded_span_;
+    float excluded_hz_;               // the held tone
+    Complex held_strong_;             // the excluded bin's output in the last block where it was strong
+    Complex held_middle_;             // ... in the middle of this block (the first half's Goertzel output)
+    uint8_t held_gap_;                // blocks since held_strong_ (0: the previous block)
+    uint8_t onset_wait_;              // blocks the first break's echo test has waited for the held tone
+    bool held_reversed_;              // its carrier turned over since held_strong_, or inside this block
+    bool held_unread_;                // no reading of it in this block (weak, no turn inside)
+    bool onset_echo_;                 // the run's first break came with such a reversal
+    bool onset_pending_;              // ... to be decided when the held tone is strong again
     uint8_t bins_;
     uint8_t best_bin_;
     uint8_t middle_bin_;              // best_bin_ when middle_ was taken
@@ -272,11 +297,15 @@ private:
     uint16_t count_;
 };
 
+// A flip candidate (spec 3.7): the position of its strongest detection (block + fraction) and, for the joins, of its
+// finest one, which a wider scale's echo never moves: `finest_offset` 1/k_candidate_offset_scale blocks from it.
 struct Candidate {
     uint32_t block;
     float fraction;
     float q;
     uint8_t scale;
+    uint8_t finest_scale;
+    int16_t finest_offset;
 };
 
 class CandidateList {
@@ -285,7 +314,10 @@ public:
 
     CandidateList();
     void reset();
-    bool add(const Candidate& candidate);  // false when merged into a stronger newest entry
+    // Merges a detection into the newest entry within k_candidate_merge_blocks (the stronger one's position and q; the
+    // finer one's finest position), else adds it. False when merged into a stronger newest entry.
+    bool add(const Candidate& candidate);
+    static float finest(const Candidate& candidate);  // its finest detection, blocks after candidate.block
     uint8_t count() const;
     const Candidate& newest(uint8_t age) const;
 

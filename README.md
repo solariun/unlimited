@@ -11,11 +11,13 @@ filter (300–2700 Hz): the signal needs only 276 Hz of it, so the radio may be 
 markers spread a little wider than the plain beeps: that is their twist.*
 
 > **Status (2026-09-27): v0.3 released (library version 0.3.0), simulated, API frozen.** The library, the demos, the
-> terminal view and the Arduino examples work: `make test` passes 219 of 219 tests, and `make demo_run`,
+> terminal view and the Arduino examples work: `make test` passes 223 of 223 tests, and `make demo_run`,
 > `make check_embedded` and `make arduino_check` pass. The long regression suite passes 30 of its 31 tests; the one
-> that fails is the late-join speed test: joining a transmission already running is slower than its 6-package target
-> ([Performance](#7-performance)). In the whole suite no byte was released at a wrong position and nothing locked on
-> noise, carriers, Morse or speech. **The public API is frozen for v0.3:** everything [Using the API](#8-using-the-api)
+> that fails is the late-join speed test, now only in its slowest corner: a receiver switched on in the middle of a
+> transmission joins it within 6 packages in 97 % of the tries, but with 32 ms slots and 24 or 32 bits per package in
+> only 80–90 % ([Performance](#7-performance)). In the whole suite no byte was released at a wrong position, and the
+> gated tests saw no lock on noise, carriers, Morse or speech (longer runs show a rare one, as the release did:
+> [Known limits](#78-known-limits)). **The public API is frozen for v0.3:** everything [Using the API](#8-using-the-api)
 > describes stays exactly as it is in every 0.3 release. **Every result comes from simulation: Unlimited has not been
 > tested on hardware or on the air yet.** v0.2, a multi-pitch design, was dropped; it is kept on the branch and tag
 > `v0.2-mfsk` ([History](#13-history-and-roadmap)).
@@ -211,7 +213,7 @@ compiler it cannot find.
 git clone https://github.com/solariun/unlimited.git
 cd unlimited
 make          # the library build/libunlimited.a and the demos bin/unlimited_encode, bin/unlimited_decode
-make test     # 219 unit and loopback tests, well under a minute
+make test     # 223 unit and loopback tests, well under a minute
 ```
 
 ### 3.2 A round trip through a simulated radio
@@ -657,7 +659,10 @@ not in SEARCH: `Decoder::dcd()`.
 ```
 
 The **history** keeps running sums of the mixed-down signal, long enough for one package at the slowest T plus its END
-check, so any window of the recent past (half a slot before a moment, the middle 75 % of a slot) costs two lookups.
+check, so any window of the recent past (half a slot before a moment, the middle 75 % of a slot) costs two lookups. It
+is kept from the first moments of listening: while the receiver searches, its oscillator sits on the pitch its search
+favours, and when the oscillator moves by up to 125 Hz (or locks on the tone) the stored blocks are turned to the new
+frequency instead of being thrown away ([5.9](#59-joining-late)).
 
 ### 5.3 SEARCH: finding the pitch
 
@@ -798,15 +803,46 @@ and, because each package then begins on a byte boundary, hands out whole bytes 
 grid it found is not a third, a fifth or a seventh of the true one. With any other N it cannot know where the bytes
 begin, so it waits for the next transmission.
 
-**Exact rules** (spec §3.12): three equal intervals P between strong twists, longer than any train of the window;
-hypotheses T = P/(N + 1) for N ∈ {8, 16, 24, 32} within the cap and the window; each is folded over at least two
-packages: every beep of the true grid returns to silence at its slot edges, so the true grid has quiet edges and loud
-centres; exactly one hypothesis must pass, and none of its odd sub-grids. Then the full guard (at least 4 packages and
-36 slots). `byte_index` counts from the join, and every byte is flagged `late_join`; `PacketReader` resynchronises on
-the next packet's sync word. A join is also refused when another package length explains the slot edges better (so
-a sender with N = 12, which cannot be joined, is never taken for N = 8). Measured in the long suite: 466 of 480 late
-starts joined, none released a wrong byte, and no sender with another N was joined; but only 56 % of the starts joined
-within the design's 6 packages (see [Known limits](#78-known-limits)).
+What makes the join quick is that the receiver **keeps what it hears from its first moments**. While it still looks
+for the pitch, it already mixes the audio down at the pitch its search favours and keeps it. When it locks on the tone
+it turns that stored audio to the exact tone instead of throwing it away, measures the tone on it, and then looks
+through it for the START twists it heard before the lock. So the three equal intervals the join needs have usually
+been heard already, and the join starts from the first whole package the receiver heard; the lock follows once four
+packages are checked (in the test, a median of 4.6 to 5.8 packages after the switch-on).
+
+![Late-join timeline: the release and now](docs/images/late_join_timeline.svg)
+
+*Measured by `make docs` (T 8 ms, N 8, 20 dB): the release threw away what it heard before its tone lock and locked
+8.3 packages after the switch-on; now the receiver keeps it and locks after 5.3, and 20 of 20 starts lock within
+6 packages (the release: none).*
+
+```mermaid
+flowchart LR
+    A["switch-on:<br/>search, audio kept"] --> B["tone lock:<br/>stored audio turned<br/>to the tone"]
+    B --> C["tone measured<br/>on the stored audio"]
+    C --> D["missed twists found<br/>in the stored audio"]
+    D --> E["3 equal intervals:<br/>T and N"]
+    E --> F["decode from the<br/>first whole package"]
+    F --> G["4 packages checked:<br/>locked (late join)"]
+```
+
+**Exact rules** (spec §3.12, with §3.3, §3.6 and §3.7): three equal intervals P between strong twists, longer than
+any train of the window; hypotheses T = P/(N + 1) for N ∈ {8, 16, 24, 32} within the cap and the window; each is folded
+over at least two packages: every beep of the true grid returns to silence at its slot edges, so the true grid has
+quiet edges and loud centres; exactly one hypothesis must pass, and none of its odd sub-grids. Then the full guard (at
+least 4 packages and 36 slots). `byte_index` counts from the join, and every byte is flagged `late_join`;
+`PacketReader` resynchronises on the next packet's sync word. A join is also refused when another package length
+explains the slot edges better (so a sender with N = 12, which cannot be joined, is never taken for N = 8). The stored
+audio is the history ([5.2](#52-the-receiver-in-four-steps)): while searching, the oscillator sits on the centre of the
+search bin a lock would take (at most 25 Hz from the tone) and a move of up to 125 Hz re-mixes the stored blocks; at
+the lock the fine frequency control measures the tone on them, the history is re-mixed to it, and the twist search is
+replayed over it, oldest first, 64 stored blocks per block heard. A twist is read where its narrowest detection put
+it: a wide window also holds the beeps around a marker and peaks up to half a window away. T comes from the chain's
+own markers, and the decoding starts at the oldest of them the history holds. Measured in the long suite: all 480 late
+starts joined, 466 of them (97 %) within 6 packages (the release: 267, 56 %), none released a wrong byte, and no
+sender with another N was joined. The slowest corner stays above the target (see [Known limits](#78-known-limits)):
+with 32 ms slots and 24 or 32 bits per package three intervals are longer than the history, so the decoding starts
+one package later, and 80–90 % of those starts lock within 6 packages.
 
 ### 5.10 The end of a transmission
 
@@ -1183,11 +1219,11 @@ Uno example links any soft-float routine.
 ## 7. Performance
 
 > **Measured by the long regression suite (`make test_long`) on the released decoder (2026-09-27), and by
-> `make docs`.** The suite ran 31 tests, 30 passed; of its 370 result rows 260 pass, 90 are reports and 20 fail, all 20
-> in the late-join speed test (a known weakness, [7.8](#78-known-limits)). No test asks for literally zero bit errors:
-> with random noise even a perfect receiver sometimes gets 1 bit in 24,000 wrong, so where a test once asked for none
-> it asks for at most 1 in 10,000 (BER ≤ 1e-4), and still for no extra byte and no byte in a wrong place. Everything is
-> simulated (the channel simulator of `pc/`); nothing has been measured on the air yet.
+> `make docs`.** The suite ran 31 tests, 30 passed; of its 370 result rows 276 pass, 90 are reports and 4 fail, all 4
+> in the late-join speed test at its slowest corner (a known limit, [7.8](#78-known-limits)). No test asks for
+> literally zero bit errors: with random noise even a perfect receiver sometimes gets 1 bit in 24,000 wrong, so where a
+> test once asked for none it asks for at most 1 in 10,000 (BER ≤ 1e-4), and still for no extra byte and no byte in a
+> wrong place. Everything is simulated (the channel simulator of `pc/`); nothing has been measured on the air yet.
 
 ### 7.1 In plain words
 
@@ -1207,8 +1243,8 @@ Uno example links any soft-float routine.
 - Mistuning, the other sideband, clock errors of ±1000 ppm (0.1 %), static crashes, a receiver's automatic gain control
   (AGC), keyed CW (Morse) next to the signal, FM and AM all pass their tests.
 - **Integrity:** in the whole suite no byte was released at a wrong position, no packet with a valid CRC was wrong, and
-  noise, carriers, keyed CW and speech never made the receiver lock. The weak spots are listed in
-  [7.8](#78-known-limits).
+  in the gated tests noise, carriers, keyed CW and speech never made the receiver lock (longer runs show a rare lock on
+  speech or keyed CW, about once in 6 hours). The weak spots are listed in [7.8](#78-known-limits).
 
 ### 7.2 Noise (AWGN)
 
@@ -1285,10 +1321,10 @@ and *poor* (2 ms, 1 Hz). **QSB** is slow, deep fading.
 |---|---|---|
 | C6 static crashes (QRN) | 20 impulses/s at 30 × the key-down amplitude, `hf_slow`, +6 dB | 0 errors; on clean noise the impulse blanker changes nothing (BER ratio 1.00) |
 | C7 receiver AGC | 1 ms attack, 300 ms decay, `hf_slow` at its gate | BER 1.70 × the BER without AGC (gate 2 ×): pass |
-| C8 steady carrier | 6 dB above the tone, 250 to 1000 Hz away, at 0 dB SNR | BER ≤ 2.2e-5 (82–100 % of the bytes delivered): pass |
-| | 6 dB above the tone, 250 Hz away: finding the signal | 95–98 %: pass |
+| C8 steady carrier | 6 dB above the tone, 250 to 1000 Hz away, at 0 dB SNR | BER ≤ 1.9e-5 (85–100 % of the bytes delivered): pass |
+| | 6 dB above the tone, 250 Hz away: finding the signal | 96–97 %: pass |
 | | 12 dB above the tone, 350 to 1000 Hz away: finding the signal | 96–100 %: pass |
-| | 12 dB above the tone, 250 or 300 Hz away | 22–32 % at 250 Hz, 80–83 % at 300 Hz: reported, a known limit ([7.8](#78-known-limits)) |
+| | 12 dB above the tone, 250 or 300 Hz away | 27–30 % at 250 Hz, 73–80 % at 300 Hz: reported, a known limit ([7.8](#78-known-limits)) |
 | | 100 Hz away | no lock (reported) |
 | C9 keyed CW | 20 WPM, equal peak power, 300 Hz away, +3 dB | 0 errors |
 | C12 flutter (0.5 ms, 10 Hz) | `hf`, 30 dB | BER 7.2e-2 (the level changes within a package), 0 extra bytes of 13,420 |
@@ -1304,7 +1340,7 @@ and *poor* (2 ms, 1 Hz). **QSB** is slow, deep fading.
 | C15 FM, flat transmitter, de-emphasising receiver | `fm` preset, CNR 6–14 dB | 6.4e-5 at 6 dB, 0 from 8 dB: pass |
 | C11 AM, modulation 0.8, 6 kHz IF | `hf_slow` at CNR 2 dB | 0 errors: pass |
 | | `am` preset at CNR 6 dB | BER 1.7e-4: pass |
-| | `am` preset below 6 dB | 8.1e-4 at 5 dB, 2.1e-3 at 4 dB, 4.4e-3 at 3 dB, 1.4e-2 at 2 dB (reported) |
+| | `am` preset below 6 dB | 8.1e-4 at 5 dB, 2.1e-3 at 4 dB, 4.4e-3 at 3 dB, 1.4e-2 at 2 dB (reported; 94 % and 55 % of the bytes delivered at 3 and 2 dB) |
 
 An 8 ms slot carries a quarter of the energy of a 32 ms slot, so the `am` preset needs about 4 dB more CNR than
 `hf_slow`: its test gate is CNR 6 dB, `hf_slow`'s 2 dB (spec §0.8, decision G1).
@@ -1334,7 +1370,9 @@ a byte, and the tests count what gets through anyway.
 | F6 longest run of wrong bytes | every point at 3 dB or more above its gate | 5 bytes | ≤ 8: pass |
 | Bytes released at a wrong position | every lock of the 238 L5, A and C points, at any SNR | 0 | never (spec §3.13) |
 
-Five more 30-minute seeds of F3 and F4 per profile (15 hours): no false lock either. The first run of this suite on v0.3,
+In five more 30-minute seeds of F3 and F4 per profile (15 hours) the receiver locked once, on speech with the FM
+profile (3 bytes); over 70 more hours of the same sounds it locks about once in 6 hours, as the release does
+([7.8](#78-known-limits)). The first run of this suite on v0.3,
 before the decoder's integrity fix (spec §0.7, rows I20–I28), had found 535 bytes released at wrong positions in 11
 locks, a sender with N = 12 joined as if N were 8, and 39 false locks on CW and speech; the released decoder has none.
 A CRC never let a wrong packet through: use the packet layer for anything that matters.
@@ -1348,21 +1386,25 @@ test.
 - **Short messages in deep fading.** Each transmission carries its own preamble; if a fade hits the tune tone or the
   sync train, the whole message is lost (a two-byte "Hi" on CCIR poor at 20 dB: 11 of 20 runs). A receiver can join
   a running transmission only when N is a multiple of 8, and then the first bytes are still missing.
-- **Late joins are slow.** A receiver switched on in the middle of a transmission joins it in 97 % of the tries, but
-  within 6 packages in only 56 % of them (medians of 5 to 12 packages, slowest with 8 ms slots), and a few starts need
-  several seconds or never join; the test asks 95 % within 6 packages and fails. No join released a wrong byte. The
-  lead: the receiver's list of recent twists (16 entries) fills up with copies of the same twist seen at several
-  scales, pushing out the older twists the join needs.
+- **Late joins with 32 ms slots and 24 or 32 bits per package.** A receiver switched on in the middle of a
+  transmission joins it in every try, within 6 packages in 97 % of them (medians of 4.6 to 5.8 packages; the release:
+  56 %). With 32 ms slots and 24 or 32 bits per package, though, three package intervals are longer than the
+  receiver's history, so the decoding starts one package later and 80–90 % of those starts lock within 6 packages;
+  the test asks 95 % and fails on those 4 rows. No join released a wrong byte. A longer history (memory), a join on two
+  intervals, or a different target are the options (spec §11.2 P2).
 - **A strong carrier close to the pitch.** With a carrier 12 dB above the tone and 250 Hz away the receiver finds the
-  signal in only 22–32 % of the tries, 300 Hz away in 80–83 % (with wrong bytes in the 300 Hz tries), from 350 Hz in
+  signal in only 27–30 % of the tries, 300 Hz away in 73–80 % (with wrong bytes in the 300 Hz tries), from 350 Hz in
   96–100 %. A carrier 6 dB above the tone is fine from 250 Hz.
 - **The `am` preset on AM** needs about 6 dB of CNR, where `hf_slow` needs 2 dB ([7.5](#75-am-and-fm)).
 - **Very short messages at N = 32** (4 packages) lock in 98.75 % of the tries at the gate and 86.7 % 2 dB lower.
 - **One extra byte after a lost END in slow fading.** When the END markers fall into a deep QSB fade, the receiver
   can carry on across the silence to the next transmission and release one byte of noise (seen once, `hf_slow` at
   18 dB in 20 dB-deep QSB). The packet layer's sync word and CRC keep it out of your data.
-- **Slow senders just below the gate:** at 64 and 128 ms slots, 2 dB below the gate, 4 and 7 transmissions of 300 are
-  not found (the gate asks at least 90 %).
+- **Slow senders just below the gate:** at 64 and 128 ms slots, 2 dB below the gate, 0 and 1 transmissions of 300 are
+  not found (the release: 4 and 7; the gate asks at least 90 %).
+- **A rare false lock on speech or Morse.** Over long runs of speech-like sound and keyed CW (70 hours), the receiver
+  locks on them now and then — about once in 6 hours, the release as often — and releases a few bytes of noise (1 to
+  10). The gated 30-minute tests have none. The packet layer's CRC keeps such bytes out of your data (spec §11.2 P8).
 - **Faded sync markers:** with 3 of the 8 sync markers faded, 1 transmission in 2800 (N = 16) lost its first 8 bytes
   (T measured on 5 markers was 1.7 % off).
 - **Interference from the first sample:** `hf_fast` behind an interferer present from the very first sample loses its
@@ -2102,7 +2144,10 @@ Every preset (N ≤ 16) decodes with the Arduino default cap of 16. Nothing is a
   at 2700 Hz; no tick lost, and the output is identical to the PC encoder's. `make check_embedded` measures this on a
   cycle-counting ATmega328P model and fails above 1,600 cycles or 50 % load.
 - **The decoder on a PC**: 7,400 to 16,400 times real time while tracking, 4,000 times on noise, on one core of the
-  development Mac.
+  development Mac. Joining a running transmission costs a one-time burst: turning a full history to the tone and
+  searching it again takes about 0.7 ms on the PC (2.3 ms on speech-like sound), spread over the next 38 blocks; on an
+  ESP32 that is estimated at 35–140 ms (up to 0.5 s on speech) within 38 ms of audio, which the audio input buffer
+  must absorb (spec §3.15).
 - **The decoder on microcontrollers** (estimates, not yet measured on a board): an ESP32 or an STM32F4 under 5 % of a
   core while tracking and under 10 % while acquiring; an ESP8266 at 160 MHz about 10–12 % while acquiring (software
   floating point). The `fm` profile (blocks of 4 samples) needs a floating-point unit. The AVR runs the encoder only.
@@ -2172,18 +2217,76 @@ GPIO19, MOSI GPIO23): the core WAV codec on a microcontroller. Decode the file o
 
 ## 11. Testing and quality
 
+### Running the tests
+
+**In plain words.** The tests do in software what you would do on the air: they send known bytes through a simulated
+radio (noise, fading, mistuning, interference, AM, FM), let the receiver decode them without telling it anything, and
+count what came back wrong, what went missing and what should not be there at all. The seeds are fixed, so a test
+prints the same numbers every time on the same machine: a number that changes means that the code changed. A C++11
+compiler and `make` are all you need; the embedded checks also use the microcontroller compilers when they find them.
+
+```mermaid
+flowchart LR
+    t1["make test<br/>223 unit tests<br/>about 30 s"] --> t2["make demo_run<br/>the demos round-trip a text<br/>about 1 s"]
+    t2 --> t3["make check_embedded<br/>the core as a microcontroller<br/>builds it, about 13 s"]
+    t3 --> t4["make test_long<br/>370 measured rows<br/>about 9 min on 10 cores"]
+```
+
+The commands most people need (times measured on an Apple M4 with 10 cores):
+
+- The 223 unit and loopback tests, about 30 s once built:
+
+```bash
+make test
+```
+
+- Only the tests whose name contains a word, here the packet tests (0.1 s):
+
+```bash
+make test FILTER=packet
+```
+
+- The command-line demos: six round trips through simulated radios must bring the text back exactly, and a signal too
+  wide for its filter must be refused (1.1 s):
+
+```bash
+make demo_run
+```
+
+- The core built the way a microcontroller builds it: no heap, exceptions or RTTI, a decode with a heap that stops the
+  program if touched, the ESP32 and AVR builds when their compilers are found, and the Arduino Uno's interrupt timed on
+  a cycle-exact model of its processor (about 13 s):
+
+```bash
+make check_embedded
+```
+
+- The long regression suite: hours of simulated radio measured against the gates of the spec (about 9 minutes on 10
+  cores). Today it ends with one known FAIL: 4 rows of L20, the late-join speed with 32 ms slots and 24 or 32 bits per
+  package ([7.8](#78-known-limits)); any other FAIL is news.
+
+```bash
+make test_long
+```
+
+Everything else is in the testing guide, [`docs/testing.md`](docs/testing.md): what each test proves and how to read
+what it prints, a `RESULT` row taken apart, the Arduino check, the sanitizer run, the determinism check of `make docs`,
+how to reproduce a row from its seed, and how to compare runs before and after a change.
+
+### Every target
+
 | Target | What it does |
 |---|---|
 | `make` (`make all`) | the library and the demos |
 | `make lib` | `build/libunlimited.a`, the core |
 | `make demo` | `bin/unlimited_encode`, `bin/unlimited_decode` |
-| `make test` | 219 unit and loopback tests (187 on the core, 32 on the terminal view and the demos), about 40 s on a recent Mac; `FILTER=name` runs the tests whose name contains it |
-| `make test_long` | the long regressions (AWGN A1–A4, channels C1–C15, false locks and integrity F1–F7, clock L5, passbands L19, late joins L20) in `bin/unlimited_regression`; about 8.5 minutes on a 10-core machine; exits non-zero on any FAIL row (today: the 20 rows of L20, the late-join speed, [7.8](#78-known-limits)); `FILTER=` too |
+| `make test` | 223 unit and loopback tests (191 on the core, 32 on the terminal view and the demos), about 40 s on a recent Mac; `FILTER=name` runs the tests whose name contains it |
+| `make test_long` | the long regressions (AWGN A1–A4, channels C1–C15, false locks and integrity F1–F7, clock L5, passbands L19, late joins L20) in `bin/unlimited_regression`; about 9 minutes on a 10-core machine; exits non-zero on any FAIL row (today: 4 rows of L20, the late-join speed with 32 ms slots and 24 or 32 bits per package, [7.8](#78-known-limits)); `FILTER=` too |
 | `make check_embedded` | the core built as for a microcontroller for the host, AVR and ESP32, with the forbidden-symbol scan, the heap trap, the decoder at caps 16 and 64, the encoder with queues of 16, 64 and 128, and the AVR interrupt cycle gate |
 | `make arduino_check` | `arduino-cli` builds of every example, warning-free, and no floating point in `tx_uno` |
 | `make demo_run` | the round trips of [9.4](#94-make-demo_run) |
 | `make tables` | checks the sine table in `src/unlimited/tables.cpp` against `tools/gen_tables.cpp` |
-| `make docs` | regenerates `docs/images/*.svg` and `docs/protocol_examples.md` from the library (about 2 minutes on 10 cores; the same bytes every time) |
+| `make docs` | regenerates `docs/images/*.svg` and `docs/protocol_examples.md` from the library (about 70 s on 10 cores; the same bytes every time) |
 | `make clean` | removes `build/` and `bin/` |
 
 ```sh
@@ -2253,7 +2356,7 @@ configurable.
 | Speeds | T = 4 to 128 ms | 6 to 128 ms | T = 4 to 128 ms, any value; five presets |
 | Default | `hf`: 32 ms, 27.8 bit/s | `hf`: 32 ms, 5 bits per beep, 139 bit/s | `hf`: 16 ms, N = 8, 55.6 bit/s |
 | Fading floor (CCIR moderate, 30 dB) | 4.6e-3 | 3.7e-5 | 4.7e-3 (`hf_slow`), 2.2e-3 (`hf`) |
-| Status | implemented and measured (174 unit tests) | implemented, frozen, then dropped; kept on the branch and tag `v0.2-mfsk` | released as 0.3.0 (219 unit tests, long suite 30 of 31); API frozen |
+| Status | implemented and measured (174 unit tests) | implemented, frozen, then dropped; kept on the branch and tag `v0.2-mfsk` | released as 0.3.0 (219 unit tests, long suite 30 of 31); API frozen; then the fast cold late join (223 tests; the one failing test down from 20 rows to 4) |
 
 What v0.3 kept from v0.2: the encoder queue with memory fences for two CPU cores, the configuration errors that name
 the broken rule, the integer AVR encoder with its 257-entry sine table, the 16-bit packet length, the WAV codec fixes,
@@ -2264,7 +2367,8 @@ the choice between the smart and the fixed decision line.
 
 ### 13.2 Roadmap
 
-- **The known limits of [7.8](#78-known-limits)**, first the slow late joins (the one failing long-suite test).
+- **The known limits of [7.8](#78-known-limits)**, first the late joins with 32 ms slots and 24 or 32 bits per package
+  (the one failing long-suite test).
 - **Forward error correction and interleaving**, fed by the soft values of the byte events: the answer to the error
   floors of fading paths. The plug point is ready: `packet_build()` → FEC and interleaver → `Encoder::write()`, and
   the byte events' `soft[8]` → de-interleaver and FEC → `PacketReader`.

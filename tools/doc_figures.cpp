@@ -17,6 +17,7 @@
 #include <exception>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -27,7 +28,8 @@
 // Writes the documentation figures (SVG) into the directory given on the command line. Every waveform, spectrum,
 // slot level, decode result and BER point is measured on the output of the real Encoder, the real sim::Channel and
 // the real Decoder each time `make docs` runs. The only numbers not measured here are the bound curve of the BER
-// figure (computed from its formula) and the v0.2-mfsk reference point quoted from that design's spec.
+// figure (computed from its formula), the v0.2-mfsk reference point quoted from that design's spec, and the v0.3.0
+// release's late-join times of the late-join figure (measured on that library with the figure's own measurement).
 namespace {
 
 using std::int16_t;
@@ -37,6 +39,7 @@ using std::uint32_t;
 using std::uint8_t;
 using unlimited::Band;
 using unlimited::DecoderConfig;
+using unlimited::DecoderState;
 using unlimited::Encoder;
 using unlimited::EncoderConfig;
 using unlimited::EncoderSegment;
@@ -3171,6 +3174,291 @@ void figure_ber(const std::string& directory) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Figure: joining a transmission already running (the cold late join, spec 3.12): v0.3.0 and now
+// ---------------------------------------------------------------------------
+
+// The long suite's L20 row T = 8 ms, N = 8, 20 dB (tests/long/regression_receiver.cpp): the same message, channel and
+// 20 random starts (its seed_of(301, 1, 0)).
+const uint32_t k_join_test = 301;
+const uint32_t k_join_test_stride = 1000003;
+const uint32_t k_join_point = 1;
+const uint32_t k_join_point_stride = 10007;
+const uint32_t k_join_seed = k_join_test * k_join_test_stride + k_join_point * k_join_point_stride + 1u;
+const double k_join_slot_ms = 8.0;
+const uint8_t k_join_bits = 8;
+const size_t k_join_bytes = 200;
+const double k_join_quiet_ms = 1500.0;
+const double k_join_snr_db = 20.0;
+const size_t k_join_starts = 20;
+const size_t k_join_first_package = 1;  // the receiver starts after the first STOP: the preamble is missed
+const size_t k_join_packages_left = 7;  // ... and at least this many packages before the last one
+const double k_join_target_packages = 6.0;
+const size_t k_join_example = 19;       // the start drawn on the timeline
+const double k_join_never = -1.0;
+
+struct JoinTimes {
+    double tone_lock;     // the tone search's lock (SEARCH -> ACQUIRE)
+    double track;         // the TRACK entry that led to the lock
+    double decodes_from;  // the START of the first package whose byte came out, as the receiver heard it
+    double locked;        // the late_join lock, k_join_never without one
+};
+
+// v0.3.0 (the release of 2026-09-27) on the same starts, measured by measure_join() on that library: each start's lock
+// and the timeline of start k_join_example, in packages since the receiver started (spec 4.4).
+const double k_release_locked[k_join_starts] = {8.861, 12.375, 7.597, 133.778, 14.681, 7.708,  k_join_never,
+                                                13.431, 78.361, 8.403, 75.833, 14.708, 9.444, k_join_never,
+                                                7.542, 7.431,  9.306, 7.694,   9.139,  8.250};
+const JoinTimes k_release_example = {2.778, 5.958, 3.807, 8.250};
+
+// The decoder run from sample `from` of the received audio; times in packages since that sample.
+JoinTimes measure_join(const std::vector<int16_t>& received, const lb::Transmission& tx, const EncoderConfig& config,
+                       size_t from) {
+    const double package = (config.bits_per_package + 1.0) * lb::slot_samples(config);
+    const double delay = lb::channel_delay_samples(sim::Mode::usb);
+    lb::Recording tail;
+    tail.samples.assign(received.begin() + static_cast<long>(from), received.end());
+    lb::Transmission shifted = tx;
+    shifted.start_sample = 0;  // a late join counts its bytes from the join: map_events() finds their place
+    tail.transmissions.push_back(shifted);
+    const lb::Capture capture = lb::run_decoder(tail.samples, DecoderConfig::for_profile(Profile::ssb), 0);
+    const lb::Mapping mapping = lb::map_events(tail, capture);
+    JoinTimes t = {k_join_never, k_join_never, k_join_never, k_join_never};
+    for (size_t i = 0; i < capture.events.size(); ++i) {
+        const Event& e = capture.events[i];
+        const double at = capture.event_sample[i] / package;
+        const bool before_lock = t.locked == k_join_never;
+        if (e.type == EventType::state && e.state == DecoderState::acquire && t.tone_lock == k_join_never) {
+            t.tone_lock = at;
+        }
+        if (e.type == EventType::state && e.state == DecoderState::track && before_lock) t.track = at;
+        if (e.type == EventType::locked && before_lock) t.locked = at;
+        if (e.type != EventType::byte || before_lock || t.decodes_from != k_join_never || mapping.offsets.empty()) {
+            continue;
+        }
+        const long byte = static_cast<long>(e.byte_index) + mapping.offsets.front();
+        const size_t k = static_cast<size_t>(byte) * k_byte_bits / config.bits_per_package;
+        const double start = lb::slot_start_sample(tx, lb::package_start_slot(tx, k));
+        t.decodes_from = (start + lb::slot_samples(config) / 2.0 + delay - static_cast<double>(from)) / package;
+    }
+    return t;
+}
+
+void figure_late_join(const std::string& directory) {
+    const EncoderConfig config = lb::slot_config(k_join_slot_ms, k_join_bits);
+    lb::Recording recording;
+    lb::append_silence(recording, k_join_quiet_ms);
+    lb::append_transmission(recording, lb::random_bytes(k_join_bytes, k_join_seed), config);
+    lb::append_silence(recording, k_join_quiet_ms);
+    sim::ChannelConfig channel;
+    channel.mode = sim::Mode::usb;
+    channel.snr_db = k_join_snr_db;
+    channel.seed = k_join_seed;
+    const std::vector<int16_t> received = through_channel(recording.samples, channel, config.amplitude, 1.0);
+    const lb::Transmission& tx = recording.transmissions[0];
+    const size_t count = lb::package_count(tx);
+    const size_t low = static_cast<size_t>(lb::slot_start_sample(tx, lb::package_start_slot(tx, k_join_first_package)));
+    const size_t high =
+        static_cast<size_t>(lb::slot_start_sample(tx, lb::package_start_slot(tx, count - k_join_packages_left)));
+    std::mt19937 generator(k_join_seed);
+    std::uniform_int_distribution<size_t> start(low, high);
+    std::vector<size_t> from(k_join_starts);
+    for (size_t n = 0; n < k_join_starts; ++n) from[n] = start(generator);
+    const std::vector<JoinTimes> now = parallel_map<JoinTimes>(
+        k_join_starts, [&](size_t n) { return measure_join(received, tx, config, from[n]); });
+    const double package = (config.bits_per_package + 1.0) * lb::slot_samples(config);
+    const double delay = lb::channel_delay_samples(sim::Mode::usb);
+    const double package_ms = package * k_ms_per_s / k_rate_hz;
+    double guard_sum = 0.0;  // from the first package decoded to the lock
+    size_t joined = 0;
+    for (size_t n = 0; n < k_join_starts; ++n) {
+        if (now[n].locked == k_join_never) continue;
+        guard_sum += now[n].locked - now[n].decodes_from;
+        ++joined;
+    }
+    const double guard_mean = joined == 0 ? 0.0 : guard_sum / static_cast<double>(joined);
+
+    const double k_width = 820.0;
+    const double k_height = 560.0;
+    const double k_left = 150.0;
+    const double k_right = 790.0;
+    const double k_timeline_packages = 9.0;
+    const double k_panel_a_y = 104.0;
+    const double k_signal_top = 128.0;
+    const double k_signal_height = 16.0;
+    const double k_release_row = 176.0;  // bar centres
+    const double k_now_row = 214.0;
+    const double k_bar_height = 12.0;
+    const double k_axis_a_y = 242.0;
+    const double k_panel_b_y = 310.0;
+    const double k_strip_release = 342.0;
+    const double k_strip_now = 376.0;
+    const double k_axis_b_y = 404.0;
+    const double k_legend_y = 468.0;
+    const double k_strip_packages = 16.0;
+    const double k_later_column = 17.0;  // a lock after k_strip_packages
+    const double k_never_column = 18.3;  // no lock in the transmission
+    const double k_strip_last = 19.0;
+    const double k_strip_tick = 2.0;
+    const double k_symbol_half = 6.0;
+    const double k_triangle_half = 4.0;
+    const double k_dot_radius = 4.0;
+    const double k_dot_jitter = 5.0;     // rows of dots, so that equal times stay visible
+    const size_t k_jitter_rows = 3;
+    const double k_start_tick = 3.0;     // START ticks above and below the signal row
+    const double k_label_gap = 9.0;
+    const double k_second_line = 13.0;
+    const double k_legend_symbol_x = 8.0;
+    const double k_legend_text_x = 18.0;
+    const double k_legend_gap = 24.0;
+
+    Svg svg(k_width, k_height);
+    heading(svg, "Joining a transmission already running: v0.3.0 and now",
+            format("A receiver switched on inside a %u-byte transmission: T %.0f ms, N %u (%.0f ms packages), USB, "
+                   "%.0f dB; the long suite's L20 starts.",
+                   static_cast<unsigned>(k_join_bytes), k_join_slot_ms, static_cast<unsigned>(k_join_bits),
+                   package_ms, k_join_snr_db),
+            "Time in packages since the receiver was switched on. v0.3.0: the release (spec 4.4); now: measured by "
+            "make docs.");
+
+    // Panel A: one start, as the receiver heard it.
+    const JoinTimes& example = now[k_join_example];
+    svg.text(k_margin, k_panel_a_y,
+             format("One start (the %uth of %u): what each receiver kept, and when it locked",
+                    static_cast<unsigned>(k_join_example + 1u), static_cast<unsigned>(k_join_starts)),
+             font(k_label_size, k_ink, "start", true));
+    const Scale x = {0.0, k_timeline_packages, k_left, k_right};
+    svg.text(k_margin, k_signal_top + k_signal_height - k_text_rise, "the signal",
+             font(k_label_size, k_ink, "start", true));
+    std::vector<double> starts;  // the transmission's STARTs as the receiver hears them
+    for (size_t k = 0; k < count; ++k) {
+        const double at = (lb::slot_start_sample(tx, lb::package_start_slot(tx, k)) + lb::slot_samples(config) / 2.0 +
+                           delay - static_cast<double>(from[k_join_example])) / package;
+        if (at > k_timeline_packages) break;
+        starts.push_back(at);
+    }
+    double cell_from = 0.0;
+    for (size_t k = 0; k <= starts.size(); ++k) {
+        const double cell_to = k < starts.size() ? std::max(starts[k], 0.0) : k_timeline_packages;
+        if (cell_to > cell_from) {
+            svg.rect(x(cell_from), k_signal_top, x(cell_to) - x(cell_from), k_signal_height,
+                     k % 2 == 0 ? k_gray_fill : k_card, k_gray_mid, k_hairline);
+        }
+        cell_from = std::max(cell_from, cell_to);
+    }
+    for (size_t k = 0; k < starts.size(); ++k) {
+        if (starts[k] < 0.0) continue;
+        svg.line(x(starts[k]), k_signal_top - k_start_tick, x(starts[k]), k_signal_top + k_signal_height + k_start_tick,
+                 k_purple, k_bold);
+    }
+    const double search_block = static_cast<double>(unlimited::dsp::ToneSearch::k_block_samples) / package;
+    const auto row = [&](double y, const char* name, const char* detail, double kept_from, const JoinTimes& t) {
+        svg.text(k_margin, y + k_text_rise, name, font(k_label_size, k_ink, "start", true));
+        svg.text(k_margin, y + k_text_rise + k_second_line, detail, font(k_small_size, k_muted));
+        svg.rect(x(0.0), y - k_bar_height / 2.0, x(kept_from) - x(0.0), k_bar_height, k_gray_fill, k_gray_mid,
+                 k_hairline);
+        svg.rect(x(kept_from), y - k_bar_height / 2.0, x(k_timeline_packages) - x(kept_from), k_bar_height,
+                 k_teal_light, k_teal, k_hairline);
+        svg.line(x(t.decodes_from), k_signal_top + k_signal_height, x(t.decodes_from), y - k_bar_height / 2.0, k_purple,
+                 k_thin, k_dot);
+        triangle_down(svg, x(t.decodes_from), y - k_bar_height / 2.0 - k_triangle_half, k_triangle_half, k_purple);
+        diamond(svg, x(t.tone_lock), y, k_symbol_half, k_blue);
+        svg.circle(x(t.locked), y, k_symbol_half, k_ink);
+        const std::string label = format("locked after %.1f", t.locked);
+        const bool left = x(t.locked) + k_label_gap + text_width(label, k_note_size) > k_right;
+        svg.text(x(t.locked) + (left ? -k_label_gap : k_label_gap), y + k_text_rise, label,
+                 font(k_note_size, k_ink, left ? "end" : "start", true));
+    };
+    row(k_release_row, "v0.3.0", "history from its tone lock", k_release_example.tone_lock, k_release_example);
+    row(k_now_row, "now", "history from 20 ms on", search_block, example);
+    svg.line(x(k_join_target_packages), k_signal_top - k_line_gap, x(k_join_target_packages), k_axis_a_y, k_coral,
+             k_line, k_dash);
+    svg.text(x(k_join_target_packages), k_signal_top - k_line_gap - k_text_rise, "6-package target",
+             font(k_small_size, k_coral, "middle"));
+    x_axis(svg, x, k_axis_a_y, 0.0, k_timeline_packages, 1.0, 0);
+    svg.text((k_left + k_right) / 2.0, k_axis_a_y + k_axis_title_gap, "packages since the switch-on",
+             font(k_small_size, k_muted, "middle"));
+
+    // Panel B: every start.
+    svg.text(k_margin, k_panel_b_y, format("All %u starts: when the lock came", static_cast<unsigned>(k_join_starts)),
+             font(k_label_size, k_ink, "start", true));
+    const Scale strip = {0.0, k_strip_last, k_left, k_right};
+    const auto strip_row = [&](double y, const char* name, const std::vector<double>& locks, const char* fill) {
+        size_t within = 0;
+        std::vector<double> sorted;
+        for (size_t n = 0; n < locks.size(); ++n) {
+            const double lock = locks[n];
+            const bool never = lock == k_join_never;
+            sorted.push_back(never ? std::numeric_limits<double>::max() : lock);
+            if (!never && lock <= k_join_target_packages) ++within;
+            const double column = never ? k_never_column : (lock > k_strip_packages ? k_later_column : lock);
+            const double dy =
+                (static_cast<double>(n % k_jitter_rows) - static_cast<double>(k_jitter_rows - 1u) / 2.0) * k_dot_jitter;
+            svg.circle(strip(column), y + dy, k_dot_radius, fill, k_card, k_hairline);
+        }
+        std::sort(sorted.begin(), sorted.end());
+        svg.text(k_margin, y + k_text_rise, name, font(k_label_size, k_ink, "start", true));
+        svg.text(k_margin, y + k_text_rise + k_second_line,
+                 format("%u of %u within 6, median %.1f", static_cast<unsigned>(within),
+                        static_cast<unsigned>(locks.size()), sorted[sorted.size() / 2]),
+                 font(k_small_size, k_muted));
+    };
+    const std::vector<double> release(k_release_locked, k_release_locked + k_join_starts);
+    std::vector<double> current;
+    for (size_t n = 0; n < k_join_starts; ++n) current.push_back(now[n].locked);
+    strip_row(k_strip_release, "v0.3.0", release, k_gray);
+    strip_row(k_strip_now, "now", current, k_teal);
+    svg.line(strip(k_join_target_packages), k_panel_b_y + k_line_gap, strip(k_join_target_packages), k_axis_b_y,
+             k_coral, k_line, k_dash);
+    const Scale strip_axis = {0.0, k_strip_packages, k_left, strip(k_strip_packages)};
+    x_axis(svg, strip_axis, k_axis_b_y, 0.0, k_strip_packages, k_strip_tick, 0);
+    svg.text(strip(k_later_column), k_axis_b_y + k_tick_label_gap, "later", font(k_tick_size, k_muted, "middle"));
+    svg.text(strip(k_never_column), k_axis_b_y + k_tick_label_gap, "never", font(k_tick_size, k_muted, "middle"));
+    svg.text((k_left + strip(k_strip_packages)) / 2.0, k_axis_b_y + k_axis_title_gap,
+             "packages from the switch-on to the lock", font(k_small_size, k_muted, "middle"));
+
+    // Legend.
+    const double symbol_y = k_legend_y - k_text_rise;
+    double lx = k_margin;
+    svg.line(lx + k_legend_symbol_x, symbol_y - k_symbol_half, lx + k_legend_symbol_x, symbol_y + k_symbol_half,
+             k_purple, k_bold);
+    svg.text(lx + k_legend_text_x, k_legend_y, "START", font(k_note_size, k_ink));
+    lx += k_legend_text_x + text_width("START", k_note_size) + k_legend_gap;
+    diamond(svg, lx + k_legend_symbol_x, symbol_y, k_symbol_half, k_blue);
+    svg.text(lx + k_legend_text_x, k_legend_y, "tone lock", font(k_note_size, k_ink));
+    lx += k_legend_text_x + text_width("tone lock", k_note_size) + k_legend_gap;
+    triangle_down(svg, lx + k_legend_symbol_x, symbol_y, k_triangle_half, k_purple);
+    svg.text(lx + k_legend_text_x, k_legend_y, "first package decoded", font(k_note_size, k_ink));
+    lx += k_legend_text_x + text_width("first package decoded", k_note_size) + k_legend_gap;
+    svg.circle(lx + k_legend_symbol_x, symbol_y, k_symbol_half, k_ink);
+    svg.text(lx + k_legend_text_x, k_legend_y, "locked (late join)", font(k_note_size, k_ink));
+    lx += k_legend_text_x + text_width("locked (late join)", k_note_size) + k_legend_gap;
+    lx = legend_item(svg, lx, k_legend_y, k_gray_fill, "heard, thrown away", k_gray_mid);
+    legend_item(svg, lx, k_legend_y, k_teal_light, "heard, kept", k_teal);
+
+    std::vector<std::string> lines;
+    lines.push_back("v0.3.0 threw away all it had heard at its tone lock (and again at the fine AFC's first large "
+                    "correction): the join waited for three intervals heard after it.");
+    lines.push_back("Now the history is kept from the first 20 ms tone-search block on, mixed at the pitch the search "
+                    "leads with and re-mixed to the tone it locks on (spec 3.3, 3.6),");
+    lines.push_back(format("so the join starts from the first whole package heard; the lock follows %.1f packages "
+                           "after that package's START (the guard's 4 packages and its END check).",
+                           guard_mean));
+    notes(svg, k_height, lines);
+    svg.save(path_of(directory, "late_join_timeline.svg"), "Unlimited late join: v0.3.0 and now",
+             format("A cold late join at T %.0f ms, N %u, %.0f dB: the release threw away the audio heard before its "
+                    "tone lock and locked after %.1f packages; the current decoder keeps it and locks after %.1f; and "
+                    "the lock times of the %u starts of the long suite's row, before and after.",
+                    k_join_slot_ms, static_cast<unsigned>(k_join_bits), k_join_snr_db, k_release_example.locked,
+                    example.locked, static_cast<unsigned>(k_join_starts)));
+    std::printf("late_join_timeline.svg: start %u: tone lock %.2f, TRACK %.2f, decodes from %.2f, locked %.2f\n",
+                static_cast<unsigned>(k_join_example), example.tone_lock, example.track, example.decodes_from,
+                example.locked);
+    for (size_t n = 0; n < k_join_starts; ++n) {
+        std::printf("  start %2u: locked %7.3f (v0.3.0 %7.3f)\n", static_cast<unsigned>(n), now[n].locked,
+                    k_release_locked[n]);
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3199,6 +3487,7 @@ int main(int argc, char** argv) {
         if (wanted("envelope_wide_vs_narrow") && ++figures) figure_envelopes(directory, hf);
         if (wanted("presets_spectrum") && ++figures) figure_presets_spectrum(directory);
         if (wanted("ber_awgn") && ++figures) figure_ber(directory);
+        if (wanted("late_join_timeline") && ++figures) figure_late_join(directory);
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         std::printf("doc_figures: %u figures in %.1f s\n", figures, seconds);
     } catch (const std::exception& error) {

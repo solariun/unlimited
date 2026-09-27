@@ -1226,6 +1226,160 @@ TEST(decoder_l20_cold_late_join) {
     }
 }
 
+// A receiver started inside a transmission (spec 3.12, cold late join) at T = 8 ms and N = 8, the release's slowest
+// case (here the release joined 22 of 24 starts, none within 6 packages, median 9.7): it keeps what it hears from its
+// first search block through the tone lock, re-mixed to the tone (§0.7 I29, I30), and joins at a median of about 5.4
+// packages; on a search bin and between two (the history re-mixed across the lock and the provisional tune's moves).
+// Every start joins with no wrong byte; a few start late for reasons of chance (no energy on the pitch in the first
+// blocks, a marker's twist leading the search to a sideband, the rival package lengths of rule I28 deciding a package
+// later): the 95 % gate is the long L20's.
+TEST(decoder_cold_join_from_the_first_block) {
+    const double k_join_packages = 6.0;
+    const double k_median_packages = 5.6;
+    const std::size_t k_min_in_time = 20;  // of 24
+    const std::uint16_t pitches[] = {1500, 1522, 1544};
+    const int starts = 8;
+    std::size_t joined = 0;
+    std::size_t in_time = 0;
+    double worst = 0.0;
+    std::vector<double> times;
+    for (std::size_t p = 0; p < test::count_of(pitches); ++p) {
+        const EncoderConfig config = slot_config(8.0, 8, pitches[p]);
+        const Recording recording = single(random_bytes(200, std::uint32_t(840 + p)), config);
+        const Transmission& tx = recording.transmissions[0];
+        const std::vector<std::int16_t> samples =
+            usb(recording.samples, 20.0, std::uint32_t(841 + p), config.amplitude);
+        const double package = 9.0 * slot_samples(config);
+        const std::size_t first = static_cast<std::size_t>(slot_start_sample(tx, package_start_slot(tx, 2)));
+        const std::size_t last =
+            static_cast<std::size_t>(slot_start_sample(tx, package_start_slot(tx, package_count(tx) - 12)));
+        std::mt19937 generator(std::uint32_t(842 + p));
+        for (int k = 0; k < starts; ++k) {
+            const std::size_t from = first + generator() % (last - first);
+            Recording tail;
+            tail.samples.assign(samples.begin() + static_cast<long>(from), samples.end());
+            Transmission shifted = tx;
+            shifted.start_sample = 0;
+            tail.transmissions.push_back(shifted);
+            const Capture capture = run_decoder(tail.samples, DecoderConfig(), 0);
+            const Mapping m = map_events(tail, capture);
+            CHECK_EQ(m.score.wrong_bytes, 0u);
+            CHECK_EQ(m.score.extra_bytes, 0u);
+            const std::size_t locked = find_event(capture, EventType::locked);
+            if (locked >= capture.events.size()) {
+                NOTE("pitch %u start %zu: no join", unsigned(pitches[p]), from);
+                worst = 1e9;
+                continue;
+            }
+            ++joined;
+            CHECK((capture.events[locked].flags & event_flag_late_join) != 0);
+            const double packages = capture.event_sample[locked] / package;
+            worst = std::max(worst, packages);
+            times.push_back(packages);
+            if (packages <= k_join_packages) ++in_time;
+        }
+    }
+    std::sort(times.begin(), times.end());
+    const double median = times.empty() ? 1e9 : times[times.size() / 2];
+    NOTE("T = 8 ms, N = 8, 20 dB: %zu of %zu starts joined, %zu within %.0f packages, median %.2f, slowest %.2f "
+         "packages",
+         joined, test::count_of(pitches) * starts, in_time, k_join_packages, median, worst);
+    CHECK_EQ(joined, test::count_of(pitches) * starts);
+    CHECK(median <= k_median_packages);
+    CHECK(in_time >= k_min_in_time);
+}
+
+// A lock taken on keyed data between two search bins (a receiver started inside a transmission) stays within the fine
+// AFC's +-30 Hz of the pitch and is on it within 2 Hz 300 ms after the lock (§0.7 I31): the AFC measures the tone
+// against the provisional tune, the leading bin kept at most half a bin from it. The release tuned to the tone
+// search's estimate, which on keyed data can be half a bin or a whole one off (here up to 76 Hz, still 76 Hz at
+// 300 ms): beyond the AFC's reach it walked away and never joined.
+TEST(decoder_lock_on_data_is_tuned) {
+    const std::uint16_t pitches[] = {1512, 1525, 1531, 1538};
+    const double slots_ms[] = {8.0, 16.0};
+    const int starts = 5;
+    const double reach_hz = 30.0;
+    const double tolerance_hz = 2.0;
+    const double settle_ms = 300.0;
+    double widest = 0.0;
+    double worst = 0.0;
+    std::size_t locks = 0;
+    for (std::size_t p = 0; p < test::count_of(pitches); ++p) {
+        for (std::size_t t = 0; t < test::count_of(slots_ms); ++t) {
+            const EncoderConfig config = slot_config(slots_ms[t], 8, pitches[p]);
+            const Recording recording = single(random_bytes(120, std::uint32_t(850 + 10 * p + t)), config);
+            const Transmission& tx = recording.transmissions[0];
+            const std::vector<std::int16_t> samples =
+                usb(recording.samples, 20.0, std::uint32_t(851 + 10 * p + t), config.amplitude);
+            const std::size_t first = static_cast<std::size_t>(slot_start_sample(tx, package_start_slot(tx, 2)));
+            const std::size_t last =
+                static_cast<std::size_t>(slot_start_sample(tx, package_start_slot(tx, package_count(tx) - 8)));
+            std::mt19937 generator(std::uint32_t(852 + 10 * p + t));
+            for (int k = 0; k < starts; ++k) {
+                const std::size_t from = first + generator() % (last - first);
+                Decoder decoder(DecoderConfig(), 0, 0);
+                const std::size_t settle = static_cast<std::size_t>(settle_ms * k_decoder_rate_hz / 1000.0);
+                std::size_t after = 0;
+                for (std::size_t i = from; i < samples.size() && after <= settle; ++i) {
+                    decoder.process_sample(samples[i]);
+                    if (decoder.state() == DecoderState::search) continue;
+                    ++after;
+                    widest = std::max(widest, static_cast<double>(std::fabs(decoder.tone_hz() - pitches[p])));
+                }
+                if (after <= settle) continue;
+                ++locks;
+                worst = std::max(worst, static_cast<double>(std::fabs(decoder.tone_hz() - pitches[p])));
+            }
+        }
+    }
+    NOTE("%zu locks on keyed data between bins: at most %.2f Hz off after the lock, %.2f Hz at %.0f ms", locks, widest,
+         worst, settle_ms);
+    CHECK_EQ(locks, test::count_of(pitches) * test::count_of(slots_ms) * starts);
+    CHECK(widest <= reach_hz);
+    CHECK(worst <= tolerance_hz);
+}
+
+// Keyed data ACQUIRE holds has spectral lines k / T from its tone (250 Hz at T = 8 ms) that stay steady within a
+// package and break as its markers turn its carrier over: the watch must not take them for a new transmission's train
+// (§0.7 I32). The release left the held data for them in 4 of these 24 starts (and forgot its history), joining 4 to
+// 14 packages late.
+TEST(decoder_watch_ignores_keying_lines) {
+    const std::uint8_t bits[] = {24, 32};
+    const int starts = 12;
+    std::size_t jumps = 0;
+    std::size_t runs = 0;
+    for (std::size_t b = 0; b < test::count_of(bits); ++b) {
+        const EncoderConfig config = slot_config(8.0, bits[b], 1500);
+        const Recording recording = single(random_bytes(200, std::uint32_t(860 + b)), config);
+        const Transmission& tx = recording.transmissions[0];
+        const std::vector<std::int16_t> samples =
+            usb(recording.samples, 20.0, std::uint32_t(861 + b), config.amplitude);
+        const double package = (bits[b] + 1.0) * slot_samples(config);
+        const std::size_t first = static_cast<std::size_t>(slot_start_sample(tx, package_start_slot(tx, 2)));
+        const std::size_t last =
+            static_cast<std::size_t>(slot_start_sample(tx, package_start_slot(tx, package_count(tx) - 8)));
+        std::mt19937 generator(std::uint32_t(862 + b));
+        for (int k = 0; k < starts; ++k) {
+            const std::size_t from = first + generator() % (last - first);
+            Decoder decoder(DecoderConfig(), 0, 0);
+            const std::size_t span = static_cast<std::size_t>(6.0 * package);  // the join's time
+            bool jumped = false;
+            for (std::size_t i = from; i < samples.size() && i < from + span; ++i) {
+                decoder.process_sample(samples[i]);
+                const bool away = std::fabs(decoder.tone_hz() - 1500.0f) > 100.0f;
+                if (decoder.state() != DecoderState::search && away) jumped = true;
+            }
+            ++runs;
+            if (jumped) {
+                ++jumps;
+                NOTE("N %u start %zu: the watch left the held data", unsigned(bits[b]), from);
+            }
+        }
+    }
+    NOTE("%zu of %zu starts left the held data for a line of its keying", jumps, runs);
+    CHECK_EQ(jumps, 0u);
+}
+
 // R1: a train heard without its tune at every sample alignment of a tone-search block: the watch never leaves a valid
 // preamble for the train's own spectral lines.
 TEST(decoder_r1_watch_ignores_train_lines) {

@@ -207,6 +207,75 @@ TEST(dsp_prefix_history_wrap_and_soak) {
     CHECK(relative < 1e-4);
 }
 
+// Spec 3.3: rotate() re-mixes the held blocks in place: every window equals the sum of the blocks turned by
+// newest + step (newest - k) (block k), within float rounding (1e-5 of the blocks' magnitude; each block is rounded to
+// an integer); a zero turn changes nothing; blocks pushed afterwards continue the rebuilt sums; blank bits stay.
+TEST(dsp_prefix_history_rotate) {
+    PrefixHistory history;
+    std::mt19937 generator(41);
+    std::uniform_int_distribution<int32_t> value(-(1 << 22), 1 << 22);
+    const uint32_t origin = history.end_block();
+    const int blocks = 900;
+    std::vector<double> re;
+    std::vector<double> im;
+    const int blanked = 300;
+    for (int k = 0; k < blocks; ++k) {
+        const int32_t a = k == blanked ? 0 : value(generator);  // a blanked block is pushed as 0
+        const int32_t b = k == blanked ? 0 : value(generator);
+        history.push(a, b, k == blanked);
+        re.push_back(a);
+        im.push_back(b);
+    }
+    Complex before;
+    REQUIRE(history.window(origin, 100.0f, 400.0f, before));
+    history.rotate(0.0f, 0.0f);
+    Complex same;
+    REQUIRE(history.window(origin, 100.0f, 400.0f, same));
+    CHECK_EQ(same.re, before.re);
+    CHECK_EQ(same.im, before.im);
+    const double newest = 0.37;
+    const double step = 0.0123;
+    history.rotate(static_cast<float>(newest), static_cast<float>(step));
+    for (int k = 0; k < blocks; ++k) {
+        const double angle = newest + step * (blocks - 1 - k);
+        const double r = re[k] * std::cos(angle) - im[k] * std::sin(angle);
+        im[k] = re[k] * std::sin(angle) + im[k] * std::cos(angle);
+        re[k] = r;
+    }
+    for (int k = 0; k < 100; ++k) {  // after the rotation: plain blocks again
+        const int32_t a = value(generator);
+        const int32_t b = value(generator);
+        history.push(a, b, false);
+        re.push_back(a);
+        im.push_back(b);
+    }
+    std::uniform_int_distribution<int> start(1, blocks + 40);
+    std::uniform_int_distribution<int> length(1, 60);
+    double worst = 0.0;
+    for (int trial = 0; trial < 2000; ++trial) {
+        const int a = start(generator);
+        const int b = a + length(generator);
+        double sum_re = 0.0;
+        double sum_im = 0.0;
+        double magnitude = 0.0;
+        for (int k = a; k < b; ++k) {
+            sum_re += re[k];
+            sum_im += im[k];
+            magnitude += std::sqrt(re[k] * re[k] + im[k] * im[k]);
+        }
+        Complex sum;
+        REQUIRE(history.window(origin, static_cast<float>(a), static_cast<float>(b), sum));
+        const double error =
+            std::max(std::fabs(sum.re * k_mixer_gain - sum_re), std::fabs(sum.im * k_mixer_gain - sum_im));
+        worst = std::max(worst, error / magnitude);
+    }
+    NOTE("worst window error after rotate(): %.2e of the blocks' magnitude", worst);
+    CHECK(worst <= 1e-5);
+    CHECK(history.any_blanked(origin, static_cast<float>(blanked), static_cast<float>(blanked + 1)));
+    CHECK(!history.any_blanked(origin, static_cast<float>(blanked + 1), static_cast<float>(blanked + 50)));
+    CHECK_EQ(history.first_block(), origin);
+}
+
 TEST(dsp_prefix_history_blank_bits) {
     PrefixHistory history;
     const uint32_t origin = history.end_block();
@@ -674,22 +743,34 @@ TEST(dsp_fine_afc_pull_in) {
     }
 }
 
+// Spec 3.7: a detection within the T_min half-window of the newest entry merges into it (a stronger one replaces its
+// position and q); the entry's finest position stays with its finest detection, so a chain of wider echoes, each
+// within reach of the last, never walks it away from the marker; one T_min later is a marker of its own.
 TEST(dsp_candidate_list_merge) {
     CandidateList list;
-    const Candidate first = {1000, 0.25f, 5.0f, 2};
+    const Candidate first = {1000, 0.25f, 5.0f, 2, 2, 0};
     CHECK(list.add(first));
-    const Candidate weaker = {1002, 0.0f, 4.0f, 3};
+    const Candidate weaker = {1002, 0.0f, 4.0f, 3, 3, 0};
     CHECK(!list.add(weaker));
-    const Candidate stronger = {1001, 0.5f, 9.0f, 3};
+    const Candidate stronger = {1001, 0.5f, 9.0f, 3, 3, 0};
     CHECK(list.add(stronger));
     CHECK_EQ(+list.count(), 1);
     CHECK_EQ(list.newest(0).block, 1001u);
-    const Candidate next_marker = {1009, 0.5f, 3.5f, 1};  // one T_min later: a distinct marker
+    CHECK_NEAR(list.newest(0).block + list.newest(0).fraction + CandidateList::finest(list.newest(0)), 1000.25, 0.02);
+    const Candidate echo = {999, 0.0f, 15.0f, 6, 6, 0};  // 2.5 blocks further: the position moves, the finest stays
+    CHECK(list.add(echo));
+    CHECK_EQ(list.newest(0).block, 999u);
+    CHECK_NEAR(list.newest(0).block + list.newest(0).fraction + CandidateList::finest(list.newest(0)), 1000.25, 0.02);
+    const Candidate finer = {1000, 0.5f, 3.0f, 0, 0, 0};  // weaker but finer: only the finest position moves
+    CHECK(!list.add(finer));
+    CHECK_NEAR(list.newest(0).q, 15.0, 1e-6);
+    CHECK_NEAR(list.newest(0).block + list.newest(0).fraction + CandidateList::finest(list.newest(0)), 1000.5, 0.02);
+    const Candidate next_marker = {1009, 0.5f, 3.5f, 1, 1, 0};  // one T_min later: a distinct marker
     CHECK(list.add(next_marker));
     CHECK_EQ(+list.count(), 2);
-    CHECK_EQ(list.newest(1).block, 1001u);
+    CHECK_EQ(list.newest(1).block, 999u);
     for (uint32_t k = 0; k < 40; ++k) {
-        const Candidate c = {2000 + 100 * k, 0.0f, 3.0f, 0};
+        const Candidate c = {2000 + 100 * k, 0.0f, 3.0f, 0, 0, 0};
         list.add(c);
     }
     CHECK_EQ(+list.count(), +CandidateList::k_size);
