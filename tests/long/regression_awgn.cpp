@@ -1,3 +1,4 @@
+#include "portable_random.hpp"
 #include "regression.hpp"
 
 #include "test_harness.hpp"
@@ -42,7 +43,7 @@ const double k_percent = 100.0;
 
 double mistune(std::uint32_t seed) {
     std::mt19937 generator(seed);
-    return std::uniform_real_distribution<double>(-k_mistune_hz, k_mistune_hz)(generator);
+    return sim::UniformReal(-k_mistune_hz, k_mistune_hz)(generator);
 }
 
 }  // namespace

@@ -1,5 +1,6 @@
 #include "channel.hpp"
 
+#include "portable_random.hpp"
 #include "resampler.hpp"
 
 #include <algorithm>
@@ -419,7 +420,7 @@ public:
 private:
     double sigma_ = 0.0;
     std::mt19937 rng_;
-    std::normal_distribution<double> normal_;
+    Normal normal_;
 };
 
 // Poisson impulses: exponential inter-arrival times, uniform random phase.
@@ -450,8 +451,8 @@ private:
     bool enabled_ = false;
     double amplitude_ = 0.0;
     std::mt19937 rng_;
-    std::exponential_distribution<double> interval_;  // in samples
-    std::uniform_real_distribution<double> phase_;
+    Exponential interval_;  // in samples
+    UniformReal phase_;
     double countdown_ = 0.0;
 };
 
@@ -514,7 +515,7 @@ private:
     Complex generate() { return shaping_.filter(white()) * scale_; }
 
     std::mt19937 rng_;
-    std::normal_distribution<double> normal_;
+    Normal normal_;
     double scale_ = 0.0;
     bool frozen_ = false;
     FirFilter<Complex> shaping_;
@@ -633,8 +634,8 @@ private:
     }
 
     std::mt19937 rng_;
-    std::uniform_int_distribution<size_t> character_;
-    std::uniform_int_distribution<int> word_length_;
+    UniformInteger<size_t> character_;
+    UniformInteger<int> word_length_;
     double dot_samples_ = 1.0;
     double edge_step_ = 1.0;
     std::deque<Element> elements_;

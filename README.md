@@ -15,7 +15,7 @@ the STOP, always a beep. Like a serial port's "8N1" frame: a start bit, 8 data b
 
 > **Status (2026-09-28): v1.0 is built and measured, in simulation, through a virtual sound device and with
 > pseudo-terminals standing in for radios; it has not been on the air yet.** The library, the three programs, the
-> terminal view and the Arduino examples work: `make test` passes 312 of 312 tests, and `make demo_run`,
+> terminal view and the Arduino examples work: `make test` passes 313 of 313 tests, and `make demo_run`,
 > `make check_embedded` and `make arduino_check` pass. The long regression suite measures 257 rows: 34 PASS,
 > 221 REPORT and **2 known FAIL rows** (plain noise at the promised signal-to-noise ratio: at 1 and 6 bytes/s the
 > receiver misses 4.0 % and 2.6 % of the transmissions, where the gate allows 1 %); Gustavo kept those gates and those
@@ -275,7 +275,7 @@ Ubuntu). Nothing else: the library and the programs use the standard library onl
 git clone https://github.com/solariun/unlimited.git
 cd unlimited
 make          # build/libunlimited.a and bin/unlimited_encode, bin/unlimited_decode, bin/unlimited_modem
-make test     # 312 unit tests, under a minute
+make test     # 313 unit tests, under a minute
 ```
 
 ### 4.2 A round trip through a simulated radio
@@ -834,7 +834,7 @@ radio (a cable to a computer's sound card), and the bench steps with radios, are
 
 ```sh
 make                 # the library and the three programs, every warning an error
-make test            # 312 unit tests
+make test            # 313 unit tests
 make demo_run        # 7 round trips through the simulated radio, and 1 refusal
 make test_long       # the long regression suite: 257 measured rows
 make check_embedded  # the core built as for a microcontroller; the AVR interrupt gate
@@ -845,7 +845,7 @@ make docs            # the figures and the protocol examples, from the real code
 | Target | What it proves | Time on an Apple M4 (2026-09-28) |
 |---|---|---|
 | `make` | everything compiles warning-free | 7.2 s from a clean tree |
-| `make test` | 312 of 312 tests pass | 27 s for the tests (39 s from a clean tree, the build included) |
+| `make test` | 313 of 313 tests pass | 27 s for the tests (39 s from a clean tree, the build included) |
 | `make test_long` | 257 rows against the spec's gates: 34 PASS, the 2 known FAIL rows, 221 REPORT | 1 min 38 s on 10 cores |
 | `make check_embedded` | no heap, exceptions or RTTI; ESP32 and AVR builds; the interrupt cycle gate; the modem's send side without the receiver | 10.3 s |
 | `make arduino_check` | the five sketches compile warning-free; `tx_uno` has no floating point | 74.5 s |

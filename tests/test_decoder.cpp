@@ -1,3 +1,4 @@
+#include "portable_random.hpp"
 #include "support/interference.hpp"
 #include "support/loopback.hpp"
 #include "test_harness.hpp"
@@ -402,7 +403,8 @@ TEST(decoder_awgn_per_speed) {
 // Spec 3.2, 4 L19: the receiver finds the pitch anywhere in its search: mistuned +-50 Hz, and the whole signal
 // shifted across the passband (USB mistuning), at 20 dB. The pitch comes from the first window's tone slots (V20:
 // within 6 Hz; 4.6 Hz at 25 bytes/s next to a filter's edge, whose slope tilts the spectrum) and the pitch loop brings
-// it within 2 Hz by the fourth byte.
+// it within 2 Hz by the fourth byte. Those bounds hold for these draws, not for every draw: at 25 bytes/s next to an
+// edge of the search the first window misses 6 Hz in 31 of 200 draws, every byte still exact (spec 11 P20).
 TEST(decoder_mistuned_and_shifted) {
     const double delay = channel_delay_samples();
     const double offsets[] = {-50.0, -17.0, 0.0, 33.0, 50.0};
@@ -922,8 +924,8 @@ TEST(decoder_mid_transmission_start_waits_for_the_next) {
             const std::vector<int16_t> heard = noisy(recording, config, k_strong_db, 1000 + seeds[r]);
             const Transmission& first = recording.transmissions[0];
             std::mt19937 generator(seeds[r]);
-            std::uniform_real_distribution<double> at(first_start_sample(first) + slot_of(config),
-                                                      end_sample(first) - 30.0 * slot_of(config));
+            sim::UniformReal at(first_start_sample(first) + slot_of(config),
+                                end_sample(first) - 30.0 * slot_of(config));
             const size_t cut = static_cast<size_t>(at(generator));
             Recording tail;
             tail.samples.assign(heard.begin() + static_cast<std::ptrdiff_t>(cut), heard.end());

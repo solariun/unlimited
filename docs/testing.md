@@ -22,7 +22,7 @@ talking to each other through the simulated radio, and once more through a real 
 - Words are explained where they first appear and again in [§13](#13-words-used-in-this-guide); radio words are in the
   [README glossary](../README.md#13-glossary).
 
-> **Status (2026-09-28).** `make test` passes 312 of 312 tests, also under AddressSanitizer and
+> **Status (2026-09-29).** `make test` passes 313 of 313 tests, also under AddressSanitizer and
 > UndefinedBehaviorSanitizer; `make check_embedded`, `make arduino_check`, `make demo_run`, `make tables` and
 > `make docs` pass; the modem's real-audio smoke test passes at 6, 12 and 25 bytes/s. The long suite measures
 > 257 rows: 34 PASS, 221 REPORT and **2 known FAIL rows**: A1 at 1 and 6 bytes/s, where the receiver misses 4.0 % and
@@ -84,14 +84,15 @@ flowchart LR
 and decoder: one run each with fixed seeds, a picture of the conditions; the long suite measures them over many
 transmissions.*
 
-**In depth.** The chain, in the code the tests share (`tests/support/loopback.hpp` and `.cpp`, `pc/channel.hpp`):
+**In depth.** The chain, in the code the tests share (`tests/support/loopback.hpp` and `.cpp`, `pc/channel.hpp`,
+`pc/portable_random.hpp`):
 
 | Step | Function | What it does |
 |---|---|---|
 | Known bytes | `loopback::random_bytes(count, seed)` | bytes from `std::mt19937(seed)` |
 | A sender and its receiver | `speed_config(bytes_per_second)`, `receiver_for(config)` | an `EncoderConfig` at 8000 Hz (the passband widened to 100–3000 Hz when the band needs it); the `DecoderConfig` of the same speed and passband |
 | Encode | `encode(data, config)`, `single(data, config)` | a whole transmission as int16 samples; `single()` puts silence around it (at least 15 slots before: the receiver must hear a silent window before a START, V6) and records where it starts |
-| Channel | `sim::Channel`, `usb(samples, snr_db, seed, amplitude, offset_hz)`, `through_channel()` | the radio path; `usb()` is the common case: USB with white noise at an SNR, mistuned by an offset |
+| Channel | `sim::Channel`, `usb(samples, snr_db, seed, amplitude, offset_hz)`, `through_channel()` | the radio path; `usb()` is the common case: USB with white noise at an SNR, mistuned by an offset; every random draw from `pc/portable_random.hpp`, the same on every system ([§6.8](#68-seeds-determinism-and-parallelism)) |
 | Decode | `run_decoder(samples, config, chunk)` | feeds `Decoder::process()` and records every event with the number of samples consumed when it came |
 | Score | `score(recording, capture, delay)`, `map_events()` | gives every byte event to the transmission whose first START lies 9.5 slots to 10 windows before its lock, at its `byte_index`, and counts |
 
@@ -213,7 +214,7 @@ flowchart TD
     lib --> modem["make modem<br/>bin/unlimited_modem"]
     demo --> demorun["make demo_run<br/>7 round trips and 1 refusal"]
     pcs["pc/ and tests/support/<br/>audio, PTT, KISS port, channel simulator,<br/>loopback helpers"] --> test
-    lib --> test["make test<br/>bin/unlimited_tests<br/>312 unit tests"]
+    lib --> test["make test<br/>bin/unlimited_tests<br/>313 unit tests"]
     lib --> long["make test_long<br/>bin/unlimited_regression<br/>12 tests, 257 rows"]
     pcs --> long
     lib --> docs["make docs<br/>docs/images/*.svg<br/>docs/protocol_examples.md"]
@@ -225,9 +226,9 @@ flowchart TD
 | Target | What it proves | Needs | Time here | Section |
 |---|---|---|---|---|
 | `make` (= `make all`: `lib`, `demo`, `modem`) | the library and the three programs compile, warning-free | compiler, `make` | 7.2 s from a clean tree | [§4](#4-building) |
-| `make test` | 312 unit tests pass | compiler, `make` | 26.9 s for the tests alone; 39.0 s from a clean tree with the build (then 307 tests) | [§5](#5-unit-tests-make-test) |
+| `make test` | 313 unit tests pass | compiler, `make` | 26.9 s for the tests alone; 39.0 s from a clean tree with the build (then 307 tests) | [§5](#5-unit-tests-make-test) |
 | `make test FILTER=…` | the chosen unit tests pass | the same | 0.02 s for `FILTER=modem_min_frame` | [§5.3](#53-running-only-some-tests-filter) |
-| sanitizer runs (a `make test` with other flags) | no memory error and no undefined behaviour (all 312 tests); no data race (the 75 tests with threads) | clang or GCC | 91.9 s from a clean build; 95.2 s | [§5.5](#55-under-the-sanitizers) |
+| sanitizer runs (a `make test` with other flags) | no memory error and no undefined behaviour (all 313 tests); no data race (the 80 tests with threads) | clang or GCC | 91.9 s from a clean build; 95.2 s | [§5.5](#55-under-the-sanitizers) |
 | `make test_long` | 257 measured rows against the spec's gates | compiler, `make` | 1 min 38 s on 10 cores (98.4 s, 769 s of CPU) | [§6](#6-the-long-regression-suite-make-test_long) |
 | `make check_embedded` | the core as a microcontroller builds it: no heap, exceptions or RTTI; decodes with a trapping heap; two modem cores with a trapping heap; cross builds; the AVR interrupt gate; the modem's send side without the receiver | compiler; cross compilers optional | 10.3 s | [§8.1](#81-make-check_embedded) |
 | `make arduino_check` | the five Arduino examples compile warning-free; `tx_uno` has no floating point | `arduino-cli` and the cores | 74.5 s | [§8.2](#82-make-arduino_check) |
@@ -317,7 +318,7 @@ make [all|lib|demo|modem|test|test_long|check_embedded|arduino_check|demo_run|ta
 
 ### 5.1 Running them
 
-**In plain words.** 312 small tests, each checking one promise of the code: that the sine table is exact, that a byte
+**In plain words.** 313 small tests, each checking one promise of the code: that the sine table is exact, that a byte
 window has exactly the right slots, that the receiver gets every byte back through clean and noisy simulated radios,
 that it drops a window whose START or STOP is missing, that the channel simulator's physics are right, that the
 programs parse their options and play through a sound card, that the KISS modem sends one transmission per frame and
@@ -344,7 +345,7 @@ c++ -O2 -std=c++11 -Wall -Wextra -Wpedantic -Werror -MMD -MP -Isrc -Ipc -Itests 
 …
 [ PASS ] wav_codec_reader_rejects_malformed (0 ms)
 
-312 test(s) run, 312 passed, 0 failed
+313 test(s) run, 313 passed, 0 failed
 ```
 
 How to read it:
@@ -358,7 +359,7 @@ How to read it:
 | `[ PASS ] name (N ms)` | every check of the test held; N is its run time |
 | `    file:line: CHECK…(…) failed: …` | one check did not hold ([§5.2](#52-what-a-failure-looks-like)) |
 | `[ FAIL ] name (N ms)` | at least one check of the test failed |
-| `312 test(s) run, 312 passed, 0 failed` | the summary; under it, one `FAILED: name` line per failed test |
+| `313 test(s) run, 313 passed, 0 failed` | the summary; under it, one `FAILED: name` line per failed test |
 
 - **Success:** `0 failed` and exit status 0. **Failure:** exit status 1, then `make: *** [test] Error 1` and status 2.
 - **Time here:** 26.9 s for the tests alone (39.0 s from a clean tree with the build, measured before the ESP32 TNC's 5
@@ -444,7 +445,7 @@ decoder tests. The harness cannot list tests without running them; the sources l
 grep -h '^TEST(' tests/*.cpp
 ```
 
-### 5.4 What the 312 tests cover
+### 5.4 What the 313 tests cover
 
 ```mermaid
 flowchart LR
@@ -489,7 +490,7 @@ flowchart LR
 | `test_encoder.cpp` | 16 | the configuration and its checks, exact lengths at every speed and rate, the slot drift over 10,000 slots, segments and status, the "Hi" slot sequence, waveform bounds and phase, the VOX lead, energies, streaming, abort, chunk invariance |
 | `test_dsp.cpp` | 23 | the receiver's building blocks: oscillator, CIC-2, history and its re-mix, noise trackers, the tone search (floor, bins, edges, fresh tones, steady mask, ban), the impulse blanker, the adaptive line, the look-ahead |
 | `test_decoder.cpp` | 32 | clean loopbacks at every speed, each byte at its STOP, noise, mistuning, USB and LSB, clock error, VOX leads, back-to-back transmissions, the first window decided alone (V20), the settling reference and the noise start (V24), framing errors dropped, the end, the decision lines, short transmissions, no lock on noise, carriers or CW, mid-transmission starts, the fade bridge, stray bytes from speech (reported), DCD, the work per block |
-| `test_channel.cpp` | 35 | the channel simulator's physics: gains and selectivity, SNR calibration, offsets, the LSB mirror, AM and FM noise, emphasis, limiter, clicks, fading statistics, static crashes, AGC, interferers, QSB, clock error, chunking, seeds |
+| `test_channel.cpp` | 36 | the channel simulator's physics: gains and selectivity, SNR calibration, offsets, the LSB mirror, AM and FM noise, emphasis, limiter, clicks, fading statistics, static crashes, AGC, interferers, QSB, clock error, chunking, seeds; and its portable draws, pinned to values that Linux must draw too |
 | `test_wav_codec.cpp`, `test_wav.cpp` | 8, 15 | the core WAV codec (exact RIFF bytes, malformed files); `pc/wav`: 8, 16, 24, 32-bit and float files, stereo, EXTENSIBLE, odd chunks |
 | `test_audio_io.cpp`, `test_pc_audio.cpp` | 5, 8 | the sample sinks and sources, device specs, null and memory devices, the resampling sink |
 | `test_resampler.cpp`, `test_resampling_source.cpp` | 7, 4 | 8000 ↔ 48000, 44100, 11025 Hz: gain, rejection, chunking, speed; the real-time output resampler equal to the resampler at 9 rates, no allocation in `read()` |
@@ -520,13 +521,14 @@ c++ -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-re
 …
 ./bin/asan/unlimited_tests
 …
-312 test(s) run, 312 passed, 0 failed
+313 test(s) run, 313 passed, 0 failed
 ```
 
-- **Success:** 312 passed, exit status 0, and no sanitizer report anywhere in the output. A report contains
+- **Success:** 313 passed, exit status 0, and no sanitizer report anywhere in the output. A report contains
   `runtime error:` or `ERROR: AddressSanitizer` and ends the program at once with a stack trace.
 - **Time here:** 91.9 s from a clean sanitized build (51 files and 307 tests, a little over twice as slow under the
-  checks); 64.2 s again once the ESP32 TNC's test file came (one file compiled, then all 312 tests): 0 reports.
+  checks); 64.2 s again once the ESP32 TNC's test file came (one file compiled, then all 312 tests): 0 reports; 66 s
+  on 2026-09-29 with the portable draws (the changed files compiled, then all 313 tests): 0 reports.
 
 | Part | Why |
 |---|---|
@@ -544,7 +546,8 @@ TSan and ASan do not mix):
 CXXFLAGS="-O1 -g -fsanitize=thread" make BUILDDIR=build/tsan BINDIR=bin/tsan test FILTER="modem kiss transmitter resampling_source audio_live encode_program decode_program"
 ```
 
-On the day of this guide: 75 tests matched, 75 passed, **0 ThreadSanitizer reports**, 95.2 s with the build. Spec §9
+On the day of this guide: 75 tests matched, 75 passed, **0 ThreadSanitizer reports**, 95.2 s with the build;
+on 2026-09-29, with the ESP32 TNC's 5 tests (their names contain `kiss`): 80 matched, 80 passed, 0 reports, 95 s. Spec §9
 records the earlier runs (0 reports in the modem's tests and in 15 repeats of the four-thread test), and what this
 ThreadSanitizer cannot see: a byte buffer written and read in order without synchronization goes unreported, so the
 order of the modem's queue bytes rests on review (spec §11 M5). A ThreadSanitizer build of `unlimited_modem` itself
@@ -803,7 +806,7 @@ the unmodulated carrier as the reference and quote the carrier-to-noise ratio (*
 
 **In plain words.** Every random thing in the suite (the bytes, the noise, the fading, the mistuning) comes from a
 seed computed from the test, the row and the job. Nothing depends on the time of day or on how many cores ran it, so
-the same code on the same machine prints the same rows.
+the same code prints the same rows, on any machine.
 
 ```mermaid
 flowchart LR
@@ -818,16 +821,23 @@ flowchart LR
 
 - `seed_of(test, point, job)` = test × 1,000,003 + point × 10,007 + job + 1 (`tests/long/regression_support.cpp`);
   each job's channel uses the job's seed; transmission *t* of a job carries `random_bytes` from `data_seed(seed, t)` =
-  seed × 31 + *t*; the A rows draw the receiver's mistuning (uniform, ±50 Hz) from `std::mt19937(seed)`.
+  seed × 31 + *t*; the A rows draw the receiver's mistuning (uniform, ±50 Hz) from `std::mt19937(seed)`, through
+  `pc/portable_random.hpp` like every other draw (below).
 - **The point is the row's index in its test's list:** a new row goes at the end of its list, so the existing rows
   keep their seeds and numbers.
 - **Parallelism:** `parallel_map()` (`regression.hpp`) runs the jobs on one thread per core
   (`std::thread::hardware_concurrency()`), the costliest first, stores each result at its job's index and merges them
   in index order. The rows are therefore the same with 1 core or 64. There is no switch to use fewer cores; on a shared
   machine, run the suite at a lower priority with `nice`.
-- **The limit of determinism:** the simulator's noise uses `std::normal_distribution`, whose algorithm each C++
-  standard library chooses: with GCC's libstdc++ on Linux the rows print other digits, and the gates must hold all the
-  same. Every number here is from the Mac of [§2.4](#24-the-machine-used-for-this-guide).
+- **The same draws on every system:** the random *engine* (`std::mt19937` with `std::seed_seq`) is exact in the C++
+  standard, but the *distributions* that turn its numbers into noise are not: each standard library has its own
+  algorithm, so with the standard ones Linux (libstdc++) heard other noise than macOS (libc++), and one unit test failed
+  there ([§10.1](#101-when-only-the-linux-runner-fails)). Every draw of the suite (the channel's noise, fading, static
+  crashes and Morse, the interference scenes, the mistuning, each test's own inputs) therefore comes from
+  `pc/portable_random.hpp`, libc++'s algorithms written out: a seed gives the same rows on Linux and on macOS.
+- **The limit of determinism:** where an ARM processor fuses a multiply and an add into one rounding, the last digits
+  of a few precision notes can differ from an x86 processor's (a phase error of 1e-8 rad, never a byte or a verdict).
+  Every number here is from the Mac of [§2.4](#24-the-machine-used-for-this-guide).
 
 ### 6.9 The two known FAIL rows
 
@@ -1236,8 +1246,9 @@ docs: identical bytes
 For this guide `make docs` ran twice with identical checksums. The same day a figure was fixed:
 `speeds_spectrum.svg` drew its 12 and 25 bytes/s bars and labels below the bottom of its 520-pixel canvas; its canvas
 now ends a margin below the last bar (566 pixels), and every text of the eight figures lies inside its canvas, without
-overlaps, as measured in a headless browser (spec §9). The noise behind the figures follows the standard library
-([§6.8](#68-seeds-determinism-and-parallelism)), so compare runs of the same machine.
+overlaps, as measured in a headless browser (spec §9). The noise behind the figures is the same on every system
+([§6.8](#68-seeds-determinism-and-parallelism)); a coordinate's last digits can still differ between processors, so
+compare the checksums of runs on the same machine.
 
 ---
 
@@ -1264,9 +1275,10 @@ smoke test (needs the virtual device).
 
 ### 10.1 When only the Linux runner fails
 
-**In plain words.** The two runners compile the same code with two different compilers, and each has warnings the
-other lacks. `-Werror` makes every warning a failed build, so a change that is green on a Mac can still fail on
-Ubuntu. Read the failing step first (`gh run view <run> --log-failed`): it names the file, the line and the warning.
+**In plain words.** The two runners build the same code with two different compilers and two different standard
+libraries. Each compiler has warnings the other lacks, and `-Werror` makes every warning a failed build; each library
+may compute some things its own way. So a change that is green on a Mac can still fail on Ubuntu. Read the failing
+step first (`gh run view <run> --log-failed`): it names the file, the line and the warning or the check.
 
 ```mermaid
 flowchart LR
@@ -1286,6 +1298,33 @@ but an error under `-Werror`. Clang has no such check, so the Mac never showed i
 line (`[[gnu::noinline]]`), so g++ always sees `operator new` paired with `operator delete`; and the counter's own
 check now calls `::operator new` directly, because Clang, no longer seeing the counter inside, dropped the unused
 `std::vector` the check had allocated (spec §12.8).
+
+**Then one test failed on Linux only.** With the build fixed, the tests ran on Ubuntu: 311 of 312 passed.
+`decoder_mistuned_and_shifted` found the first window's pitch 6.72 Hz off (853.28 Hz for 860 Hz) where it allows
+6 Hz; on the Mac the same test measured 4.57 Hz. The code was the same; the noise was not:
+
+```mermaid
+flowchart LR
+    seed["the test's seed"] --> engine["std::mt19937<br/>exact in the C++ standard:<br/>the same numbers everywhere"]
+    engine --> dist{"turned into noise by"}
+    dist -->|"std::normal_distribution<br/>of libc++ (macOS)"| a["noise A<br/>4.57 Hz off: pass"]
+    dist -->|"std::normal_distribution<br/>of libstdc++ (Linux)"| b["noise B<br/>6.72 Hz off: fail"]
+    dist -->|"pc/portable_random.hpp<br/>on any system"| c["noise A everywhere"]
+```
+
+The standard fixes the random *engine* exactly, but lets each library choose how a *distribution* turns the engine's
+numbers into, for example, Gaussian noise. libc++ and libstdc++ both use the polar method, which makes its values in
+pairs: libc++ returns the first of a pair first, libstdc++ the second. So on Linux every complex noise sample of the
+simulator had its real and imaginary parts swapped: another noise, as good as the first, but not the one measured on
+the Mac. (Integers differ too: libstdc++ picks them by another method, which changed the Morse.) The proof: the tree
+built on the Mac with libstdc++'s two algorithms, and without fused multiply-add as x86-64 builds, printed Linux's
+853.277344 Hz and every other number of CI's log. The fix: `pc/portable_random.hpp` writes out libc++'s algorithms, and
+every draw of the simulators and of the tests goes through it. Not one number of the Mac moved (spec §12.8), and
+`channel_draws_repeat_on_every_system` checks on both runners that the draws are the pinned ones.
+
+The other noise had shown something real, too: the test's 6 Hz holds for its own draw, not for every draw at
+25 bytes/s next to an edge of the search (31 of 200 draws miss it, every byte still exact). It is recorded as an open
+problem (spec §11 P20), not hidden by the fix.
 
 **A g++ on a Mac, without installing one.** The ESP32 core that `make arduino_check` uses brings GCC 14
 (`xtensa-esp32-elf-g++`). It can compile the test files as a stand-in for Ubuntu's g++, for its warnings only (it
@@ -1544,8 +1583,8 @@ flowchart TD
 | `make test_long` ends with `FAILED: A1_A2_awgn_per_speed` | the two known FAIL rows | check that nothing else failed ([§6.9](#69-the-two-known-fail-rows)) |
 | any other long-suite FAIL | a regression, or a new limit reached | run its test alone to see that it repeats; collect the evidence below |
 | `Integrity` prints nothing to add up | it ran without the tests that fill its ledger | run it with them, or the whole suite |
-| the long-suite numbers differ from spec §4 on Linux | another standard library draws other noise ([§6.8](#68-seeds-determinism-and-parallelism)) | expected; the gates must still hold |
-| `make docs` changed a figure | the behaviour changed, or the machine's standard library differs | `git status --short docs/`; explain the change in `spec.md` |
+| the long-suite numbers differ from spec §4 on Linux | only the last digits of a precision note may ([§6.8](#68-seeds-determinism-and-parallelism)): the draws are the same on every system | a different byte count, BER or verdict is news: run the same commit on a Mac and compare the rows |
+| `make docs` changed a figure | the behaviour changed, or another processor rounded a coordinate differently ([§6.8](#68-seeds-determinism-and-parallelism)) | `git status --short docs/`; explain the change in `spec.md` |
 | `smoke: FAIL: the Microsoft Teams app is running: quit it first` | the app holds the virtual device | quit Teams, run again |
 | `smoke: FAIL: … did not hand over …` | a frame did not arrive byte for byte within 120 s | read `a.log` and `b.log` in the work folder the script names |
 | a sanitizer report | a memory error, undefined behaviour or a data race | the report stops the program with a stack trace; fix the first one first |

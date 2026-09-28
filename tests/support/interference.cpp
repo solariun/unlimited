@@ -1,5 +1,6 @@
 #include "interference.hpp"
 
+#include "portable_random.hpp"
 #include "unlimited/dsp.hpp"
 
 #include <algorithm>
@@ -93,11 +94,11 @@ double raised(double position) {  // 0..1 -> 0..1
 Uniform::Uniform(std::uint32_t seed) : generator_(seed) {}
 
 double Uniform::operator()(double low, double high) {
-    return std::uniform_real_distribution<double>(low, high)(generator_);
+    return sim::UniformReal(low, high)(generator_);
 }
 
 int Uniform::integer(int low, int high) {
-    return std::uniform_int_distribution<int>(low, high)(generator_);
+    return sim::UniformInteger<int>(low, high)(generator_);
 }
 
 double NoInterferer::next() {

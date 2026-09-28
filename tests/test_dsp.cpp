@@ -1,3 +1,4 @@
+#include "portable_random.hpp"
 #include "test_harness.hpp"
 #include "unlimited/dsp.hpp"
 
@@ -57,7 +58,7 @@ std::vector<Complex> mix_tone(double tone_hz, double nco_hz, double amplitude, i
     nco.set_frequency(static_cast<float>(nco_hz));
     Cic2 cic;
     std::mt19937 generator(seed);
-    std::normal_distribution<double> noise(0.0, noise_sigma);
+    sim::Normal noise(0.0, noise_sigma);
     std::vector<Complex> out;
     const int samples = static_cast<int>(seconds * k_rate);
     for (int n = 0; n < samples; ++n) {
@@ -136,7 +137,7 @@ TEST(dsp_cic2_response) {
 TEST(dsp_prefix_history_windows) {
     PrefixHistory history;
     std::mt19937 generator(9);
-    std::uniform_int_distribution<int32_t> value(-(1 << 20), 1 << 20);
+    sim::UniformInteger<int32_t> value(-(1 << 20), 1 << 20);
     std::vector<double> re;
     std::vector<double> im;
     const uint32_t origin = history.end_block();
@@ -148,8 +149,8 @@ TEST(dsp_prefix_history_windows) {
         re.push_back(a);
         im.push_back(b);
     }
-    std::uniform_real_distribution<double> position(1.0, blocks - 80.0);
-    std::uniform_real_distribution<double> length(0.5, 60.0);
+    sim::UniformReal position(1.0, blocks - 80.0);
+    sim::UniformReal length(0.5, 60.0);
     double worst = 0.0;
     for (int trial = 0; trial < 2000; ++trial) {
         const double from = position(generator);
@@ -214,7 +215,7 @@ TEST(dsp_prefix_history_wrap_and_soak) {
 TEST(dsp_prefix_history_rotate) {
     PrefixHistory history;
     std::mt19937 generator(41);
-    std::uniform_int_distribution<int32_t> value(-(1 << 22), 1 << 22);
+    sim::UniformInteger<int32_t> value(-(1 << 22), 1 << 22);
     const uint32_t origin = history.end_block();
     const int blocks = 900;
     std::vector<double> re;
@@ -250,8 +251,8 @@ TEST(dsp_prefix_history_rotate) {
         re.push_back(a);
         im.push_back(b);
     }
-    std::uniform_int_distribution<int> start(1, blocks + 40);
-    std::uniform_int_distribution<int> length(1, 60);
+    sim::UniformInteger<int> start(1, blocks + 40);
+    sim::UniformInteger<int> length(1, 60);
     double worst = 0.0;
     for (int trial = 0; trial < 2000; ++trial) {
         const int a = start(generator);
@@ -292,7 +293,7 @@ TEST(dsp_quantile_tracker) {
     const double means[] = {1e-3, 5.0, 4e6};
     for (std::size_t m = 0; m < test::count_of(means); ++m) {
         std::mt19937 generator(static_cast<std::uint32_t>(10 + m));
-        std::exponential_distribution<double> exponential(1.0 / means[m]);
+        sim::Exponential exponential(1.0 / means[m]);
         QuantileTracker tracker;
         tracker.reset(static_cast<float>(means[m] * 20.0));  // start far off
         double average = 0.0;
@@ -318,8 +319,8 @@ TEST(dsp_noise_tracker) {
     const int inputs = 10000;
     const int averaged = 5000;
     std::mt19937 generator(21);
-    std::exponential_distribution<double> exponential(1.0 / mean);
-    std::uniform_real_distribution<double> uniform(0.0, 1.0);
+    sim::Exponential exponential(1.0 / mean);
+    sim::UniformReal uniform(0.0, 1.0);
     const double k_impulse_share = 0.05;  // 5 % of the windows hold an impulse of 8 x the background
     const double k_impulse = 8.0;
     const double impulsive_mean = mean * (1.0 + k_impulse_share * k_impulse);
@@ -373,7 +374,7 @@ TEST(dsp_tone_search_floor) {
         ToneSearch search;
         search.configure(300, 2700, k_test_slot_us);
         std::mt19937 generator(static_cast<std::uint32_t>(13 + s));
-        std::normal_distribution<double> noise(0.0, sigmas[s]);
+        sim::Normal noise(0.0, sigmas[s]);
         const int blocks = 300;
         float candidate_hz = 0.0f;
         bool locked = false;
@@ -397,7 +398,7 @@ TEST(dsp_tone_search_between_bins) {
         ToneSearch search;
         search.configure(300, 2700, k_test_slot_us);
         std::mt19937 generator(static_cast<std::uint32_t>(100 + t));
-        std::normal_distribution<double> noise(0.0, sigma);
+        sim::Normal noise(0.0, sigma);
         float estimate = 0.0f;
         bool locked = false;
         const int silence = 20 * ToneSearch::k_block_samples + 37;
@@ -431,7 +432,7 @@ TEST(dsp_tone_search_weak_half_bin) {
             ToneSearch search;
             search.configure(300, 2700, k_test_slot_us);
             std::mt19937 generator(static_cast<std::uint32_t>(300 + 10 * t + seed));
-            std::normal_distribution<double> noise(0.0, sigma);
+            sim::Normal noise(0.0, sigma);
             float estimate = 0.0f;
             bool locked = false;
             const int silence = 75 * ToneSearch::k_block_samples + 37;  // 1.5 s of noise first, as in A3'
@@ -460,7 +461,7 @@ TEST(dsp_tone_search_recent_floor) {
     ToneSearch search;
     search.configure(300, 2700, k_test_slot_us);
     std::mt19937 generator(31);
-    std::normal_distribution<double> noise(0.0, 1.0);
+    sim::Normal noise(0.0, 1.0);
     const double quiet_sigma = 100.0;
     const double loud_sigma = 1000.0;
     const double rise_s = 0.3;  // the AGC's decay time constant
@@ -486,7 +487,7 @@ TEST(dsp_tone_search_steady_mask) {
     ToneSearch search;
     search.configure(300, 2700, k_test_slot_us);
     std::mt19937 generator(21);
-    std::normal_distribution<double> noise(0.0, 300.0);
+    sim::Normal noise(0.0, 300.0);
     const double carrier_hz = 1000.0;
     const double keyed_hz = 2000.0;
     const double keying_hz = 4.0;  // 125 ms on/off
@@ -509,7 +510,7 @@ TEST(dsp_tone_search_ban) {
     const uint16_t ban_blocks = 50;
     search.ban(static_cast<float>(tone), ban_blocks);
     std::mt19937 generator(8);
-    std::normal_distribution<double> noise(0.0, 200.0);
+    sim::Normal noise(0.0, 200.0);
     float estimate = 0.0f;
     int locked_block = -1;
     for (int n = 0; n < 120 * ToneSearch::k_block_samples && locked_block < 0; ++n) {
@@ -527,7 +528,7 @@ TEST(dsp_impulse_blanker) {
     ImpulseBlanker blanker;
     std::mt19937 generator(5);
     // block energy of 16 samples of white noise: chi-square with 16 degrees of freedom, mean 1
-    std::gamma_distribution<double> noise(8.0, 1.0 / 8.0);
+    sim::Gamma noise(8.0, 1.0 / 8.0);
     const int spike_block = 200;
     const int blocks = 400;
     std::vector<bool> blanked;
@@ -589,7 +590,7 @@ TEST(dsp_tone_search_stays_inside_range) {
         ToneSearch search;
         search.configure(335, 2665, k_test_slot_us);
         std::mt19937 generator(static_cast<std::uint32_t>(50 + t));
-        std::normal_distribution<double> noise(0.0, 100.0);
+        sim::Normal noise(0.0, 100.0);
         float estimate = 0.0f;
         bool locked = false;
         for (int n = 0; n < 80 * ToneSearch::k_block_samples && !locked; ++n) {
@@ -614,7 +615,7 @@ TEST(dsp_tone_search_edge_bins) {
         ToneSearch search;
         search.configure(low, high, k_test_slot_us);
         std::mt19937 generator(static_cast<std::uint32_t>(60 + t));
-        std::normal_distribution<double> noise(0.0, 300.0);
+        sim::Normal noise(0.0, 300.0);
         const double slot = k_test_slot_us * k_rate / 1e6;
         float lead = 0.0f;
         float estimate = 0.0f;
@@ -683,7 +684,7 @@ namespace {
 struct KeyedFeed {
     ToneSearch search;
     std::mt19937 generator;
-    std::normal_distribution<double> noise;
+    sim::Normal noise;
     int sample;
     double carrier_hz;  // a steady carrier as well when > 0
     explicit KeyedFeed(uint32_t seed) : generator(seed), noise(0.0, 300.0), sample(0), carrier_hz(0.0) {

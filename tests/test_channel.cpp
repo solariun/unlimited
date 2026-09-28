@@ -1,4 +1,5 @@
 #include "channel.hpp"
+#include "portable_random.hpp"
 #include "test_harness.hpp"
 
 #include <algorithm>
@@ -16,8 +17,13 @@
 
 using unlimited::sim::Channel;
 using unlimited::sim::ChannelConfig;
+using unlimited::sim::Exponential;
 using unlimited::sim::FadingPreset;
+using unlimited::sim::Gamma;
 using unlimited::sim::Mode;
+using unlimited::sim::Normal;
+using unlimited::sim::UniformInteger;
+using unlimited::sim::UniformReal;
 using unlimited::sim::apply_preset;
 using unlimited::sim::fm_cnr_db;
 
@@ -1189,7 +1195,7 @@ TEST(channel_chunking_invariance) {
     const double duration_s = 2.0;
     const std::uint32_t input_seed = 123;
     std::mt19937 rng(input_seed);
-    std::normal_distribution<double> normal(0.0, noise_sigma);
+    Normal normal(0.0, noise_sigma);
     std::vector<float> input = tone(freq, level, duration_s);
     for (size_t n = 0; n < input.size(); ++n) input[n] += static_cast<float>(normal(rng));
 
@@ -1207,7 +1213,7 @@ TEST(channel_chunking_invariance) {
 
         Channel channel(config);
         std::vector<float> chunked(input.size());
-        std::uniform_int_distribution<size_t> chunk_size(0, max_chunk);
+        UniformInteger<size_t> chunk_size(0, max_chunk);
         size_t pos = 0;
         while (pos < input.size()) {
             const size_t count = std::min(chunk_size(rng), input.size() - pos);
@@ -1239,6 +1245,57 @@ TEST(channel_reset_and_seed) {
     CHECK(run(config, input) == first);
     config.seed = other_seed;
     CHECK(run(config, input) != first);
+}
+
+// Spec 12.8: a seed gives the same draws on every system. These values were drawn on macOS, where the draws equal
+// libc++'s standard distributions bit for bit; Linux (libstdc++) must draw the same. A real value may differ in its
+// last bits where a processor fuses a multiply and an add; whole numbers and the engine's next output, never.
+TEST(channel_draws_repeat_on_every_system) {
+    const std::uint32_t seed = 2026;
+    const double same_value = 1e-12;
+    {
+        std::mt19937 engine(seed);
+        Normal normal;
+        const double expected[] = {-0.18422739243031372, 0.046741668197978994, 0.93427996117398993,
+                                   -0.67169979055848195};
+        for (size_t i = 0; i < count_of(expected); ++i) CHECK_NEAR(normal(engine), expected[i], same_value);
+        CHECK_EQ(engine(), 2397665997u);
+    }
+    {
+        std::mt19937 engine(seed);
+        const UniformReal uniform(-40.0, 40.0);
+        const double expected[] = {21.328723546477882, 36.895083047691948, 37.029539607030067};
+        for (size_t i = 0; i < count_of(expected); ++i) CHECK_NEAR(uniform(engine), expected[i], same_value);
+        CHECK_EQ(engine(), 381818397u);
+    }
+    {
+        std::mt19937 engine(seed);
+        const Exponential exponential(0.5);
+        const double expected[] = {2.9100806204548517, 6.4980793321695245, 6.5866193588095685};
+        for (size_t i = 0; i < count_of(expected); ++i) CHECK_NEAR(exponential(engine), expected[i], same_value);
+        CHECK_EQ(engine(), 381818397u);
+    }
+    {
+        std::mt19937 engine(seed);
+        const Gamma gamma(8.0, 1.0 / 8.0);
+        const double expected[] = {1.254898334222482, 1.307641473030954, 1.0398713399249493};
+        for (size_t i = 0; i < count_of(expected); ++i) CHECK_NEAR(gamma(engine), expected[i], same_value);
+        CHECK_EQ(engine(), 1271169940u);
+    }
+    {
+        std::mt19937 engine(seed);
+        const UniformInteger<int> die(1, 6);
+        const int expected[] = {2, 3, 1, 6, 6, 6, 5, 5, 4, 6, 5, 5};
+        for (size_t i = 0; i < count_of(expected); ++i) CHECK_EQ(die(engine), expected[i]);
+        CHECK_EQ(engine(), 3915786882u);
+    }
+    {
+        std::mt19937 engine(seed);
+        const UniformInteger<int> wide(-20000, 20000);
+        const int expected[] = {-17695, 12134, -11014, 9624};
+        for (size_t i = 0; i < count_of(expected); ++i) CHECK_EQ(wide(engine), expected[i]);
+        CHECK_EQ(engine(), 4194617421u);
+    }
 }
 
 TEST(channel_other_sample_rates) {
@@ -1318,7 +1375,7 @@ std::vector<Run> runs(const std::vector<double>& envelope, double threshold, siz
 std::vector<float> run_chunked(const ChannelConfig& config, const std::vector<float>& input, bool pointer_api,
                                std::mt19937& rng) {
     const size_t max_chunk = 700;
-    std::uniform_int_distribution<size_t> chunk_size(0, max_chunk);
+    UniformInteger<size_t> chunk_size(0, max_chunk);
     Channel channel(config);
     std::vector<float> out;
     size_t pos = 0;
@@ -1572,7 +1629,7 @@ TEST(channel_chunking_invariance_with_additions) {
     const double clock_ppms[] = {0.0, 250.0};  // 0: pointer process(); otherwise the vector one
     const std::uint32_t input_seed = 321;
     std::mt19937 rng(input_seed);
-    std::normal_distribution<double> normal(0.0, noise_sigma);
+    Normal normal(0.0, noise_sigma);
     std::vector<float> input = tone(freq, level, duration_s);
     for (size_t n = 0; n < input.size(); ++n) input[n] += static_cast<float>(normal(rng));
 

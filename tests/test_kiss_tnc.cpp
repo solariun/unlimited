@@ -7,6 +7,7 @@
 // the 1-bit stream through the wiring's two RC poles, heard by the other radio's sound card.
 #include "../examples/arduino/kiss_tnc_esp32/kiss_tnc.h"
 #include "channel.hpp"
+#include "portable_random.hpp"
 #include "resampler.hpp"
 #include "test_harness.hpp"
 #include "unlimited/modem.hpp"
@@ -534,7 +535,7 @@ private:
     std::deque<float> adc_audio_;
     PinListener listener_;
     std::mt19937 generator_;
-    std::normal_distribution<double> adc_noise_;
+    sim::Normal adc_noise_;
     double loud_level_;
 };
 

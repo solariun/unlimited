@@ -1,3 +1,4 @@
+#include "portable_random.hpp"
 #include "resampler.hpp"
 #include "test_harness.hpp"
 
@@ -15,6 +16,8 @@
 
 using unlimited::pc::Resampler;
 using unlimited::pc::resample;
+using unlimited::sim::Normal;
+using unlimited::sim::UniformInteger;
 
 namespace {
 
@@ -182,8 +185,8 @@ TEST(resampler_chunking_invariance) {
     std::vector<RatePair> pairs(k_pairs, k_pairs + count_of(k_pairs));
     pairs.insert(pairs.end(), clock_pairs, clock_pairs + count_of(clock_pairs));
     std::mt19937 rng(seed);
-    std::normal_distribution<double> normal(0.0, noise_sigma);
-    std::uniform_int_distribution<size_t> chunk_size(0, max_chunk);
+    Normal normal(0.0, noise_sigma);
+    UniformInteger<size_t> chunk_size(0, max_chunk);
     for (size_t p = 0; p < pairs.size(); ++p) {
         std::vector<float> input = sine(freq, pairs[p].from_hz, duration_s);
         for (size_t n = 0; n < input.size(); ++n) input[n] += static_cast<float>(normal(rng));

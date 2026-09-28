@@ -107,7 +107,7 @@ struct ChannelConfig {
     double clock_ppm = 0;
 
     double output_gain = 1.0;
-    // Output repeats per seed and standard library (std::normal_distribution is implementation-defined).
+    // Output repeats per seed on every system: the draws are portable_random.hpp's, not the standard library's.
     std::uint32_t seed = 1;
 };
 

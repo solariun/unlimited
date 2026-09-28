@@ -1,6 +1,7 @@
 // The real-time output resampler (spec 12.5, open issue 1 of the radio I/O layer): the modem's 8 kHz audio at a
 // device's rate, inside the device callback: the Resampler's output exactly, no allocation in read().
 #include "audio.hpp"
+#include "portable_random.hpp"
 #include "resampling_source.hpp"
 #include "test_harness.hpp"
 
@@ -15,6 +16,7 @@
 
 using unlimited::pc::ResamplingSource;
 using unlimited::pc::resample;
+using unlimited::sim::UniformInteger;
 
 // Allocation counter for the whole test binary: operator new counts while this thread asks it to. Both stay out of
 // line: g++ inlines one of them into its caller and then sees operator new paired with free (or malloc with operator
@@ -73,7 +75,7 @@ private:
 
 std::vector<int16_t> noise(size_t count) {
     std::mt19937 generator(k_seed);
-    std::uniform_int_distribution<int> value(-k_peak, k_peak);
+    UniformInteger<int> value(-k_peak, k_peak);
     std::vector<int16_t> samples(count);
     for (size_t i = 0; i < count; ++i) samples[i] = static_cast<int16_t>(value(generator));
     return samples;
