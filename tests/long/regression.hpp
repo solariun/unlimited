@@ -14,8 +14,10 @@
 #include <thread>
 #include <vector>
 
-// Long regression suites of v0.3 (spec 8.3-8.5, the long L5 and L20, the L19 passband checks): shared job runner,
-// scoring and result lines. One pitch, a beep = 1, silence = 0, packages of N bits framed by twisted markers.
+// The long regression suite of v1.0 (spec 4, 8): the essential families A1/A2 (AWGN per speed, the 70 % line against
+// the adaptive one), A3 (acquisition from byte 0), S1 (short transmissions), L5 (clock error), L19 (passband and
+// shift), C (channels) and F (false locks), and the integrity row over all of them. One byte per window of 10 slots.
+// Its gates are provisional (spec 4): they are measured and reported, and changed only by Gustavo's decision.
 namespace unlimited {
 namespace regression {
 
@@ -51,21 +53,20 @@ std::vector<Result> parallel_map(std::size_t count, Work work, const std::vector
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Presets, receivers and the release gates of spec 4.1.
+// Speeds, senders, receivers and the provisional gates of spec 4.
 // ---------------------------------------------------------------------------------------------------------
-EncoderConfig preset(Preset preset);  // 8000 Hz
-// Preset::hf with T and N replaced (loopback::slot_config: the passband widened when the band needs it).
-EncoderConfig slot_preset(double slot_ms, std::uint8_t bits);
+const std::size_t k_speed_count = 5;
+extern const float k_speeds[k_speed_count];  // 1, 3, 6, 12, 25 bytes/s (spec 1.3)
+
+// The provisional A1 gate of a speed (spec 4): v0.3's gate at the same T, key-down SNR in 2500 Hz: 1 byte/s -6.5,
+// 3 -1.7, 6 +1.3, 12 +4.3, 25 +8.0 dB.
+double gate_db(float speed);
+// 8000 Hz at `speed` bytes/s on tone_hz; the passband widened to 100..3000 Hz when the band needs it.
+EncoderConfig speed_config(float speed, std::uint16_t tone_hz = k_default_tone_hz);
+// The receiver of that sender: its speed and passband, the fixed 70 % line unless adaptive.
+DecoderConfig receiver_for(const EncoderConfig& config, bool adaptive = false);
+std::string speed_text(float speed);  // "6 bytes/s"
 double slot_ms_of(const EncoderConfig& config);
-// The receiver whose window holds T: the fm profile below 8 ms, ssb to 64 ms, ssb with min_slot_ms 16 above.
-DecoderConfig receiver_for(const EncoderConfig& config);
-// Spec 4.1 release gate (key-down SNR in 2500 Hz) of a slot length: 4 ms +8.0, 8 ms +4.5, 16 ms +1.5, 32 ms -1.5,
-// 64 ms -4.5, 128 ms -6.5 dB.
-double gate_db(double slot_ms);
-std::string preset_name(Preset preset);
-std::string config_text(const EncoderConfig& config);  // "T=16 ms N=8 1500 Hz"
-std::string receiver_text(const DecoderConfig& config);  // "receiver 8..64 ms, 300-2700 Hz"
-std::string profile_name(Profile profile);
 
 // ---------------------------------------------------------------------------------------------------------
 // Jobs: a recording of transmissions separated by silence, a channel, one or more decoders.
@@ -73,110 +74,73 @@ std::string profile_name(Profile profile);
 struct TxPlan {
     EncoderConfig config;
     std::vector<std::uint8_t> data;
-    std::vector<std::vector<std::uint8_t> > packets;  // payloads when data is a sequence of packets
 };
-
-// The genie receiver of the C2 ablation (spec 4.2): known timing and tone, three reference lines.
-enum GenieRule { genie_interpolated, genie_start_only, genie_fixed_level, genie_rules };
 
 const double k_quiet_ms = 1500.0;  // receiver noise before, between and after transmissions
 
 struct JobPlan {
     std::vector<TxPlan> transmissions;
-    double lead_ms = k_quiet_ms;
+    double lead_ms = k_quiet_ms;  // raised to 15 slots: the decoder needs a silent window before its first START
     double gap_ms = k_quiet_ms;
     double tail_ms = k_quiet_ms;
     bool use_channel = true;
     sim::ChannelConfig channel;
     double peak_factor = 1.0;  // expected received peak over the key-down tone (fading, interferers)
-    double rx_ppm = 0.0;       // receiver sample-clock error (channel.clock_ppm is the transmitter's)
     std::vector<DecoderConfig> decoders;
-    bool genie = false;        // also run the genie receiver (usb or clean channel, no clock error)
     double cost() const;       // relative CPU cost, for scheduling
 };
 
-const std::size_t k_lost_reasons = static_cast<std::size_t>(LostReason::unsupported) + 1;
-
 struct Outcome {
     loopback::Score score;
-    std::size_t cold_joins = 0;            // late-join locks that count bytes from the join (spec 3.12, V7)
-    std::size_t acausal_bytes = 0;         // bytes mapped to a package whose STOP had not been received yet
-    std::size_t misplaced_segments = 0;    // locks whose bytes sit at a wrong byte_index (a shift, spec 3.13)
-    std::size_t misplaced_bytes = 0;
-    std::size_t lost_reasons[k_lost_reasons] = {};
-    std::size_t max_wrong_run = 0;         // consecutive wrong or unmapped bytes (F6)
     std::size_t transmissions = 0;
-    std::size_t locked_transmissions = 0;  // a `locked` with the sent T (3 %) and N for the transmission (A3)
-    std::size_t wrong_locks = 0;           // a `locked` with another T or N than the transmission on air
-    std::size_t stray_locks = 0;           // a `locked` before the first transmission
-    std::size_t late_locks = 0;            // a right `locked` more than 4 T after its transmission ended
-    std::size_t packets_sent = 0;
-    std::size_t packets_ok = 0;
-    std::size_t packets_bad = 0;           // CRC-valid packets that were never sent (F5)
-    std::vector<float> snr_db;             // per byte event (A4)
-    double airtime = 0.0;                  // START of package 0 to the end of the last STOP, all transmissions
-    double locked_airtime = 0.0;           // part of it between `locked` and `lost`/`end` (C3)
-    double slot_error_sum = 0.0;           // |measured slot_ms / true - 1| over correct byte events (L5)
+    std::size_t shifted_segments = 0;  // locks whose bytes sit at a wrong byte_index (a whole-window shift)
+    std::size_t shifted_bytes = 0;
+    std::size_t lost_framing = 0;      // `lost` events (framing)
+    double slot_error_sum = 0.0;       // |measured slot_ms / heard T - 1| over right byte events (L5)
     double worst_slot_error = 0.0;
     std::size_t slot_events = 0;
-    double latency_sum = 0.0;              // release after the end of the byte's STOP slot, in slots
-    double latency_max = 0.0;
-    std::size_t genie_bits = 0;
-    std::size_t genie_errors[genie_rules] = {};
-    double delivered() const;              // matched / sent
-    double correct() const;                // (matched - wrong) / sent
+    double delivered() const;          // matched / sent
     double mean_slot_error() const;
-    double genie_ber(GenieRule rule) const;
 };
 
 void merge(Outcome& into, const Outcome& from);
 
-// A BER or ratio gate needs released bits (spec 8 conventions): at least half of the bytes delivered.
+// A BER gate needs released bits: at least half of the bytes delivered.
 const double k_min_delivered = 0.5;
 bool delivered(const Outcome& outcome);
-
-// Gate decision G5 (spec 0.8): a gate that asked for 0 bit errors asks for BER <= 1e-4 with 0 extra and 0 shifted
-// bytes. With random noise even a perfect receiver sometimes makes 1 error in 24,000 bits, so a zero-error gate failed
-// by chance about once per 100 rows; the integrity checks (extra, shifted) stay strict.
+// Spec 0.8 G5, kept: "0 bit errors" is BER <= 1e-4 with 0 extra and 0 shifted bytes.
 const double k_near_zero_ber = 1e-4;
-bool near_zero_errors(const Outcome& outcome);  // BER <= k_near_zero_ber, 0 extra bytes, 0 shifted (misplaced) bytes
+bool near_zero_errors(const Outcome& outcome);
+bool integrity(const Outcome& outcome);  // 0 extra and 0 shifted bytes
 
 TxPlan random_tx(const EncoderConfig& config, std::size_t bytes, std::uint32_t seed);
-TxPlan packet_tx(const EncoderConfig& config, std::size_t bytes, std::uint32_t seed);  // >= bytes of packets
 
 // Runs one job; one Outcome per decoder.
 std::vector<Outcome> run_job(const JobPlan& job);
-
-// Scores a decoder's events against a recording as the decoder received it, without clock error: `shift` samples
-// are added to every position of the recording (the channel delay, less the samples a late receiver missed).
-Outcome evaluate_recording(const loopback::Recording& recording, const loopback::Capture& capture, double shift);
-
 // Runs jobs of several points in parallel and merges them per point and decoder.
 std::vector<std::vector<Outcome> > run_points(const std::vector<JobPlan>& jobs, const std::vector<std::size_t>& point,
                                               std::size_t points);
 
 // Transmission count so that `bits` data bits are sent in transmissions of `bytes` bytes.
 std::size_t transmissions_for(double bits, std::size_t bytes);
-
 // Airtime of one transmission (spec 2.4) plus the gap after it, and how many go into one job: about six minutes
 // of audio per job (memory, load balance), and at least eight jobs per point when there are enough.
 double transmission_seconds(const EncoderConfig& config, std::size_t bytes, double gap_ms);
 std::size_t transmissions_per_job(double transmission_s, std::size_t count);
 std::uint32_t data_seed(std::uint32_t job_seed, std::size_t transmission);
 std::uint32_t seed_of(std::uint32_t test, std::uint32_t point, std::uint32_t job);
+// Jobs of `count` transmissions of `bytes` bytes from `make` (a sender per transmission), `point` recorded per job.
+void add_jobs(std::vector<JobPlan>& jobs, std::vector<std::size_t>& points, std::size_t point, const JobPlan& shape,
+              const EncoderConfig& config, std::size_t count, std::size_t bytes, std::uint32_t test);
 
 // int16 -> sim::Channel -> int16, scaled so that key-down peaks times peak_factor plus 5 sigma of noise stay
 // below full scale; clock_ppm changes the length.
 std::vector<std::int16_t> apply_channel(const std::vector<std::int16_t>& samples, sim::ChannelConfig config,
                                         std::int16_t amplitude, double peak_factor);
-// Channel delay (samples) of a mode at 8 kHz: the energy centroid of a beep (loopback), cached.
-double channel_delay(sim::Mode mode);
-
+double channel_delay(sim::Mode mode);  // samples at 8 kHz: the energy centroid of a beep (loopback), cached
 double snr_for_fm_cnr(double cnr_db, const sim::ChannelConfig& config);  // CNR in the FM IF -> snr_db
 double snr_for_am_cnr(double cnr_db, const sim::ChannelConfig& config);  // CNR in the AM IF -> snr_db
-double amplitude_of_db(double db);
-// a / b where anything over 0 counts as infinitely worse and 0 / 0 as equal.
-double ratio(double a, double b);
+sim::ChannelConfig usb_channel(double snr_db, double offset_hz = 0.0);
 
 // ---------------------------------------------------------------------------------------------------------
 // Result lines: "RESULT | id | condition | measured | gate | PASS/FAIL/REPORT". A failing gate fails the
@@ -189,48 +153,25 @@ bool result(const std::string& id, const std::string& condition, const std::stri
 void note(const std::string& text);
 std::string format(const char* pattern, ...);
 std::string ber_text(const Outcome& outcome);   // "BER 1.2e-05 (204800 bits), delivered 99.9%, loss ..."
-std::string lost_text(const Outcome& outcome);  // "lost-ev 2 (gone 2, alias 0, preamble 0, unsupported 0)"
-std::string lock_text(const Outcome& outcome);  // "locks 20/20 tx (+0 wrong T/N, 0 stray)"
+std::string lock_text(const Outcome& outcome);  // "locked 20/20 tx from byte 0, 0 lost"
+double upper_95(std::size_t errors, double trials);  // upper 95 % bound of a rate (Poisson; 3/n with none)
 
-// Upper 95 % confidence bound of a rate after `errors` in `trials` (Poisson; 3/n with no error).
-double upper_95(std::size_t errors, double trials);
-
-// F5 and F6 ledgers, filled by the A, C, F, L5 and L19 tests and checked by the F5/F6 tests.
-void ledger_packets(const std::string& where, const Outcome& outcome);
-void ledger_runs(const std::string& where, const Outcome& outcome, bool at_gate_plus_3);
+// The integrity ledger: every A, S, L and C row adds its extra and shifted bytes; the integrity test checks them.
+void ledger(const std::string& where, const Outcome& outcome);
 void print_summary();
 
 // Suite entry points (one TEST each, registered in order in regression_suite.cpp).
-void test_l5_clock();
-void test_a1_smart_line();
-void test_a1_n_sweep();
-void test_a2_fixed_line();
+void test_a1_awgn();
 void test_a3_acquisition();
-void test_a4_snr_report();
-void test_c1_ccir_good();
-void test_c2_ccir_moderate();
-void test_c3_ccir_poor();
-void test_c4_flat_rayleigh();
-void test_c5_qsb();
-void test_c6_qrn();
-void test_c7_agc();
-void test_c8_carrier();
-void test_c9_cw();
-void test_c10_fm();
-void test_c11_am();
-void test_c12_flutter();
-void test_c13_agc_fading();
-void test_c14_sideband_shift_fading();
-void test_c15_fm_emphasis_mismatch();
+void test_s1_short();
+void test_l5_clock();
 void test_l19_passband();
-void test_l20_cold_late_join();
+void test_c_channels();
 void test_f1_noise();
 void test_f2_carrier();
 void test_f3_cw();
 void test_f4_speech();
-void test_f7_package_learning();
-void test_f5_packets();
-void test_f6_runs();
+void test_integrity();
 
 }  // namespace regression
 }  // namespace unlimited

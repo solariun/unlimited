@@ -1,4 +1,4 @@
-// AVR side of the ISR gate (spec 8.6 B5): the Timer2 ISR body of examples/arduino/tx_uno, called once per sample from
+// AVR side of the ISR gate (spec 3.9, 8): the Timer2 ISR body of examples/arduino/tx_uno, called once per sample from
 // main() the way the timer would call it, for the transmission of case UNLIMITED_ISR_CASE (isr_cases.hpp). The
 // sample is also stored in avr_isr_sample for the host program (tests/avr/isr_cycles.cpp), which runs this image on
 // its ATmega328P interpreter. Built like a sketch: avr-g++ -Os -flto -mmcu=atmega328p.

@@ -1,5 +1,7 @@
 # Unlimited
 
+> **Being rewritten for v1.0.** This page still describes v0.3 (tune, sync, packages of N bits, presets); v1.0 sends one byte per window of 10 slots at a speed in bytes per second (`--bps`). Until the rewrite, `spec.md` is the reference, and v0.3 is at tag `v0.3.0`.
+
 **Data through the audio of any radio, sent as short beeps on one pitch.** A C++11 library, two command-line demos
 and microcontroller examples for HF SSB (USB or LSB), AM and VHF/UHF FM.
 

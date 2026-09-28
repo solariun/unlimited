@@ -1,0 +1,46 @@
+# Builds and tests every push and pull request on Linux (GCC, ALSA) and macOS (Clang, CoreAudio): spec 12.8, V13.
+# CI proves the builds and the tests; only radios prove the audio path (the runners have no sound cards, and the
+# tests never play or record).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} (${{ matrix.cxx }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++
+          - os: macos-latest
+            cxx: clang++
+    runs-on: ${{ matrix.os }}
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the ALSA headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      - name: Compiler
+        run: $CXX --version
+
+      - name: Build (make)
+        run: make -j4
+
+      - name: Unit tests (make test)
+        run: make -j4 test
+
+      - name: Demo round trips (make demo_run)
+        run: make demo_run
+
+      - name: Embedded check (make check_embedded)
+        run: make check_embedded

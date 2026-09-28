@@ -1,7 +1,6 @@
-// Heap trap (spec 8.6 B2): the whole core decodes every preset, N = 1 and N = 32 at 16 ms, a packet round trip (a
-// short, an AX.25-size and a maximum-size packet) and a WAV round trip while every C++ allocation function aborts.
-// Built by 'make check_embedded' from this file and src/ only, with -fno-exceptions -fno-rtti; malloc and
-// friends are covered by its nm check.
+// Heap trap (spec 8): the whole core decodes the five speeds of spec 1.3, a transmission with a VOX lead, two back to
+// back and a WAV round trip while every C++ allocation function aborts. Built by 'make check_embedded' from this file
+// and src/ only, with -fno-exceptions -fno-rtti; malloc and friends are covered by its nm check.
 #include "unlimited.h"
 
 #include <new>
@@ -57,43 +56,35 @@ namespace {
 using namespace unlimited;
 
 const size_t k_max_bytes = 1000;
-const size_t k_chunk_samples = 37;              // odd on purpose; shorter than any frame, so the queue never runs dry
-const uint32_t k_lead_silence_ms = 200;
-const uint32_t k_max_trailing_ms = 3000;        // END arrives about 2.4 T after the last STOP
+const size_t k_chunk_samples = 37;              // odd on purpose; shorter than any slot, so the queue never runs dry
+const uint32_t k_lead_silence_ms = 500;
+const uint32_t k_lead_silence_slots = 15;       // the decoder needs a whole silent window before its first START (V6)
+const uint32_t k_us_per_ms = 1000;
+const uint32_t k_max_trailing_ms = 3000;        // the end comes one silent window after the last STOP, plus the look-ahead
 const uint32_t k_ms_per_s = 1000;
 const float k_us_per_ms_f = 1000.0f;
-const float k_slot_tolerance = 0.005f;          // L1: measured slot_ms within 0.5 %
+const float k_slot_tolerance = 0.005f;          // measured slot_ms within 0.5 %
 const float k_percent = 100.0f;
 const uint32_t k_random_seed = 0x2545F491u;
 const uint32_t k_wav_buffer_bytes = 64 * 1024;
+const uint16_t k_vox_lead_ms = 150;
 
 struct Case {
     const char* name;
-    Preset preset;
-    uint32_t slot_us;         // 0: the preset's
-    uint8_t bits_per_package; // 0: the preset's
-    Profile profile;
+    uint16_t centi_bytes_per_second;
+    uint16_t vox_lead_ms;
     size_t bytes;
+    uint8_t transmissions;  // back to back, each preceded by nothing but the previous one's tail
 };
 
-// Every preset, then N = 1 and N = 32 at 16 ms (spec 8.6 B2).
+// The five speeds of spec 1.3, a VOX lead, and two transmissions back to back (spec 8).
 const Case k_cases[] = {
-    {"hf_slow", Preset::hf_slow, 0, 0, Profile::ssb, 60},
-    {"hf", Preset::hf, 0, 0, Profile::ssb, 120},
-    {"hf_fast", Preset::hf_fast, 0, 0, Profile::ssb, 240},
-    {"am", Preset::am, 0, 0, Profile::am, 240},
-    {"fm", Preset::fm, 0, 0, Profile::fm, 480},
-    {"T16 N1", Preset::hf, 16000, 1, Profile::ssb, 60},
-    {"T16 N32", Preset::hf, 16000, 32, Profile::ssb, 160},
+    {"1 B/s", 100, 0, 12, 1},     {"3 B/s", 300, 0, 30, 1},   {"6 B/s", 600, 0, 60, 1},
+    {"12 B/s", 1200, 0, 120, 1},  {"25 B/s", 2500, 0, 250, 1}, {"6 B/s VOX", 600, k_vox_lead_ms, 30, 1},
+    {"6 B/s x2", 600, 0, 20, 2},
 };
 const size_t k_case_count = sizeof(k_cases) / sizeof(k_cases[0]);
 
-const char k_packet_text[] = "CQ CQ DE UNLIMITED HEAP TRAP 0123456789";
-const size_t k_text_size = sizeof(k_packet_text) - 1;
-const size_t k_ax25_payload = 330;  // an AX.25 frame as KISS carries it
-const size_t k_packet_sizes[] = {k_text_size, k_ax25_payload, k_packet_max_payload};
-const size_t k_packet_count = sizeof(k_packet_sizes) / sizeof(k_packet_sizes[0]);
-const size_t k_payload_bytes = k_text_size + k_ax25_payload + k_packet_max_payload;
 const char k_wav_text[] = "WAV ROUND TRIP";
 
 struct Tally {
@@ -107,21 +98,11 @@ struct Tally {
     size_t losts;
     float slot_ms;
     float worst_slot_error;
-    uint8_t bits_per_package;  // N of the locked event
-    PacketReader* packets;
-};
-
-struct PacketResult {
-    size_t count;
-    size_t matched;
-    size_t offset;  // of the next expected payload in g_payloads
 };
 
 uint8_t g_data[k_max_bytes];
 int16_t g_silence[k_chunk_samples];
 uint8_t g_wav[k_wav_buffer_bytes];
-uint8_t g_payloads[k_payload_bytes];
-uint8_t g_packets[k_payload_bytes + k_packet_count * k_packet_overhead];
 
 uint32_t next_random(uint32_t& state) {
     state ^= state << 13;
@@ -134,21 +115,18 @@ float absolute(float value) {
     return value < 0.0f ? -value : value;
 }
 
-void reset_tally(Tally& tally, const uint8_t* expected, size_t size, float slot_ms, PacketReader* packets) {
+void reset_tally(Tally& tally, const uint8_t* expected, size_t size, float slot_ms) {
     memset(&tally, 0, sizeof(tally));
     tally.expected = expected;
     tally.size = size;
     tally.slot_ms = slot_ms;
-    tally.packets = packets;
 }
 
 void on_event(const Event& event, void* context) {
     Tally& tally = *static_cast<Tally*>(context);
-    if (tally.packets != nullptr) tally.packets->on_event(event);
     switch (event.type) {
         case EventType::locked:
             ++tally.locks;
-            tally.bits_per_package = event.bits_per_package;
             break;
         case EventType::end:
             ++tally.ends;
@@ -169,18 +147,14 @@ void on_event(const Event& event, void* context) {
         }
         case EventType::state:
         case EventType::slot:
-        case EventType::package:
             break;
     }
 }
 
-void on_packet(const uint8_t* payload, uint16_t size, uint8_t, void* context) {
-    PacketResult& result = *static_cast<PacketResult*>(context);
-    if (result.count < k_packet_count && size == k_packet_sizes[result.count] &&
-        memcmp(payload, g_payloads + result.offset, size) == 0)
-        ++result.matched;
-    result.offset += size;
-    ++result.count;
+// The silence before a first transmission: k_lead_silence_ms, and at least k_lead_silence_slots of the slot.
+uint32_t lead_silence_ms(uint32_t slot_us) {
+    const uint32_t slots_ms = k_lead_silence_slots * slot_us / k_us_per_ms;
+    return slots_ms > k_lead_silence_ms ? slots_ms : k_lead_silence_ms;
 }
 
 void feed_silence(Decoder& decoder, uint32_t ms) {
@@ -188,10 +162,10 @@ void feed_silence(Decoder& decoder, uint32_t ms) {
     for (uint32_t done = 0; done < samples; done += k_chunk_samples) decoder.process(g_silence, k_chunk_samples);
 }
 
-// Silence until END, bounded.
-void drain(Decoder& decoder, const Tally& tally) {
+// Silence until the last end, bounded.
+void drain(Decoder& decoder, const Tally& tally, size_t ends) {
     const uint32_t samples = k_max_trailing_ms * (k_decoder_rate_hz / k_ms_per_s);
-    for (uint32_t done = 0; done < samples && tally.ends == 0; done += k_chunk_samples)
+    for (uint32_t done = 0; done < samples && tally.ends < ends; done += k_chunk_samples)
         decoder.process(g_silence, k_chunk_samples);
 }
 
@@ -209,9 +183,9 @@ bool stream(Encoder& encoder, Decoder& decoder, const uint8_t* data, size_t size
     return written == size;
 }
 
-bool clean_run(const Tally& tally) {
-    return tally.received == tally.size && tally.wrong == 0 && tally.extra == 0 && tally.locks == 1 &&
-           tally.ends == 1 && tally.losts == 0 && tally.worst_slot_error <= k_slot_tolerance;
+bool clean_run(const Tally& tally, size_t transmissions) {
+    return tally.received == tally.size && tally.wrong == 0 && tally.extra == 0 && tally.locks == transmissions &&
+           tally.ends == transmissions && tally.losts == 0 && tally.worst_slot_error <= k_slot_tolerance;
 }
 
 void print_tally(const char* name, const Tally& tally, bool pass) {
@@ -222,56 +196,35 @@ void print_tally(const char* name, const Tally& tally, bool pass) {
 }
 
 EncoderConfig case_config(const Case& test_case) {
-    EncoderConfig config = EncoderConfig::from_preset(test_case.preset, k_decoder_rate_hz);
-    if (test_case.slot_us != 0) config.slot_us = test_case.slot_us;
-    if (test_case.bits_per_package != 0) config.bits_per_package = test_case.bits_per_package;
+    EncoderConfig config;
+    config.sample_rate_hz = k_decoder_rate_hz;
+    config.slot_us = slot_us_for_centi_speed(test_case.centi_bytes_per_second);
+    config.vox_lead_ms = test_case.vox_lead_ms;
     return config;
 }
 
 bool run_case(const Case& test_case, uint32_t& random_state) {
-    for (size_t i = 0; i < test_case.bytes; ++i) g_data[i] = static_cast<uint8_t>(next_random(random_state));
+    const size_t total = test_case.bytes * test_case.transmissions;
+    for (size_t i = 0; i < total; ++i) g_data[i] = static_cast<uint8_t>(next_random(random_state));
     const EncoderConfig config = case_config(test_case);
     if (!config.valid()) {
         printf("  %-10s invalid encoder configuration  FAIL\n", test_case.name);
         return false;
     }
+    DecoderConfig receiver;
+    receiver.slot_us = config.slot_us;
     Tally tally;
-    reset_tally(tally, g_data, test_case.bytes, static_cast<float>(config.slot_us) / k_us_per_ms_f, nullptr);
+    reset_tally(tally, g_data, total, static_cast<float>(config.slot_us) / k_us_per_ms_f);
     Encoder encoder(config);
-    Decoder decoder(DecoderConfig::for_profile(test_case.profile), &on_event, &tally);
-    feed_silence(decoder, k_lead_silence_ms);
-    const bool streamed = stream(encoder, decoder, g_data, test_case.bytes);
-    drain(decoder, tally);
-    const bool pass = streamed && clean_run(tally) && tally.bits_per_package == config.bits_per_package;
-    print_tally(test_case.name, tally, pass);
-    return pass;
-}
-
-// The three packets back to back in one transmission.
-bool packet_round_trip(uint32_t& random_state) {
-    memcpy(g_payloads, k_packet_text, k_text_size);
-    for (size_t i = k_text_size; i < k_payload_bytes; ++i)
-        g_payloads[i] = static_cast<uint8_t>(next_random(random_state));
-    size_t size = 0;
-    size_t offset = 0;
-    for (size_t i = 0; i < k_packet_count; ++i) {
-        size += packet_build(g_payloads + offset, static_cast<uint16_t>(k_packet_sizes[i]), g_packets + size,
-                             sizeof(g_packets) - size);
-        offset += k_packet_sizes[i];
+    Decoder decoder(receiver, &on_event, &tally);
+    feed_silence(decoder, lead_silence_ms(config.slot_us));
+    bool streamed = true;
+    for (uint8_t t = 0; t < test_case.transmissions; ++t) {
+        streamed = stream(encoder, decoder, g_data + t * test_case.bytes, test_case.bytes) && streamed;
     }
-    PacketResult result = {0, 0, 0};
-    PacketReader reader(&on_packet, &result);
-    const EncoderConfig config = EncoderConfig::from_preset(Preset::hf_fast, k_decoder_rate_hz);
-    Tally tally;
-    reset_tally(tally, g_packets, size, static_cast<float>(config.slot_us) / k_us_per_ms_f, &reader);
-    Encoder encoder(config);
-    Decoder decoder(DecoderConfig(), &on_event, &tally);
-    feed_silence(decoder, k_lead_silence_ms);
-    const bool streamed = size == sizeof(g_packets) && stream(encoder, decoder, g_packets, size);
-    drain(decoder, tally);
-    const bool pass = streamed && clean_run(tally) && result.count == k_packet_count &&
-                      result.matched == k_packet_count && reader.crc_errors() == 0;
-    print_tally("packet", tally, pass);
+    drain(decoder, tally, test_case.transmissions);
+    const bool pass = streamed && clean_run(tally, test_case.transmissions);
+    print_tally(test_case.name, tally, pass);
     return pass;
 }
 
@@ -330,7 +283,8 @@ private:
 bool wav_round_trip() {
     const uint8_t* data = reinterpret_cast<const uint8_t*>(k_wav_text);
     const size_t size = sizeof(k_wav_text) - 1;
-    const EncoderConfig config = EncoderConfig::from_preset(Preset::hf_fast, k_decoder_rate_hz);
+    EncoderConfig config;
+    config.slot_us = slot_us_for_centi_speed(k_max_centi_bytes_per_second / 2);
     Encoder encoder(config);
     const bool queued = encoder.write(data, size) == size && encoder.start();
     const uint32_t samples = encoder.duration_samples(size);
@@ -340,23 +294,25 @@ bool wav_round_trip() {
     const bool written = queued && output.start(source, config.sample_rate_hz) && output.wait();
 
     Tally tally;
-    reset_tally(tally, data, size, static_cast<float>(config.slot_us) / k_us_per_ms_f, nullptr);
-    Decoder decoder(DecoderConfig(), &on_event, &tally);
+    reset_tally(tally, data, size, static_cast<float>(config.slot_us) / k_us_per_ms_f);
+    DecoderConfig receiver;
+    receiver.slot_us = config.slot_us;
+    Decoder decoder(receiver, &on_event, &tally);
     DecoderSink decoder_sink(decoder);
     MemoryByteSource bytes(g_wav, sink.size());
     WavReader reader;
     const bool opened = written && reader.open(bytes) && reader.format().sample_rate_hz == k_decoder_rate_hz;
     uint32_t read = 0;
     int16_t chunk[k_chunk_samples];
-    feed_silence(decoder, k_lead_silence_ms);
+    feed_silence(decoder, lead_silence_ms(config.slot_us));
     while (opened) {
         const size_t got = reader.read(chunk, k_chunk_samples);
         if (got == 0) break;
         decoder_sink.write(chunk, got);
         read += static_cast<uint32_t>(got);
     }
-    drain(decoder, tally);
-    const bool pass = opened && read == samples && clean_run(tally);
+    drain(decoder, tally, 1);
+    const bool pass = opened && read == samples && clean_run(tally, 1);
     print_tally("wav", tally, pass);
     return pass;
 }
@@ -364,14 +320,12 @@ bool wav_round_trip() {
 }  // namespace
 
 int main() {
-    printf("heap_trap: sizeof Encoder %zu, Decoder %zu, PacketReader %zu bytes (UNLIMITED_PACKET_MAX %u)\n",
-           sizeof(Encoder), sizeof(Decoder), sizeof(PacketReader), static_cast<unsigned>(k_packet_max_payload));
+    printf("heap_trap: sizeof Encoder %zu, Decoder %zu bytes\n", sizeof(Encoder), sizeof(Decoder));
     uint32_t random_state = k_random_seed;
     size_t failures = 0;
     for (size_t i = 0; i < k_case_count; ++i) {
         if (!run_case(k_cases[i], random_state)) ++failures;
     }
-    if (!packet_round_trip(random_state)) ++failures;
     if (!wav_round_trip()) ++failures;
     printf("heap_trap: %s (%zu failure%s)\n", failures == 0 ? "PASSED" : "FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

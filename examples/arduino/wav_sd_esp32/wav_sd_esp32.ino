@@ -1,8 +1,8 @@
-// Unlimited WAV writer on an ESP32: a text packet is encoded and written to /unlimited.wav on an SD card
-// with the core WAV codec (the same RIFF writer the PC tools use). Play the file into a transmitter, or
-// decode it on a PC with `unlimited_decode --in unlimited.wav --packet`: the decoder learns the pitch, the slot
-// length and the bits per package from the signal. Preset hf: 1500 Hz beeps, 16 ms slots, 8 bits per package,
-// 55.6 bit/s, 1362-1638 Hz (fits a 2.4 kHz SSB filter).
+// Unlimited WAV writer on an ESP32: a text is encoded and written to /unlimited.wav on an SD card with the core
+// WAV codec (the same RIFF writer the PC tools use). Play the file into a transmitter, or decode it on a PC with
+// `unlimited_decode --in unlimited.wav --bps 6`: the decoder is told the speed and finds the pitch. 6 bytes per
+// second: one byte per window of 10 slots of 16.667 ms on 1500 Hz, 48 bit/s, 1368-1632 Hz (fits a 2.4 kHz SSB
+// filter).
 //
 // The encoder renders chunks that go straight into a WavWriter; a small ByteSink adapter turns its bytes
 // into SD File writes. The exact length is known up front (Encoder::duration_samples), so the header is
@@ -21,7 +21,7 @@ const uint8_t k_sd_cs_pin = 5;
 const char k_path[] = "/unlimited.wav";
 const char k_message[] = "CQ CQ DE UNLIMITED WAV ON SD 0123456789";
 const uint8_t k_message_size = sizeof(k_message) - 1;
-const unlimited::Preset k_preset = unlimited::Preset::hf;
+const uint16_t k_centi_bytes_per_second = unlimited::k_default_centi_bytes_per_second;  // 6.00 bytes/s
 const uint32_t k_sample_rate_hz = 8000;  // any 8000..192000; the PC decoder resamples
 const size_t k_chunk_samples = 512;
 const float k_ms_per_s = 1000.0f;
@@ -38,26 +38,27 @@ private:
     File& file_;
 };
 
-uint8_t g_packet[k_message_size + unlimited::k_packet_overhead];
 int16_t g_chunk[k_chunk_samples];
 
 bool write_wav(File& file) {
-    const size_t packet_size = unlimited::packet_build(reinterpret_cast<const uint8_t*>(k_message), k_message_size,
-                                                       g_packet, sizeof(g_packet));
-    unlimited::Encoder encoder(unlimited::EncoderConfig::from_preset(k_preset, k_sample_rate_hz));
-    size_t written = encoder.write(g_packet, packet_size);
+    unlimited::EncoderConfig config;
+    config.sample_rate_hz = k_sample_rate_hz;
+    config.slot_us = unlimited::slot_us_for_centi_speed(k_centi_bytes_per_second);
+    unlimited::Encoder encoder(config);
+    const uint8_t* message = reinterpret_cast<const uint8_t*>(k_message);
+    size_t written = encoder.write(message, k_message_size);
     if (!encoder.start()) return false;
 
     FileByteSink sink(file);
     unlimited::WavWriter writer;
-    if (!writer.begin(sink, k_sample_rate_hz, encoder.duration_samples(packet_size))) return false;
+    if (!writer.begin(sink, k_sample_rate_hz, encoder.duration_samples(k_message_size))) return false;
     while (writer.ok()) {
-        written += encoder.write(g_packet + written, packet_size - written);  // a packet may exceed the queue
+        written += encoder.write(message + written, k_message_size - written);  // a text may exceed the queue
         const size_t rendered = encoder.render(g_chunk, k_chunk_samples);
         if (rendered == 0) break;
         writer.write(g_chunk, rendered);
     }
-    const bool ok = writer.finish() && written == packet_size;
+    const bool ok = writer.finish() && written == k_message_size;
     const uint32_t samples = writer.samples_written();
     Serial.printf("%s: %u samples, %.1f s at %u Hz, %u bytes\n", k_path, static_cast<unsigned>(samples),
                   samples / static_cast<float>(k_sample_rate_hz), static_cast<unsigned>(k_sample_rate_hz),

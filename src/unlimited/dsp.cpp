@@ -11,11 +11,8 @@ const uint8_t ImpulseBlanker::k_delay;
 const uint8_t ToneSearch::k_max_bins;
 const uint16_t ToneSearch::k_block_samples;
 const uint8_t ToneSearch::k_long_run_blocks;
+const uint8_t ToneSearch::k_quiet_slots;
 const uint8_t ToneSearch::k_phase_bins;
-const uint8_t FineAfc::k_bins;
-const uint8_t CandidateList::k_size;
-const uint8_t AuditRing::k_max_positions;
-const uint8_t AuditRing::k_packages;
 
 namespace {
 
@@ -39,7 +36,7 @@ const float k_noise_clip = 10.0f;       // exponential noise exceeds 10 x its me
 const uint16_t k_noise_seed_weight = 8;  // a seed counts as this many inputs
 const uint16_t k_noise_average = 64;     // exponential average over about 64 inputs after the warm-up
 
-// ImpulseBlanker (spec 3.3).
+// ImpulseBlanker (spec 3.1, v0.3's).
 const float k_spike_ratio = 10.0f;
 const float k_spike_floor = 10.0f;
 const float k_residual_ratio = 8.0f;
@@ -51,10 +48,10 @@ const uint8_t k_residual_prime_blocks = 64;
 const float k_min_block_energy = 16.0f;  // sum of (x >> 4)^2: below any impulse worth blanking (digital silence)
 const uint8_t k_fill_limit = 0xFF;
 
-// ToneSearch (spec 3.6). Bins sit on whole multiples of k_search_step_hz: they are then exact DFT bins of the
+// ToneSearch (spec 3.2, v0.3's). Bins sit on whole multiples of k_search_step_hz: they are then exact DFT bins of the
 // 160-sample block, which the phase estimates rely on.
 const uint16_t k_search_step_hz = 50;
-const float k_estimate_accuracy_hz = 5.0f;  // of estimate_tone() for a tone between bins (U13)
+const float k_estimate_accuracy_hz = 5.0f;  // of estimate_tone() for a tone between bins
 const uint8_t k_goertzel_shift = 14;
 const float k_goertzel_one = 16384.0f;
 const float k_fast_alpha = 1.0f / 8.0f;
@@ -71,9 +68,9 @@ const float k_min_floor = static_cast<float>(ToneSearch::k_block_samples);  // n
 const float k_block_floor_bias = 0.309f;
 const float k_recent_alpha = 1.0f / 4.0f;
 const float k_fast_lock = 6.0f;
-// A weak tune tone between two bins reaches 6 x the floor only after about 350 ms, beyond a 250 ms tune: in a bin
-// whose slow average is still near the floor it locks at 4 x. A bin whose noise stands above the floor (FM noise
-// after de-emphasis, a receiver's audio slope) keeps the 6 x.
+// A weak tone between two bins reaches 6 x the floor late: in a bin whose slow average is still near the floor it
+// locks at 4 x. A bin whose noise stands above the floor (FM noise after de-emphasis, a receiver's audio slope) keeps
+// the 6 x.
 const float k_fast_lock_quiet = 4.0f;
 const float k_quiet_bin = 2.0f;
 // A tone below k_fast_lock locks after k_long_run_blocks stable blocks, not k_lock_blocks: its phase products need
@@ -98,64 +95,29 @@ const uint8_t k_max_strike_shift = 3;
 const uint8_t k_strike_limit = 0xFF;
 const uint32_t k_ban_limit = 0xFFFF;
 const uint32_t k_blocks_limit = 0xFFFFFFFFu;
+const uint16_t k_never = 0xFFFF;             // quiet counters saturate here
 const float k_max_alias = 0.75f;           // the tone lies within 3/4 bin of the strongest bin
 const int8_t k_phase_aliases = 2;          // doubled phase: offsets phase + m / 2, m = -2..2
 const float k_half_bin = 0.5f;
 const float k_min_phase_coherence = 0.9f;  // |sum of products| / sum of |products|: a steady tone
-// Marker train onset: a tone that was steady (the tune) and then shows a block-to-block product off its
-// steady phase (a reversal between the blocks, or inside one of them: with the tone off a search bin such
-// a block takes any phase). Off means more than 37 degrees and more than 3.6 sigma of the product's phase
-// noise, from the power of its two blocks over the floor; both blocks must be 10 dB over the floor.
-// Carriers never move, keyed CW keeps its phase while keyed (a keyed gap fails the level test), noise and
-// speech are never steady first.
-const float k_steady_cosine = 0.8f;
-const float k_break_sigmas = 3.6f;
-const float k_break_snr = 10.0f;
-const uint8_t k_train_breaks = 1;
-const uint8_t k_train_steady_products = 3;  // 80 ms of steady tone before the break
-const uint8_t k_resume_blocks = 2;
-// The echo test of a train onset (onset_echo()): a marker of the held signal can null its own carrier in the block of
-// the break; the held tone's turn is then read against its last strong block when it is strong again, at most this
-// many blocks later.
-const uint8_t k_held_gap_blocks = 3;
-const uint8_t k_count_limit_u8 = 0xFF;
 const float k_no_score = -1e30f;
-
-// FineAfc (spec 3.3): 65 bins on the squared signal, 1 Hz apart within +-20 Hz (tone +-10 Hz, the spec
-// resolution) and 3.33 Hz apart out to +-60 Hz (tone +-30 Hz: on data the coarse search can be half a
-// search bin off). A far offset is pulled in by a first correction and refined by the next.
-const float k_afc_default_rate_hz = 125.0f;
-const float k_afc_bin_step_hz = 1.0f;
-const int8_t k_afc_centre_bin = 32;  // (FineAfc::k_bins - 1) / 2
-const int8_t k_afc_fine_bins = 20;   // 1 Hz bins on each side: +-20 Hz squared
-const float k_afc_span_hz = 60.0f;   // outermost bin on the squared signal (tone +-30 Hz)
-const float k_afc_outer_step_hz =
-    (k_afc_span_hz - k_afc_fine_bins * k_afc_bin_step_hz) / static_cast<float>(k_afc_centre_bin - k_afc_fine_bins);
-const int8_t k_afc_narrow_bins = 24;  // 20 fine bins + 4 outer: 33.3 Hz squared, 16.7 Hz tone
-const uint8_t k_afc_lobe_bins = 3;    // bins on each side of the peak left out of the floor
-const float k_afc_lambda = 0.984f;
-const float k_afc_outer_lambda = 0.95f;
-const float k_afc_peak_ratio = 8.0f;
-const uint16_t k_afc_min_inputs = 16;
-const float k_squared_to_tone = 0.5f;  // squaring doubles the offset
+const float k_us_per_s = 1e6f;
+const float k_lead_z = 4.75f;              // leading bin: noise alone above the threshold with probability 1e-6
+const float k_wilson_third = 1.0f / 9.0f;
 
 const float k_parabola_limit = 0.5f;
 
 // PrefixHistory::rotate: the rotator steps by one block's angle; it is recomputed from the angle this often, so its
-// float rounding never adds up (spec 3.3).
+// float rounding never adds up (spec 3.1).
 const uint16_t k_rotate_reseed_blocks = 64;
+const uint32_t k_history_mask = k_history_cells - 1u;
 
-// The smart line (spec 3.10): rho = 0.5 + ln(2 pi a^2 rho) / (2 a^2), iterated from 0.6.
+// The smart line (spec 3.5): rho = 0.5 + ln(2 pi a^2 rho) / (2 a^2), iterated from 0.6.
 const float k_rho_min = 0.50f;
 const float k_rho_max = 0.75f;
 const float k_rho_seed = 0.6f;
 const uint8_t k_rho_iterations = 3;
 const float k_rho_offset = 0.5f;
-
-// PackageLearner (spec 3.8).
-const int32_t k_no_marker = 0;           // grid indices after the train's newest marker are > 0
-const int32_t k_exact_start_slots = 4;   // N = 1: the first marker within 4 slots of L can place package 0 exactly
-const uint8_t k_gap_limit = 0xFF;
 
 float clamp(float value, float low, float high) {
     return value < low ? low : (value > high ? high : value);
@@ -346,8 +308,8 @@ void ImpulseBlanker::reset() {
     pending_ = false;
 }
 
-// In-bin energy around the block, k-2..k+2. At T_min a marker covers 8 blocks with two energy lobes and
-// a reversal dip between them: its blocks are in-bin, an impulse is broadband.
+// In-bin energy around the block, k-2..k+2. A beep covers at least 8 blocks: its blocks are in-bin, an impulse is
+// broadband.
 float ImpulseBlanker::nearby_tone() const {
     float tone = 0.0f;
     for (uint8_t i = 0; i < k_delay; ++i) tone = max_of(tone, in_bin_[i]);
@@ -425,7 +387,7 @@ void PrefixHistory::reset() {
 void PrefixHistory::push(int32_t re, int32_t im, bool blanked) {
     sum_re_ += static_cast<uint32_t>(re);
     sum_im_ += static_cast<uint32_t>(im);
-    head_ = static_cast<uint16_t>(head_ + 1 == k_history_cells ? 0 : head_ + 1);
+    head_ = static_cast<uint16_t>((head_ + 1u) & k_history_mask);
     re_[head_] = sum_re_;
     im_[head_] = sum_im_;
     const uint8_t mask = static_cast<uint8_t>(1u << (head_ & 7u));
@@ -446,12 +408,15 @@ uint32_t PrefixHistory::first_block() const {
     return end_block_ - fill_ + 1u;
 }
 
-// Block j (P[j + 1] - P[j]) is multiplied by e^{i a_j}, a_j = newest_radians + angle_per_block (newest - j): each block
-// value is rebuilt from the prefixes, turned, rounded to int32 and summed again from the oldest prefix, which stays.
-void PrefixHistory::rotate(float newest_radians, float angle_per_block) {
-    const uint16_t blocks = static_cast<uint16_t>(fill_ - 1u);
+// Block j (P[j + 1] - P[j]), j >= first, is multiplied by e^{i a_j}, a_j = newest_radians + angle_per_block (newest -
+// j): each block value is rebuilt from the prefixes, turned, rounded to int32 and summed again from P[first], which
+// stays; the prefixes before it are forgotten.
+void PrefixHistory::rotate(uint32_t first, float newest_radians, float angle_per_block) {
+    if (!holds(first)) first = first_block();
+    const uint16_t blocks = static_cast<uint16_t>(end_block_ - first);
+    fill_ = static_cast<uint16_t>(blocks + 1u);
     if (blocks == 0) return;
-    uint16_t at = static_cast<uint16_t>((head_ + k_history_cells - blocks) % k_history_cells);
+    uint16_t at = cell(first);
     uint32_t old_re = re_[at];
     uint32_t old_im = im_[at];
     uint32_t new_re = old_re;
@@ -466,7 +431,7 @@ void PrefixHistory::rotate(float newest_radians, float angle_per_block) {
             turn_cos = cosf(angle);
             turn_sin = sinf(angle);
         }
-        at = static_cast<uint16_t>(at + 1 == k_history_cells ? 0 : at + 1);
+        at = static_cast<uint16_t>((at + 1u) & k_history_mask);
         const float re = static_cast<float>(as_signed(re_[at] - old_re));
         const float im = static_cast<float>(as_signed(im_[at] - old_im));
         old_re = re_[at];
@@ -489,8 +454,7 @@ bool PrefixHistory::holds(uint32_t block) const {
 }
 
 uint16_t PrefixHistory::cell(uint32_t block) const {
-    const uint32_t age = end_block_ - block;
-    return static_cast<uint16_t>((head_ + k_history_cells - age) % k_history_cells);
+    return static_cast<uint16_t>((head_ - (end_block_ - block)) & k_history_mask);
 }
 
 bool PrefixHistory::blanked_bit(uint16_t index) const {
@@ -527,13 +491,48 @@ bool PrefixHistory::window(uint32_t origin_block, float from, float to, Complex&
     return true;
 }
 
+bool PrefixHistory::block(uint32_t index, Complex& value) const {
+    if (!holds(index) || !holds(index + 1)) return false;
+    const uint16_t from = cell(index);
+    const uint16_t to = cell(index + 1);
+    value.re = static_cast<float>(as_signed(re_[to] - re_[from])) / k_mixer_gain;
+    value.im = static_cast<float>(as_signed(im_[to] - im_[from])) / k_mixer_gain;
+    return true;
+}
+
 bool PrefixHistory::any_blanked(uint32_t origin_block, float from, float to) const {
     const uint32_t first = origin_block + static_cast<uint32_t>(static_cast<int32_t>(floorf(from)));
     const uint32_t last = origin_block + static_cast<uint32_t>(static_cast<int32_t>(ceilf(to)));
-    for (uint32_t block = first; block != last; ++block) {
-        if (holds(block + 1) && blanked_bit(cell(block + 1))) return true;
+    for (uint32_t index = first; index != last; ++index) {
+        if (holds(index + 1) && blanked_bit(cell(index + 1))) return true;
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Lookahead
+// ---------------------------------------------------------------------------
+
+Lookahead::Lookahead() : delay_(0), head_(0) {
+    memset(line_, 0, sizeof(line_));
+}
+
+void Lookahead::configure(uint16_t delay) {
+    delay_ = delay < k_lookahead_max_samples ? delay : k_lookahead_max_samples;
+    head_ = 0;
+    memset(line_, 0, sizeof(line_));
+}
+
+int16_t Lookahead::push(int16_t sample) {
+    if (delay_ == 0) return sample;
+    const int16_t out = line_[head_];
+    line_[head_] = sample;
+    head_ = static_cast<uint16_t>(head_ + 1u == delay_ ? 0u : head_ + 1u);
+    return out;
+}
+
+uint16_t Lookahead::delay() const {
+    return delay_;
 }
 
 // ---------------------------------------------------------------------------
@@ -541,18 +540,31 @@ bool PrefixHistory::any_blanked(uint32_t origin_block, float from, float to) con
 // ---------------------------------------------------------------------------
 
 ToneSearch::ToneSearch() {
-    configure(k_min_tone_hz, k_max_tone_hz);
+    configure(k_min_tone_hz, k_max_tone_hz, k_min_slot_us);
 }
 
 // Bins on the multiples of 50 Hz inside min_hz..max_hz (at least one), and a guard bin on each side: a tone just outside
 // the range peaks in a guard, where no lock is taken, instead of in the edge bin at a wrong 50 Hz alias.
-void ToneSearch::configure(uint16_t min_hz, uint16_t max_hz) {
+void ToneSearch::configure(uint16_t min_hz, uint16_t max_hz, uint32_t slot_us) {
     min_hz_ = min_hz;
     max_hz_ = max_hz;
-    const uint16_t first_lock =
-        static_cast<uint16_t>((min_hz + k_search_step_hz - 1u) / k_search_step_hz * k_search_step_hz);
+    // The leading bin's average spans about one slot (a START alone lifts it at slow speeds), never fewer than the
+    // fast average's 8 blocks. An exponential average with alpha of noise is close to Gamma(k, 1/k), k = (2 - alpha) /
+    // alpha: its 1e-6 tail by Wilson-Hilferty.
+    const float slot_blocks = static_cast<float>(slot_us) * static_cast<float>(k_decoder_rate_hz) /
+                              (k_us_per_s * static_cast<float>(k_block_samples));
+    lead_alpha_ = slot_blocks > 1.0f ? max_of(k_fast_alpha, 1.0f / slot_blocks) : k_fast_alpha;
+    quiet_blocks_ = static_cast<uint16_t>(ceilf(static_cast<float>(k_quiet_slots) * slot_blocks));
+    const float shape = (2.0f - lead_alpha_) / lead_alpha_;
+    const float root = 1.0f - k_wilson_third / shape + k_lead_z * sqrtf(k_wilson_third / shape);
+    lead_ratio_ = root * root * root;
+    // The lock bins are the ones nearest to min_hz and max_hz and those between: a tone on the range's edge has its
+    // nearest bin among them (the guard bin beside it would otherwise take its power and leave no local peak).
+    const uint16_t half_step = k_search_step_hz / 2u;
+    const uint16_t first_lock = static_cast<uint16_t>((min_hz + half_step) / k_search_step_hz * k_search_step_hz);
+    const uint16_t last_lock = static_cast<uint16_t>((max_hz + half_step) / k_search_step_hz * k_search_step_hz);
     const uint16_t span_bins =
-        static_cast<uint16_t>(max_hz >= first_lock ? (max_hz - first_lock) / k_search_step_hz + 1u : 1u);
+        static_cast<uint16_t>(last_lock >= first_lock ? (last_lock - first_lock) / k_search_step_hz + 1u : 1u);
     first_hz_ = static_cast<uint16_t>(first_lock > k_search_step_hz ? first_lock - k_search_step_hz : 0u);
     bins_ = static_cast<uint8_t>((span_bins < k_max_lock_bins ? span_bins : k_max_lock_bins) + 2u);
     for (uint8_t b = 0; b < k_max_bins; ++b) {
@@ -571,9 +583,12 @@ void ToneSearch::reset() {
     memset(s1_, 0, sizeof(s1_));
     memset(s2_, 0, sizeof(s2_));
     memset(fast_, 0, sizeof(fast_));
+    memset(lead_, 0, sizeof(lead_));
     memset(fast_half_, 0, sizeof(fast_half_));
     memset(slow_, 0, sizeof(slow_));
     memset(slow_square_, 0, sizeof(slow_square_));
+    memset(quiet_, 0, sizeof(quiet_));
+    for (uint8_t b = 0; b < k_max_bins; ++b) since_quiet_[b] = k_never;
     memset(previous_, 0, sizeof(previous_));
     memset(middle_, 0, sizeof(middle_));
     phase_sum_.re = 0.0f;
@@ -584,49 +599,17 @@ void ToneSearch::reset() {
     half_sum_.re = 0.0f;
     half_sum_.im = 0.0f;
     half_weight_ = 0.0f;
-    steady_sum_.re = 0.0f;
-    steady_sum_.im = 0.0f;
-    steady_half_sum_.re = 0.0f;
-    steady_half_sum_.im = 0.0f;
-    steady_weight_ = 0.0f;
-    steady_half_weight_ = 0.0f;
-    steady_tone_hz_ = 0.0f;
     lock_level_ = 0.0f;
     floor_ = k_min_floor;
     recent_floor_ = 0.0f;
     previous_floor_ = k_min_floor;
     onset_floor_ = k_min_floor;
-    excluded_bin_ = -1;
-    excluded_span_ = 0;
-    excluded_hz_ = 0.0f;
-    held_strong_.re = 0.0f;
-    held_strong_.im = 0.0f;
-    held_middle_ = held_strong_;
-    held_gap_ = k_count_limit_u8;
-    onset_wait_ = 0;
-    held_reversed_ = false;
-    held_unread_ = false;
-    onset_echo_ = false;
-    onset_pending_ = false;
     best_bin_ = 0;
     middle_bin_ = 0;
     stable_blocks_ = 0;
-    steady_products_ = 0;
-    breaks_ = 0;
-    onset_products_ = 0;
-    fast_gap_ = k_count_limit_u8;
     lock_ = Lock::none;
     sample_index_ = 0;
     blocks_ = 0;
-}
-
-void ToneSearch::interrupt() {
-    memset(s1_, 0, sizeof(s1_));
-    memset(s2_, 0, sizeof(s2_));
-    sample_index_ = 0;
-    stable_blocks_ = 0;
-    lock_ = Lock::none;
-    fast_gap_ = k_count_limit_u8;
 }
 
 bool ToneSearch::push(int16_t sample) {
@@ -638,7 +621,6 @@ bool ToneSearch::push(int16_t sample) {
         s1_[b] = s0;
     }
     if (++sample_index_ == k_half_block_samples) {
-        if (excluded_bin_ >= 0) held_middle_ = bin_output(static_cast<uint8_t>(excluded_bin_));
         middle_bin_ = best_bin_;
         for (uint8_t i = 0; i < k_phase_bins; ++i) {
             const int16_t b = static_cast<int16_t>(best_bin_ + i) - 1;
@@ -660,7 +642,7 @@ void ToneSearch::end_block() {
     update_bins();
     update_floor();
     update_bans();
-    update_held();
+    update_quiet();
     update_lock();
     memset(s1_, 0, sizeof(s1_));
     memset(s2_, 0, sizeof(s2_));
@@ -717,7 +699,7 @@ bool ToneSearch::half_offset(const Complex& half, float weight, float& offset) c
 
 // Bins are exact DFT bins (160 samples, 50 Hz), so a tone advances the phase of every bin output by
 // 2 pi (f / 50 Hz) per block: the phase of X_n conj(X_n-1) is the tone offset modulo one bin.
-void ToneSearch::update_phase(bool continued, bool resumed, uint8_t bin) {
+void ToneSearch::update_phase(bool continued, uint8_t bin) {
     if (!continued) {
         phase_sum_.re = 0.0f;
         phase_sum_.im = 0.0f;
@@ -726,20 +708,7 @@ void ToneSearch::update_phase(bool continued, bool resumed, uint8_t bin) {
         phase_weight_ = 0.0f;
         half_sum_ = phase_sum_;
         half_weight_ = 0.0f;
-    }
-    if (!continued && !resumed) {
-        steady_sum_ = phase_sum_;
-        steady_half_sum_ = phase_sum_;
-        steady_weight_ = 0.0f;
-        steady_half_weight_ = 0.0f;
-        steady_tone_hz_ = 0.0f;
-        steady_products_ = 0;
-        breaks_ = 0;
-        onset_products_ = 0;
-        onset_echo_ = false;
-        onset_pending_ = false;
-    }
-    if (continued) {
+    } else {
         const Complex current = bin_output(bin);
         const Complex& before = previous_[bin + 1 - best_bin_];
         Complex product;
@@ -753,19 +722,9 @@ void ToneSearch::update_phase(bool continued, bool resumed, uint8_t bin) {
         half_sum_.re += half.re;
         half_sum_.im += half.im;
         half_weight_ += sqrtf(half.re * half.re + half.im * half.im);
-        if (magnitude > 0.0f) {  // phase doubled, magnitude kept: immune to marker sign reversals
+        if (magnitude > 0.0f) {  // phase doubled, magnitude kept: immune to a sign change between blocks
             phase_square_sum_.re += (product.re * product.re - product.im * product.im) / magnitude;
             phase_square_sum_.im += 2.0f * product.re * product.im / magnitude;
-        }
-        const float weakest = min_of(current.re * current.re + current.im * current.im,
-                                     before.re * before.re + before.im * before.im);
-        if (weakest >= k_break_snr * floor_) {
-            // phase variance of X_n conj(X_n-1): floor / (2 |X|^2) from each block
-            const float variance = 0.5f * floor_ *
-                                   (1.0f / (current.re * current.re + current.im * current.im) +
-                                    1.0f / (before.re * before.re + before.im * before.im));
-            const float angle = k_break_sigmas * sqrtf(variance);
-            update_breaks(product, half, magnitude, angle < k_pi ? min_of(cosf(angle), k_steady_cosine) : -1.0f);
         }
     }
     for (uint8_t i = 0; i < k_phase_bins; ++i) {
@@ -777,104 +736,6 @@ void ToneSearch::update_phase(bool continued, bool resumed, uint8_t bin) {
             previous_[i].im = 0.0f;
         }
     }
-}
-
-// The held (excluded) tone turned over: its product with its last strong block (at most k_held_gap_blocks before) lies
-// within the break angle of a full reversal of the advance its frequency gives (bins are exact DFT bins: 2 pi f / 50 Hz
-// per block), this block strong too; or, a flip inside this block, its second half against its first half (B conj(A),
-// as half_product(), turning by pi (f - f_bin) / 50 Hz), both halves strong. A marker of the held signal nulls its own
-// carrier in the block it falls in (its twist), so the turn often shows only against the block after it.
-void ToneSearch::update_held() {
-    held_reversed_ = false;
-    held_unread_ = false;
-    if (excluded_bin_ < 0) return;
-    const uint8_t bin = static_cast<uint8_t>(excluded_bin_);
-    const Complex current = bin_output(bin);
-    const float current_power = current.re * current.re + current.im * current.im;
-    const bool strong = current_power >= k_break_snr * floor_;
-    const float strong_power = held_strong_.re * held_strong_.re + held_strong_.im * held_strong_.im;
-    if (strong && strong_power > 0.0f && held_gap_ < k_held_gap_blocks) {
-        const float re = current.re * held_strong_.re + current.im * held_strong_.im;
-        const float im = current.im * held_strong_.re - current.re * held_strong_.im;
-        const float advance = k_two_pi * excluded_hz_ * static_cast<float>(held_gap_ + 1u) /
-                              static_cast<float>(k_search_step_hz);
-        const float along = re * cosf(advance) + im * sinf(advance);
-        if (along < -k_steady_cosine * sqrtf(re * re + im * im)) held_reversed_ = true;
-    }
-    // Halves: A from the middle output, B = sign y160 - A (sign = e^{jw 80}, see half_product()); a half block holds
-    // half the noise of a block.
-    const Complex& first = held_middle_;
-    const float sign = ((first_hz_ / k_search_step_hz + bin) & 1u) != 0 ? -1.0f : 1.0f;
-    Complex second;
-    second.re = sign * current.re - first.re;
-    second.im = sign * current.im - first.im;
-    const float first_power = first.re * first.re + first.im * first.im;
-    const float second_power = second.re * second.re + second.im * second.im;
-    if (min_of(first_power, second_power) >= k_break_snr * k_half_bin * floor_) {
-        const float re = second.re * first.re + second.im * first.im;
-        const float im = second.im * first.re - second.re * first.im;
-        const float bin_hz = static_cast<float>(first_hz_ + bin * k_search_step_hz);
-        const float turn = k_pi * (excluded_hz_ - bin_hz) / static_cast<float>(k_search_step_hz);
-        const float along = re * cosf(turn) + im * sinf(turn);
-        if (along < -k_steady_cosine * sqrtf(re * re + im * im)) held_reversed_ = true;
-    }
-    held_unread_ = !strong && !held_reversed_;
-    if (strong) {
-        held_strong_ = current;
-        held_gap_ = 0;
-    } else if (held_gap_ < k_count_limit_u8) {
-        ++held_gap_;
-    }
-    // A first break the held tone could not tell about is decided at its next reading (or not an echo after the wait).
-    if (onset_pending_ && !held_unread_) {
-        onset_echo_ = held_reversed_;
-        onset_pending_ = false;
-    } else if (onset_pending_ && ++onset_wait_ > k_held_gap_blocks) {
-        onset_pending_ = false;
-    }
-}
-
-// A marker's twist moves its beep's energy from the carrier bin into sidebands 0.75 / T away (spec 1.1), inside the
-// exclusion around the held tone: any of those bins loud in this block.
-bool ToneSearch::held_sidebands() const {
-    for (int16_t b = static_cast<int16_t>(excluded_bin_ - excluded_span_); b <= excluded_bin_ + excluded_span_; ++b) {
-        if (b < 0 || b >= bins_ || b == excluded_bin_) continue;
-        if (block_power(static_cast<uint8_t>(b)) >= k_break_snr * floor_) return true;
-    }
-    return false;
-}
-
-// Strong products build the steady reference; once it rests on k_train_steady_products of them, it takes
-// only the products that agree with it, a product clearly off its phase is a break, and the reference then
-// stays as it was. The steady products before the first break are kept: noise lines up a few by chance (an FM
-// receiver near threshold, whose de-emphasised noise is strongest at the low end of the band), a tune tone many.
-void ToneSearch::update_breaks(const Complex& product, const Complex& half, float magnitude, float break_cosine) {
-    const float along = product.re * steady_sum_.re + product.im * steady_sum_.im;
-    const float reference = sqrtf(steady_sum_.re * steady_sum_.re + steady_sum_.im * steady_sum_.im);
-    if (steady_products_ >= k_train_steady_products) {
-        if (along < break_cosine * magnitude * reference) {
-            if (breaks_ == 0) {
-                onset_products_ = steady_products_;
-                onset_echo_ = held_reversed_;
-                // Undecided only when a marker of the held signal can have nulled its carrier in this very block: the
-                // carrier bin weak, its sidebands loud. A held signal keyed off leaves them quiet too, and plays no
-                // keying line that could break now.
-                onset_pending_ = held_unread_ && held_sidebands();
-                onset_wait_ = 0;
-            }
-            if (breaks_ < k_count_limit_u8) ++breaks_;
-            return;
-        }
-        if (along < k_steady_cosine * magnitude * reference) return;  // neither steady nor a clear break
-    }
-    if (breaks_ > 0) return;
-    steady_sum_.re += product.re;
-    steady_sum_.im += product.im;
-    steady_weight_ += magnitude;
-    steady_half_sum_.re += half.re;
-    steady_half_sum_.im += half.im;
-    steady_half_weight_ += sqrtf(half.re * half.re + half.im * half.im);
-    if (steady_products_ < k_count_limit_u8) ++steady_products_;
 }
 
 float ToneSearch::block_power(uint8_t bin) const {
@@ -893,6 +754,7 @@ void ToneSearch::update_bins() {
     for (uint8_t b = 0; b < bins_; ++b) {
         const float power = block_power(b);
         fast_[b] += fast_alpha * (power - fast_[b]);
+        lead_[b] += max_of(lead_alpha_, warmup) * (power - lead_[b]);
         slow_[b] += slow_alpha * (power - slow_[b]);
         slow_square_[b] += slow_alpha * (power * power - slow_square_[b]);
         if (b + 1 >= bins_) continue;
@@ -929,9 +791,11 @@ float ToneSearch::block_level(uint8_t bin) const {
 
 void ToneSearch::update_floor() {
     previous_floor_ = floor_;
+    // The lock bins only: the guard bins lie half a bin beyond the range's edge bins, where a filter's edge may begin.
     float sorted[k_max_bins];
-    for (uint8_t b = 0; b < bins_; ++b) {
-        const float value = slow_[b];
+    const uint8_t count = static_cast<uint8_t>(bins_ - 2u);
+    for (uint8_t b = 0; b < count; ++b) {
+        const float value = slow_[b + 1u];
         uint8_t i = b;
         while (i > 0 && sorted[i - 1] > value) {
             sorted[i] = sorted[i - 1];
@@ -939,16 +803,16 @@ void ToneSearch::update_floor() {
         }
         sorted[i] = value;
     }
-    const uint8_t lower = static_cast<uint8_t>(bins_ / 2 > 0 ? bins_ / 2 : 1);
+    const uint8_t lower = static_cast<uint8_t>(count / 2 > 0 ? count / 2 : 1);
     float sum = 0.0f;
     for (uint8_t i = 0; i < lower; ++i) sum += sorted[i];
     const float averaged = min_of(static_cast<float>(blocks_), k_slow_blocks);
     const float bias = max_of(1.0f - k_lower_half_bias / sqrtf(averaged), k_lower_half_bias / k_slow_blocks);
     floor_ = max_of(sum / (static_cast<float>(lower) * bias), k_min_floor);
 
-    for (uint8_t b = 0; b < bins_; ++b) sorted[b] = block_power(b);
+    for (uint8_t b = 0; b < count; ++b) sorted[b] = block_power(static_cast<uint8_t>(b + 1u));
     const float block_floor =
-        max_of(lower_sum(sorted, bins_, lower) / (static_cast<float>(lower) * k_block_floor_bias), k_min_floor);
+        max_of(lower_sum(sorted, count, lower) / (static_cast<float>(lower) * k_block_floor_bias), k_min_floor);
     recent_floor_ = recent_floor_ > 0.0f ? recent_floor_ + k_recent_alpha * (block_floor - recent_floor_) : block_floor;
 }
 
@@ -960,6 +824,23 @@ void ToneSearch::update_bans() {
     since_strike_ = 0;
     for (uint8_t b = 0; b < bins_; ++b) {
         if (strikes_[b] > 0) --strikes_[b];
+    }
+}
+
+// Per bin: the quiet run under the leading threshold, and the blocks since the last run of quiet_blocks_ ended.
+void ToneSearch::update_quiet() {
+    const float threshold = lead_ratio_ * max_of(floor_, recent_floor_);
+    for (uint8_t b = 0; b < bins_; ++b) {
+        if (lead_[b] < threshold) {
+            if (quiet_[b] < k_never) ++quiet_[b];
+            if (quiet_[b] >= quiet_blocks_) {
+                since_quiet_[b] = 0;
+                continue;
+            }
+        } else {
+            quiet_[b] = 0;
+        }
+        if (since_quiet_[b] < k_never) ++since_quiet_[b];
     }
 }
 
@@ -981,9 +862,6 @@ bool ToneSearch::local_peak(const float* power, uint8_t bin) const {
 
 bool ToneSearch::eligible(uint8_t bin) const {
     if (bin == 0 || bin + 1u >= bins_) return false;  // the guard bins
-    if (excluded_bin_ >= 0 && bin <= excluded_bin_ + excluded_span_ && bin + excluded_span_ >= excluded_bin_) {
-        return false;
-    }
     return ban_[bin] == 0 && !steady_carrier(bin);
 }
 
@@ -1026,14 +904,6 @@ void ToneSearch::update_lock() {
     }
     const bool near = bin - best_bin_ <= 1 && best_bin_ - bin <= 1;
     const bool continued = mode != Lock::none && mode == lock_ && stable_blocks_ > 0 && near;
-    // The tune tone ramps down into the first marker: a fast run that drops out for a block or two on the
-    // same tone keeps its steady reference, so the train's first reversal is still seen against it.
-    const bool resumed = mode == Lock::fast && !continued && near && fast_gap_ <= k_resume_blocks;
-    if (mode == Lock::fast) {
-        fast_gap_ = 0;
-    } else if (fast_gap_ < k_count_limit_u8) {
-        ++fast_gap_;
-    }
     if (mode == Lock::none) {
         stable_blocks_ = 0;
     } else if (continued) {
@@ -1042,16 +912,10 @@ void ToneSearch::update_lock() {
         stable_blocks_ = 1;
     }
     lock_level_ = mode == Lock::fast ? fast_best / lock_floor : k_fast_lock;
-    if (mode != Lock::none) update_phase(continued, resumed, static_cast<uint8_t>(bin));
+    if (mode != Lock::none) update_phase(continued, static_cast<uint8_t>(bin));
     lock_ = mode;
     if (bin >= 0) best_bin_ = static_cast<uint8_t>(bin);
     if (!continued) onset_floor_ = previous_floor_;  // the run's tone is not yet in the floor before its start
-    // The tune's tone, from the steady reference (it survives a short dropout and stops at the first break).
-    const float reference = sqrtf(steady_sum_.re * steady_sum_.re + steady_sum_.im * steady_sum_.im);
-    if (lock_ == Lock::fast && breaks_ == 0 && steady_products_ > 0 && reference >= k_min_phase_coherence * steady_weight_) {
-        const float offset = steady_offset(fast_, steady_sum_, steady_half_sum_, steady_half_weight_, power_offset(fast_));
-        steady_tone_hz_ = static_cast<float>(first_hz_) + (static_cast<float>(best_bin_) + offset) * k_search_step_hz;
-    }
 }
 
 // Rectangular window: neighbour/peak amplitude ratio r gives the offset r / (1 + r) bins.
@@ -1118,45 +982,35 @@ bool ToneSearch::inside(float tone_hz) const {
            tone_hz <= static_cast<float>(max_hz_) + k_estimate_accuracy_hz;
 }
 
-bool ToneSearch::long_run() const {
-    return lock_ != Lock::none && stable_blocks_ >= k_long_run_blocks;
+bool ToneSearch::leading(float& tone_hz) const {
+    return lead_bin(k_never, tone_hz);
 }
 
-bool ToneSearch::leading(float& tone_hz) const {
-    if (blocks_ == 0) return false;
-    const float lock_floor = max_of(floor_, recent_floor_);
+bool ToneSearch::fresh_leading(float& tone_hz, uint16_t within_blocks) const {
+    return lead_bin(within_blocks, tone_hz);
+}
+
+// The strongest eligible local peak of the slot-long averages above the leading threshold, among the bins that came
+// out of a quiet at most `within_blocks` ago (k_never: every bin).
+bool ToneSearch::lead_bin(uint16_t within_blocks, float& tone_hz) const {
+    if (blocks_ < k_warmup_blocks) return false;
+    const float threshold = lead_ratio_ * max_of(floor_, recent_floor_);
     int16_t best = -1;
     float best_value = 0.0f;
     for (uint8_t b = 0; b < bins_; ++b) {
-        if (!eligible(b)) continue;
-        const bool quiet = slow_[b] <= k_quiet_bin * floor_;
-        const float value = quiet ? level(b) : fast_[b];
-        if (value < (quiet ? k_fast_lock_quiet : k_fast_lock) * lock_floor || value <= best_value ||
-            !local_peak(fast_, b)) {
-            continue;
-        }
+        if (since_quiet_[b] > within_blocks) continue;
+        if (!eligible(b) || lead_[b] < threshold || lead_[b] <= best_value || !local_peak(lead_, b)) continue;
         best = b;
-        best_value = value;
+        best_value = lead_[b];
     }
     if (best < 0) return false;
     tone_hz = static_cast<float>(first_hz_ + best * k_search_step_hz);
     return true;
 }
 
-bool ToneSearch::train_onset(float& tone_hz, uint8_t min_products) const {
-    if (lock_ != Lock::fast || steady_tone_hz_ <= 0.0f || breaks_ < k_train_breaks || onset_products_ < min_products ||
-        onset_pending_) {
-        return false;
-    }
-    const float reference = sqrtf(steady_sum_.re * steady_sum_.re + steady_sum_.im * steady_sum_.im);
-    if (reference < k_min_phase_coherence * steady_weight_) return false;  // the reference was not a steady tone
-    tone_hz = steady_tone_hz_;
-    return inside(tone_hz);
-}
-
-// A steady tone (the tune tone): the phase of the block-to-block product is the offset modulo one bin
-// (the same in every bin: 2 pi f / 50 Hz per block). The half-block products pick the alias when they are coherent
-// (pi per bin of offset), otherwise the power pattern does.
+// A steady tone: the phase of the block-to-block product is the offset modulo one bin (the same in every bin: 2 pi f /
+// 50 Hz per block). The half-block products pick the alias when they are coherent (pi per bin of offset), otherwise
+// the power pattern does.
 float ToneSearch::steady_offset(const float* power, const Complex& product, const Complex& half, float half_weight,
                                 float fallback) const {
     const float phase = atan2f(product.im, product.re) / k_two_pi;
@@ -1184,17 +1038,13 @@ float ToneSearch::estimate_tone() const {
     const float* power = lock_ == Lock::fast ? fast_ : slow_;
     float offset = power_offset(power);
     if (steady()) {
-        // Marker reversals or gaps make the products incoherent; the power interpolation is kept then and
-        // the fine AFC pulls in the rest.
         offset = steady_offset(power, phase_sum_, half_sum_, half_weight_, offset);
     } else if (phase_weight_ > 0.0f) {
-        // Data with reversals and gaps: the doubled phase is exact modulo half a bin for a steady tone (keyed data
-        // off a bin spreads it by some 15 Hz); the alias nearest the reference is taken. The reference is the
-        // neighbours' balance, centred for keyed data (whose power spreads evenly into both neighbours; the power
-        // interpolation reads it a third of a bin off). A tone steady within its blocks (a weak tune whose products
-        // look incoherent) gives the half-block estimate instead, which a marker reversal between the halves of a
-        // block moves by a whole bin: it is taken only within half a bin of the balance. The decoder does not rely on
-        // this estimate for a lock on data: its fine AFC measures the tone against the provisional tune (spec 3.6).
+        // Keyed data: the doubled phase is exact modulo half a bin for a steady tone (keyed data off a bin spreads it by
+        // some 15 Hz); the alias nearest the reference is taken. The reference is the neighbours' balance, centred for
+        // keyed data (whose power spreads evenly into both neighbours; the power interpolation reads it a third of a
+        // bin off), or the half-block estimate when it lies within half a bin of the balance. The decoder refines the
+        // pitch from the history's tone blocks before it trusts slot energies (spec 3.2).
         const float balance = centre_offset(power);
         float reference = balance;
         float half = 0.0f;
@@ -1222,32 +1072,6 @@ float ToneSearch::onset_floor() const {
     return onset_floor_;
 }
 
-// The tone lies within half a bin of its bin; a marker train at T adds lines 1 / (2 T) away (125 Hz at 4 ms):
-// they must not pass for a new tone while the train is being acquired. Wider exclusions would hide a
-// real tone next to a carrier that holds ACQUIRE.
-void ToneSearch::exclude(float tone_hz, float sideband_hz) {
-    excluded_bin_ = bin_of(tone_hz);
-    excluded_span_ = static_cast<int16_t>(round_to_int(k_half_bin + sideband_hz / k_search_step_hz));
-    excluded_hz_ = tone_hz;
-    held_strong_.re = 0.0f;
-    held_strong_.im = 0.0f;
-    held_middle_ = held_strong_;
-    held_gap_ = k_count_limit_u8;
-    held_reversed_ = false;
-    held_unread_ = false;
-}
-
-void ToneSearch::clear_exclusion() {
-    excluded_bin_ = -1;
-    excluded_span_ = 0;
-    held_reversed_ = false;
-    held_unread_ = false;
-}
-
-bool ToneSearch::onset_echo() const {
-    return onset_echo_;
-}
-
 int16_t ToneSearch::bin_of(float tone_hz) const {
     const int32_t bin = round_to_int((tone_hz - static_cast<float>(first_hz_)) / k_search_step_hz);
     return bin >= 0 && bin < bins_ ? static_cast<int16_t>(bin) : static_cast<int16_t>(-1);
@@ -1258,9 +1082,54 @@ bool ToneSearch::masked(float tone_hz) const {
     return bin >= 0 && steady_carrier(static_cast<uint8_t>(bin));
 }
 
+bool ToneSearch::following(float tone_hz) const {
+    const int16_t bin = bin_of(tone_hz);
+    return bin >= 0 && lead_[bin] >= lead_ratio_ * max_of(floor_, recent_floor_);
+}
+
+bool ToneSearch::fresh(float tone_hz, uint16_t within_blocks) const {
+    const int16_t bin = bin_of(tone_hz);
+    return bin >= 0 && since_quiet_[bin] <= within_blocks &&
+           lead_[bin] >= lead_ratio_ * max_of(floor_, recent_floor_);
+}
+
 bool ToneSearch::present(float tone_hz) const {
     const int16_t bin = bin_of(tone_hz);
     return bin >= 0 && level(static_cast<uint8_t>(bin)) >= k_fast_lock_quiet * max_of(floor_, recent_floor_);
+}
+
+void ToneSearch::forget() {
+    for (uint8_t b = 0; b < bins_; ++b) {
+        if (steady_carrier(b)) continue;
+        fast_[b] = floor_;
+        lead_[b] = floor_;
+        slow_[b] = floor_;
+        slow_square_[b] = 2.0f * floor_ * floor_;  // an exponential power's second moment: no excess variance
+        if (b + 1 < bins_) fast_half_[b] = floor_;
+    }
+    lock_ = Lock::none;
+    stable_blocks_ = 0;
+    phase_sum_.re = 0.0f;
+    phase_sum_.im = 0.0f;
+    phase_square_sum_.re = 0.0f;
+    phase_square_sum_.im = 0.0f;
+    phase_weight_ = 0.0f;
+    half_sum_.re = 0.0f;
+    half_sum_.im = 0.0f;
+    half_weight_ = 0.0f;
+}
+
+float ToneSearch::lead_power(float tone_hz) const {
+    const int16_t bin = bin_of(tone_hz);
+    if (bin < 0) return 0.0f;
+    float value = lead_[bin];
+    if (bin > 0) value = max_of(value, lead_[bin - 1]);
+    if (bin + 1 < bins_) value = max_of(value, lead_[bin + 1]);
+    return value;
+}
+
+float ToneSearch::lead_excess(float tone_hz) const {
+    return lead_power(tone_hz) / (lead_ratio_ * max_of(floor_, recent_floor_));
 }
 
 void ToneSearch::ban(float tone_hz, uint16_t base_blocks) {
@@ -1278,393 +1147,12 @@ void ToneSearch::ban(float tone_hz, uint16_t base_blocks) {
 }
 
 // ---------------------------------------------------------------------------
-// FineAfc
-// ---------------------------------------------------------------------------
-
-FineAfc::FineAfc() {
-    configure(k_afc_default_rate_hz);
-}
-
-float FineAfc::bin_hz(uint8_t bin) {
-    const int8_t index = static_cast<int8_t>(static_cast<int8_t>(bin) - k_afc_centre_bin);
-    const int8_t distance = index < 0 ? static_cast<int8_t>(-index) : index;
-    float hz = static_cast<float>(distance) * k_afc_bin_step_hz;
-    if (distance > k_afc_fine_bins) {
-        hz = static_cast<float>(k_afc_fine_bins) * k_afc_bin_step_hz +
-             static_cast<float>(distance - k_afc_fine_bins) * k_afc_outer_step_hz;
-    }
-    return index < 0 ? -hz : hz;
-}
-
-// Leak of a bin: the outer bins are wider so that a tone between them loses about 3 dB, not 14.
-float FineAfc::bin_lambda(uint8_t bin) {
-    const int8_t index = static_cast<int8_t>(static_cast<int8_t>(bin) - k_afc_centre_bin);
-    const int8_t distance = index < 0 ? static_cast<int8_t>(-index) : index;
-    return distance > k_afc_fine_bins ? k_afc_outer_lambda : k_afc_lambda;
-}
-
-void FineAfc::configure(float input_rate_hz) {
-    for (uint8_t k = 0; k < k_bins; ++k) {
-        const float hz = bin_hz(k);
-        const float angle = k_two_pi * hz / input_rate_hz;
-        rotator_[k].re = bin_lambda(k) * cosf(angle);
-        rotator_[k].im = bin_lambda(k) * sinf(angle);
-    }
-    reset();
-}
-
-void FineAfc::reset() {
-    memset(accumulator_, 0, sizeof(accumulator_));
-    count_ = 0;
-}
-
-void FineAfc::push(const Complex& decimated) {
-    const float square_re = decimated.re * decimated.re - decimated.im * decimated.im;
-    const float square_im = 2.0f * decimated.re * decimated.im;
-    for (uint8_t k = 0; k < k_bins; ++k) {
-        Complex& acc = accumulator_[k];
-        const Complex& rot = rotator_[k];
-        const float re = rot.re * acc.re - rot.im * acc.im + square_re;
-        const float im = rot.re * acc.im + rot.im * acc.re + square_im;
-        acc.re = re;
-        acc.im = im;
-    }
-    if (count_ < k_count_limit) ++count_;
-}
-
-uint16_t FineAfc::inputs() const {
-    return count_;
-}
-
-bool FineAfc::offset(float& tone_offset_hz, bool wide) const {
-    if (count_ < k_afc_min_inputs) return false;
-    // Narrow: tone +-16.7 Hz, the spec range (a tune tone lock is a few Hz off); wide: +-30 Hz.
-    const uint8_t first = wide ? 0 : static_cast<uint8_t>(k_afc_centre_bin - k_afc_narrow_bins);
-    const uint8_t last = wide ? static_cast<uint8_t>(k_bins - 1) : static_cast<uint8_t>(k_afc_centre_bin + k_afc_narrow_bins);
-    float power[k_bins];
-    uint8_t peak = first;
-    for (uint8_t k = 0; k < k_bins; ++k) {
-        // on-bin gain after count_ inputs: (1 - lambda^N) / (1 - lambda); bins have different lambdas
-        const float lambda = bin_lambda(k);
-        const float gain = (1.0f - powf(lambda, static_cast<float>(count_))) / (1.0f - lambda);
-        power[k] = (accumulator_[k].re * accumulator_[k].re + accumulator_[k].im * accumulator_[k].im) / (gain * gain);
-        if (k >= first && k <= last && power[k] > power[peak]) peak = k;
-    }
-    // Peak against the bins away from it: shortly after a reset the main lobe still spans several bins.
-    float total = 0.0f;
-    uint8_t count = 0;
-    for (uint8_t k = first; k <= last; ++k) {
-        if (k + k_afc_lobe_bins >= peak && k <= peak + k_afc_lobe_bins) continue;
-        total += power[k];
-        ++count;
-    }
-    if (power[peak] <= 0.0f || count == 0 || power[peak] < k_afc_peak_ratio * total / static_cast<float>(count)) {
-        return false;
-    }
-    float squared_hz = bin_hz(peak);
-    if (peak > 0 && peak + 1 < k_bins) {
-        // The leaky DFT response is Lorentzian: 1/|acc|^2 is a parabola in frequency (bins may be uneven).
-        const float x0 = bin_hz(static_cast<uint8_t>(peak - 1)) - squared_hz;
-        const float x2 = bin_hz(static_cast<uint8_t>(peak + 1)) - squared_hz;
-        const float y0 = 1.0f / max_of(power[peak - 1], k_tiny);
-        const float y1 = 1.0f / power[peak];
-        const float y2 = 1.0f / max_of(power[peak + 1], k_tiny);
-        const float numerator = x0 * x0 * (y1 - y2) - x2 * x2 * (y1 - y0);
-        const float denominator = x0 * (y1 - y2) - x2 * (y1 - y0);
-        if (denominator != 0.0f) squared_hz += clamp(0.5f * numerator / denominator, 0.5f * x0, 0.5f * x2);
-    }
-    tone_offset_hz = squared_hz * k_squared_to_tone;
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// CandidateList
-// ---------------------------------------------------------------------------
-
-CandidateList::CandidateList() {
-    reset();
-}
-
-void CandidateList::reset() {
-    memset(items_, 0, sizeof(items_));
-    head_ = 0;
-    count_ = 0;
-}
-
-// A stronger detection that replaces the newest entry keeps the entry's finest position when that came from a finer
-// scale: a chain of ever wider echoes, each within k_candidate_merge_blocks of the last, moves the position but not it.
-bool CandidateList::add(const Candidate& candidate) {
-    if (count_ > 0) {
-        Candidate& last = items_[head_];
-        const float distance =
-            static_cast<float>(as_signed(candidate.block - last.block)) + candidate.fraction - last.fraction;
-        if (distance <= k_candidate_merge_blocks && distance >= -k_candidate_merge_blocks) {
-            const bool stronger = candidate.q > last.q;
-            const bool finer = candidate.finest_scale < last.finest_scale;
-            if (!stronger && !finer) return false;
-            // Finest positions, in blocks after the entry's block before the merge.
-            const uint32_t base = last.block;
-            const float kept = last.fraction + finest(last);
-            const float offered = distance + last.fraction + finest(candidate);
-            const float at = finer ? offered : kept;
-            const uint8_t finest_scale = finer ? candidate.finest_scale : last.finest_scale;
-            if (stronger) {
-                last.block = candidate.block;
-                last.fraction = candidate.fraction;
-                last.q = candidate.q;
-                last.scale = candidate.scale;
-            }
-            last.finest_scale = finest_scale;
-            const float from = static_cast<float>(as_signed(last.block - base)) + last.fraction;
-            last.finest_offset = static_cast<int16_t>(round_to_int((at - from) * k_candidate_offset_scale));
-            return stronger;
-        }
-    }
-    head_ = static_cast<uint8_t>((head_ + 1) % k_size);
-    items_[head_] = candidate;
-    if (count_ < k_size) ++count_;
-    return true;
-}
-
-float CandidateList::finest(const Candidate& candidate) {
-    return static_cast<float>(candidate.finest_offset) / k_candidate_offset_scale;
-}
-
-uint8_t CandidateList::count() const {
-    return count_;
-}
-
-const Candidate& CandidateList::newest(uint8_t age) const {
-    return items_[(head_ + k_size - age % k_size) % k_size];
-}
-
-// ---------------------------------------------------------------------------
-// AuditRing
-// ---------------------------------------------------------------------------
-
-AuditRing::AuditRing() {
-    reset(k_max_positions);
-}
-
-void AuditRing::reset(uint8_t positions) {
-    memset(evidence_, 0, sizeof(evidence_));
-    positions_ = positions < k_max_positions ? positions : k_max_positions;
-    head_ = 0;
-    count_ = 0;
-}
-
-void AuditRing::set(uint8_t position, float evidence) {
-    if (position >= positions_) return;
-    evidence_[head_][position] = static_cast<int8_t>(round_to_int(evidence * static_cast<float>(k_audit_scale)));
-}
-
-void AuditRing::next_package() {
-    head_ = static_cast<uint8_t>((head_ + 1) % (k_packages + 1));
-    memset(evidence_[head_], 0, sizeof(evidence_[head_]));
-    if (count_ < k_packages) ++count_;
-}
-
-float AuditRing::max_evidence() const {
-    int16_t best = 0;
-    for (uint8_t k = 0; k < positions_; ++k) {
-        int16_t sum = 0;
-        for (uint8_t p = 1; p <= count_; ++p) {
-            sum = static_cast<int16_t>(sum + evidence_[(head_ + k_packages + 1 - p) % (k_packages + 1)][k]);
-        }
-        if (k == 0 || sum > best) best = sum;
-    }
-    return static_cast<float>(best) / static_cast<float>(k_audit_scale);
-}
-
-uint8_t AuditRing::packages() const {
-    return count_;
-}
-
-uint8_t AuditRing::positions() const {
-    return positions_;
-}
-
-// ---------------------------------------------------------------------------
-// PackageLearner (spec 3.8)
-// ---------------------------------------------------------------------------
-
-PackageLearner::PackageLearner() {
-    reset(0, 0);
-}
-
-void PackageLearner::reset(int32_t train_index, uint8_t train_ones, int32_t min_start) {
-    train_index_ = train_index;
-    min_start_ = min_start;
-    first_marker_ = k_no_marker;
-    last_marker_ = train_index;
-    candidate_start_ = train_index;
-    candidate_bits_ = 0;
-    faded_bits_ = 0;
-    unsupported_gap_ = 0;
-    train_ones_ = train_ones;
-    rejections_ = 0;
-    faded_start_ = false;
-    start_faded_ = false;
-    confirmed_ = false;
-}
-
-void PackageLearner::extend_train(int32_t index, bool adjacent) {
-    if (adjacent && train_ones_ < k_gap_limit) ++train_ones_;
-    train_index_ = index;
-    last_marker_ = index;
-    first_marker_ = k_no_marker;
-    candidate_bits_ = 0;
-    faded_bits_ = 0;
-    faded_start_ = false;
-    start_faded_ = false;
-    unsupported_gap_ = 0;
-}
-
-// Data slots never flip: after the train, the first marker that is not one slot away is a STOP, and a candidate N is
-// confirmed when the next span repeats it.
-LearnStep PackageLearner::push(int32_t index) {
-    const int32_t gap = index - last_marker_;
-    if (gap <= 1) {
-        extend_train(index, true);
-        return LearnStep::train;
-    }
-    const bool first_gap = first_marker_ == k_no_marker;
-    // Package 0 cannot start before the train's end: a train that stops short of min_start_ faded there, and so did
-    // the first START.
-    const int32_t start = first_gap && min_start_ > last_marker_ ? min_start_ : last_marker_;
-    const int32_t bits = index - start - 1;
-    if (bits < 1) {
-        extend_train(index, false);
-        return LearnStep::train;
-    }
-    last_marker_ = index;
-    const uint8_t clipped_gap = static_cast<uint8_t>(bits + 1 > k_gap_limit ? k_gap_limit : bits + 1);
-    if (first_gap) first_marker_ = index;
-    if (candidate_bits_ > 0) {
-        if (bits == candidate_bits_) {
-            confirmed_ = true;
-            faded_start_ = false;
-            return LearnStep::confirmed;
-        }
-        if (faded_bits_ > 0 && bits == faded_bits_) {
-            confirmed_ = true;
-            faded_start_ = true;
-            candidate_bits_ = faded_bits_;
-            candidate_start_ = train_index_ + 1;
-            return LearnStep::confirmed;
-        }
-        if (rejections_ < k_gap_limit) ++rejections_;
-        candidate_bits_ = 0;
-        faded_bits_ = 0;
-    } else if (bits > k_max_bits_per_package && unsupported_gap_ == clipped_gap) {
-        return LearnStep::unsupported;
-    }
-    if (bits > k_max_bits_per_package) {
-        unsupported_gap_ = clipped_gap;
-        return LearnStep::rejected;
-    }
-    unsupported_gap_ = 0;
-    candidate_bits_ = static_cast<uint8_t>(bits);
-    candidate_start_ = start;
-    start_faded_ = start != index - gap;
-    // Only the first package may start on a faded marker: the train's last marker, the first START.
-    faded_bits_ = first_gap && !start_faded_ && bits >= 2 ? static_cast<uint8_t>(bits - 1) : 0;
-    return LearnStep::candidate;
-}
-
-uint8_t PackageLearner::bits() const {
-    return candidate_bits_;
-}
-
-uint8_t PackageLearner::faded_bits() const {
-    return confirmed_ ? 0 : faded_bits_;
-}
-
-bool PackageLearner::faded_start() const {
-    return faded_start_;
-}
-
-bool PackageLearner::start_faded() const {
-    return start_faded_;
-}
-
-int32_t PackageLearner::candidate_start() const {
-    return candidate_start_;
-}
-
-int32_t PackageLearner::start_base() const {
-    return min_start_ > train_index_ ? min_start_ : train_index_;
-}
-
-// The reading with the fewest faded markers: package 0 starts a whole number of packages before the confirmed START,
-// the first marker after L that the two equal spans vouch for (a noise flip before it may have formed a candidate).
-int32_t PackageLearner::first_start() const {
-    const int32_t span = static_cast<int32_t>(candidate_bits_) + 1;
-    if (candidate_bits_ == 0) return candidate_start_;
-    return candidate_start_ - span * ((candidate_start_ - start_base()) / span);
-}
-
-bool PackageLearner::start_exact() const {
-    return candidate_bits_ >= 2 ||
-           (first_marker_ != k_no_marker && first_marker_ - start_base() <= k_exact_start_slots);
-}
-
-uint8_t PackageLearner::rejections() const {
-    return rejections_;
-}
-
-uint8_t PackageLearner::train_ones() const {
-    return train_ones_;
-}
-
-int32_t PackageLearner::min_start() const {
-    return min_start_;
-}
-
-int32_t PackageLearner::first_marker() const {
-    return first_marker_;
-}
-
-void PackageLearner::shift_candidate(int32_t slots) {
-    candidate_start_ += slots;
-    last_marker_ += slots;
-}
-
-int32_t PackageLearner::train_index() const {
-    return train_index_;
-}
-
-// ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
 
 float noise_samples(float blocks, uint8_t block_samples) {
     const float effective = max_of(blocks - k_cic_overlap, 0.5f * blocks);
     return effective * static_cast<float>(block_samples);
-}
-
-FlipMeasure flip_measure(const Complex& before, const Complex& after, float noise_energy, float half_samples) {
-    FlipMeasure m;
-    const float cross = before.re * after.re + before.im * after.im;
-    const float energy_before = before.re * before.re + before.im * before.im;
-    const float energy_after = after.re * after.re + after.im * after.im;
-    const float noise = max_of(noise_energy, k_tiny);
-    const float total = energy_before + energy_after;
-    m.q = -cross / noise;
-    m.q_balanced = m.q - fabsf(energy_before - energy_after) / (2.0f * noise);
-    m.kappa = total > 0.0f ? -2.0f * cross / total : 0.0f;
-    const float diff_re = before.re - after.re;
-    const float diff_im = before.im - after.im;
-    const float sum_re = before.re + after.re;
-    const float sum_im = before.im + after.im;
-    m.amplitude = sqrtf(diff_re * diff_re + diff_im * diff_im) / max_of(half_samples * k_g_marker, k_tiny);
-    m.steady = sqrtf(sum_re * sum_re + sum_im * sum_im) / max_of(half_samples * k_g_marker, k_tiny);
-    m.energy = 0.5f * total / noise;
-    // phase of -S_a * conj(S_b): the carrier advance over one half window
-    m.phase_step = atan2f(-(after.im * before.re - after.re * before.im), -cross);
-    m.position = 0.0f;
-    m.valid = true;
-    return m;
 }
 
 float parabolic_offset(float left, float centre, float right) {

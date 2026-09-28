@@ -129,7 +129,8 @@ TEST(pc_audio_open_parses_specs) {
     CHECK(open_output(bare, error) != nullptr);
     CHECK(open_output(upper, error) != nullptr);
 
-    const char* unknown[] = {"", "nul", "wav", "alsa:default", "tone.txt", ".wav", "wav:"};
+    // Live devices (coreaudio:, alsa:, default) are tests/test_audio_devices.cpp's.
+    const char* unknown[] = {"", "nul", "wav", "pulse:default", "coreaudio", "tone.txt", ".wav", "wav:"};
     for (size_t i = 0; i < count_of(unknown); ++i) {
         error.clear();
         if (!CHECK(open_output(unknown[i], error) == nullptr)) NOTE("output '%s' accepted", unknown[i]);
@@ -338,7 +339,10 @@ TEST(pc_audio_encoder_through_wav_files) {
     // Encoder -> EncoderSource -> "<path>.wav" -> open_input -> ResamplingSink: nothing lost or added.
     const uint32_t rate = 44100;
     const uint8_t text[] = {'P', 'C', ' ', 'A', 'U', 'D', 'I', 'O'};
-    unlimited::Encoder encoder(unlimited::EncoderConfig::from_preset(unlimited::Preset::hf_fast, rate));
+    unlimited::EncoderConfig config;
+    config.sample_rate_hz = rate;
+    config.slot_us = unlimited::slot_us_for_speed(12.0f);
+    unlimited::Encoder encoder(config);
     REQUIRE(encoder.write(text, sizeof(text)) == sizeof(text));
     const uint32_t duration = encoder.duration_samples(sizeof(text));
     REQUIRE(encoder.start());

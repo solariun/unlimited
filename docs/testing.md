@@ -1,5 +1,7 @@
 # Testing Unlimited
 
+> **Being rewritten for v1.0.** The targets are the same (`make test`, `make test_long`, `make check_embedded`, `make arduino_check`, `make demo_run`, `make docs`); the tests and rows they run are listed in `spec.md` §8, and this guide still describes v0.3's.
+
 **How to run every test and check of Unlimited, and how to read what they print.**
 
 Unlimited is a modem: it turns bytes into short beeps on one pitch that any radio can carry, and turns the beeps back

@@ -1,14 +1,13 @@
 #include "regression.hpp"
 
 #include "test_harness.hpp"
-#include "unlimited/packet.hpp"
 
 #include <cmath>
 #include <memory>
 #include <random>
 
-// F1-F4 and F7 (spec 8.5): 30 minutes of audio per profile with no transmission. The audio is generated and
-// decoded in one-second blocks, so memory stays small.
+// F1-F4 (spec 4 F): 30 minutes of audio per speed class with no transmission: noise alone, a steady carrier, keyed
+// CW and speech-shaped bursts. The audio is generated and decoded in one-second blocks, so memory stays small.
 namespace unlimited {
 namespace regression {
 
@@ -17,7 +16,6 @@ namespace {
 const std::uint32_t k_test_f = 200;
 const double k_minutes = 30.0;
 const double k_s_per_min = 60.0;
-const double k_s_per_hour = 3600.0;
 const std::size_t k_block = k_decoder_rate_hz;  // 1 s
 const double k_rate = static_cast<double>(k_decoder_rate_hz);
 const double k_pi = 3.141592653589793;
@@ -29,9 +27,10 @@ const double k_edge_s = 0.005;         // 5 ms raised-cosine edges
 const double k_band_margin_hz = 50.0;  // interferer tones stay this far inside the profile's search range
 const double k_db_per_decade = 20.0;
 const std::size_t k_lock_details = 4;
+const std::size_t k_lost_reasons = static_cast<std::size_t>(LostReason::reset) + 1;
 
-// F1: noise level (output gain) and, for am/fm, carrier SNR in 2500 Hz per segment (the channel's snr_db;
-// the fm CNR in its 12.5 kHz IF is 7 dB lower, so segments 0, 1, 3 and 5 are below the FM threshold).
+// F1: noise level (output gain) and, for fm, carrier SNR in 2500 Hz per segment (the channel's snr_db; the fm CNR in
+// its 12.5 kHz IF is 7 dB lower, so segments 0, 1, 3 and 5 are below the FM threshold).
 const double k_f1_gains[] = {1.0, 0.03, 0.3, 3.0, 0.1, 1.0};
 const double k_f1_rf_snr_db[] = {10.0, 3.0, 20.0, 0.0, 30.0, 6.0};
 const std::size_t k_f1_segments = sizeof(k_f1_gains) / sizeof(k_f1_gains[0]);
@@ -384,56 +383,40 @@ struct FalseLock {
     std::size_t locks = 0;
     std::size_t bytes = 0;
     std::size_t acquires = 0;       // SEARCH -> ACQUIRE transitions (tone grabs)
-    std::size_t preambles = 0;      // sync trains accepted (ACQUIRE -> PREAMBLE)
-    std::size_t confirmations = 0;  // PREAMBLE -> TRACK: N confirmed by the package learning (F7)
-    std::size_t late_tracks = 0;    // ACQUIRE -> TRACK: a relock or a cold join started
-    std::size_t packages = 0;       // `package` events (telemetry of decided packages, before the guard)
     std::size_t lost = 0;
     std::size_t lost_reasons[k_lost_reasons] = {};
-    double busy_seconds = 0.0;      // time outside SEARCH
+    double busy_seconds = 0.0;      // time outside SEARCH (DCD on)
     double seconds = 0.0;
-    std::size_t packets = 0;        // CRC-valid packets delivered (nothing was sent: all wrong)
-    std::vector<std::string> lock_details;  // the first k_lock_details locks: when, T, N, pitch, SNR
+    std::vector<std::string> lock_details;  // the first k_lock_details locks: when, pitch, T, SNR
 };
 
 struct EventLog {
     FalseLock* result;
-    PacketReader* reader;
     std::size_t* sample;
     std::size_t busy_from;
     bool busy;
-    DecoderState previous;
 };
 
 void on_event(const Event& event, void* context) {
     EventLog* log = static_cast<EventLog*>(context);
-    log->reader->on_event(event);
     switch (event.type) {
     case EventType::locked:
         ++log->result->locks;
         if (log->result->lock_details.size() < k_lock_details) {
-            log->result->lock_details.push_back(format("%.1f s: T %.2f ms N %u at %.0f Hz, %.1f dB",
-                                                       static_cast<double>(*log->sample) / k_rate, event.slot_ms,
-                                                       event.bits_per_package, event.tone_hz, event.snr_db));
+            log->result->lock_details.push_back(format("%.1f s: %.0f Hz, T %.2f ms, %.1f dB",
+                                                       static_cast<double>(*log->sample) / k_rate, event.tone_hz,
+                                                       event.slot_ms, event.snr_db));
         }
         break;
     case EventType::byte:
         ++log->result->bytes;
-        break;
-    case EventType::package:
-        ++log->result->packages;
         break;
     case EventType::lost:
         ++log->result->lost;
         ++log->result->lost_reasons[static_cast<std::size_t>(event.reason)];
         break;
     case EventType::state:
-        if (event.state == DecoderState::acquire) ++log->result->acquires;
-        if (event.state == DecoderState::preamble) ++log->result->preambles;
-        if (event.state == DecoderState::track && log->previous == DecoderState::preamble) {
-            ++log->result->confirmations;
-        }
-        if (event.state == DecoderState::track && log->previous == DecoderState::acquire) ++log->result->late_tracks;
+        if (event.state == DecoderState::acquire && !log->busy) ++log->result->acquires;
         if (event.state == DecoderState::search && log->busy) {
             log->result->busy_seconds += static_cast<double>(*log->sample - log->busy_from) / k_rate;
             log->busy = false;
@@ -441,7 +424,6 @@ void on_event(const Event& event, void* context) {
             log->busy_from = *log->sample;
             log->busy = true;
         }
-        log->previous = event.state;
         break;
     case EventType::slot:
     case EventType::end:
@@ -449,22 +431,31 @@ void on_event(const Event& event, void* context) {
     }
 }
 
-void on_packet(const std::uint8_t* payload, std::uint16_t size, std::uint8_t flags, void* context) {
-    (void)payload;
-    (void)size;
-    (void)flags;
-    ++static_cast<FalseLock*>(context)->packets;
+// The speed classes of F (spec 4): slow HF, the HF default and FM, each with its receiver.
+struct SpeedClass {
+    float speed;
+    Passband passband;
+    sim::Mode noise;  // the receiver noise of F1
+};
+
+const SpeedClass k_classes[] = {{1.0f, {k_ssb_passband_low_hz, k_ssb_passband_high_hz}, sim::Mode::usb},
+                                {6.0f, {k_ssb_passband_low_hz, k_ssb_passband_high_hz}, sim::Mode::usb},
+                                {25.0f, {k_fm_passband_low_hz, k_fm_passband_high_hz}, sim::Mode::fm}};
+const std::size_t k_class_count = sizeof(k_classes) / sizeof(k_classes[0]);
+
+DecoderConfig class_receiver(const SpeedClass& c) {
+    DecoderConfig receiver;
+    receiver.slot_us = slot_us_for_speed(c.speed);
+    receiver.passband = c.passband;
+    return receiver;
 }
 
-sim::Mode noise_mode(Scene scene, Profile profile) {
-    if (scene != Scene::noise) return sim::Mode::usb;
-    if (profile == Profile::am) return sim::Mode::am;
-    if (profile == Profile::fm) return sim::Mode::fm;
-    return sim::Mode::usb;
+std::string class_name(const SpeedClass& c) {
+    return format("%s in %u-%u Hz", speed_text(c.speed).c_str(), c.passband.low_hz, c.passband.high_hz);
 }
 
-FalseLock run_scene(Scene scene, Profile profile, std::uint32_t seed) {
-    const DecoderConfig decoder_config = DecoderConfig::for_profile(profile);
+FalseLock run_scene(Scene scene, const SpeedClass& speed_class, std::uint32_t seed) {
+    const DecoderConfig decoder_config = class_receiver(speed_class);
     const Passband range = decoder_config.search_range();
     const double low = range.low_hz + k_band_margin_hz;
     const double high = range.high_hz - k_band_margin_hz;
@@ -478,14 +469,13 @@ FalseLock run_scene(Scene scene, Profile profile, std::uint32_t seed) {
     if (scene == Scene::speech) interferer = &speech;
 
     FalseLock result;
-    PacketReader reader(&on_packet, &result);
     std::size_t sample = 0;
-    EventLog log = {&result, &reader, &sample, 0, false, DecoderState::search};
+    EventLog log = {&result, &sample, 0, false};
     Decoder decoder(decoder_config, &on_event, &log);
 
     const std::size_t total = static_cast<std::size_t>(k_minutes * k_s_per_min * k_rate);
     const std::size_t per_segment = static_cast<std::size_t>(k_segment_s * k_rate);
-    const sim::Mode mode = noise_mode(scene, profile);
+    const sim::Mode mode = scene == Scene::noise ? speed_class.noise : sim::Mode::usb;
     std::size_t segment = k_f1_segments;
     sim::ChannelConfig channel_config;
     std::unique_ptr<sim::Channel> channel;
@@ -502,6 +492,7 @@ FalseLock run_scene(Scene scene, Profile profile, std::uint32_t seed) {
             channel_config.signal_level = k_reference;
             channel_config.snr_db = mode == sim::Mode::usb ? 0.0 : k_f1_rf_snr_db[segment];
             channel_config.seed = seed + static_cast<std::uint32_t>(segment);
+            if (mode == sim::Mode::fm) channel_config.fm_audio_high_hz = speed_class.passband.high_hz;
             channel.reset(new sim::Channel(channel_config));
             gain = scene == Scene::noise ? k_f1_gains[segment] : 1.0;
         }
@@ -521,53 +512,19 @@ FalseLock run_scene(Scene scene, Profile profile, std::uint32_t seed) {
     return result;
 }
 
-const Profile k_profiles[] = {Profile::ssb, Profile::am, Profile::fm};
-const std::size_t k_profile_count = sizeof(k_profiles) / sizeof(k_profiles[0]);
 const std::size_t k_scene_count = 4;  // Scene values
-// F3/F4 also run on 5 more seeds (report only, spec 8.5): one 30-minute run per profile is a thin sample of a rate.
-const std::size_t k_extra_seeds = 5;
-const Scene k_rate_scenes[] = {Scene::cw, Scene::speech};
-const std::size_t k_rate_scene_count = sizeof(k_rate_scenes) / sizeof(k_rate_scenes[0]);
-const std::size_t k_main_runs = k_scene_count * k_profile_count;
-const char* const k_scene_names[k_scene_count] = {"F1 noise", "F2 carrier", "F3 keyed CW", "F4 speech"};
+const std::size_t k_main_runs = k_scene_count * k_class_count;
 
-// All scenes, profiles and extra seeds run once, in parallel, on the first F test; the others read the
-// results. Runs [0, k_main_runs) are the gated ones (seed 0), the rest the extra seeds of k_rate_scenes.
+// All scenes and speed classes run once, in parallel, on the first F test; the others read the results.
 const std::vector<FalseLock>& all_scenes() {
-    static const std::vector<FalseLock> results = parallel_map<FalseLock>(
-        k_main_runs + k_rate_scene_count * k_profile_count * k_extra_seeds, [](std::size_t i) {
-            Scene scene = static_cast<Scene>(i / k_profile_count);
-            std::size_t profile = i % k_profile_count;
-            std::uint32_t job = 0;
-            if (i >= k_main_runs) {
-                const std::size_t extra = i - k_main_runs;
-                scene = k_rate_scenes[extra / (k_profile_count * k_extra_seeds)];
-                profile = (extra / k_extra_seeds) % k_profile_count;
-                job = static_cast<std::uint32_t>(1 + extra % k_extra_seeds);
-            }
-            const std::uint32_t seed =
-                seed_of(k_test_f + static_cast<std::uint32_t>(scene), static_cast<std::uint32_t>(profile), job);
-            return run_scene(scene, k_profiles[profile], seed);
-        });
+    static const std::vector<FalseLock> results = parallel_map<FalseLock>(k_main_runs, [](std::size_t i) {
+        const Scene scene = static_cast<Scene>(i / k_class_count);
+        const std::size_t speed_class = i % k_class_count;
+        const std::uint32_t seed =
+            seed_of(k_test_f + static_cast<std::uint32_t>(scene), static_cast<std::uint32_t>(speed_class), 0);
+        return run_scene(scene, k_classes[speed_class], seed);
+    });
     return results;
-}
-
-void add(FalseLock& into, const FalseLock& from) {
-    into.locks += from.locks;
-    into.bytes += from.bytes;
-    into.acquires += from.acquires;
-    into.preambles += from.preambles;
-    into.confirmations += from.confirmations;
-    into.late_tracks += from.late_tracks;
-    into.packages += from.packages;
-    into.lost += from.lost;
-    for (std::size_t r = 0; r < k_lost_reasons; ++r) into.lost_reasons[r] += from.lost_reasons[r];
-    into.busy_seconds += from.busy_seconds;
-    into.seconds += from.seconds;
-    into.packets += from.packets;
-    for (std::size_t i = 0; i < from.lock_details.size() && into.lock_details.size() < k_lock_details; ++i) {
-        into.lock_details.push_back(from.lock_details[i]);
-    }
 }
 
 std::string locks_text(const FalseLock& r) {
@@ -576,108 +533,37 @@ std::string locks_text(const FalseLock& r) {
     return text;
 }
 
-std::string learning_text(const FalseLock& r) {
-    const std::size_t* reason = r.lost_reasons;
-    return format("%zu tone grabs, %zu sync trains (PREAMBLE), %zu N confirmations, %zu late-join TRACKs, %zu package "
-                  "events; lost: gone %zu, alias %zu, preamble %zu, unsupported %zu; %.1f s outside SEARCH",
-                  r.acquires, r.preambles, r.confirmations, r.late_tracks, r.packages,
-                  reason[static_cast<std::size_t>(LostReason::signal_gone)],
-                  reason[static_cast<std::size_t>(LostReason::alias)],
-                  reason[static_cast<std::size_t>(LostReason::preamble_timeout)],
-                  reason[static_cast<std::size_t>(LostReason::unsupported)], r.busy_seconds);
+std::string activity_text(const FalseLock& r) {
+    return format("%zu tone grabs (ACQUIRE), %zu lost; %.1f s outside SEARCH (DCD on)", r.acquires, r.lost,
+                  r.busy_seconds);
 }
 
-Outcome packet_outcome(const FalseLock& r) {
-    Outcome outcome;
-    outcome.packets_bad = r.packets;
-    return outcome;
-}
-
-void run_f(Scene scene, const char* id, const char* what, bool bytes_gate) {
+void run_f(Scene scene, const char* id, const char* what) {
     const std::vector<FalseLock>& results = all_scenes();
-    for (std::size_t i = 0; i < k_profile_count; ++i) {
-        const FalseLock& r = results[static_cast<std::size_t>(scene) * k_profile_count + i];
-        const bool pass = r.locks == 0 && (!bytes_gate || r.bytes == 0);
-        result(id, format("%s, %g min, %s profile", what, k_minutes, profile_name(k_profiles[i]).c_str()),
-               format("locked %zu, bytes %zu, packets %zu; ", r.locks, r.bytes, r.packets) + learning_text(r) +
-                   locks_text(r),
-               bytes_gate ? "0 locked, 0 bytes" : "0 locked", pass);
-        ledger_packets(format("%s %s", id, profile_name(k_profiles[i]).c_str()), packet_outcome(r));
-    }
-    for (std::size_t k = 0; k < k_rate_scene_count; ++k) {
-        if (k_rate_scenes[k] != scene) continue;
-        for (std::size_t i = 0; i < k_profile_count; ++i) {
-            FalseLock total;
-            for (std::size_t j = 0; j < k_extra_seeds; ++j) {
-                const FalseLock& r = results[k_main_runs + (k * k_profile_count + i) * k_extra_seeds + j];
-                add(total, r);
-                ledger_packets(format("%s %s seed %zu", id, profile_name(k_profiles[i]).c_str(), j + 1),
-                               packet_outcome(r));
-            }
-            result(id, format("%s, %zu more seeds x %g min, %s profile", what, k_extra_seeds, k_minutes,
-                              profile_name(k_profiles[i]).c_str()),
-                   format("locked %zu, bytes %zu, packets %zu; ", total.locks, total.bytes, total.packets) +
-                       learning_text(total) + locks_text(total),
-                   "report (rate)", true, Kind::report);
-        }
+    for (std::size_t i = 0; i < k_class_count; ++i) {
+        const FalseLock& r = results[static_cast<std::size_t>(scene) * k_class_count + i];
+        result(id, format("%s, %g min, %s", what, k_minutes, class_name(k_classes[i]).c_str()),
+               format("locked %zu, bytes %zu; ", r.locks, r.bytes) + activity_text(r) + locks_text(r),
+               "0 bytes released", r.bytes == 0);
     }
 }
 
 }  // namespace
 
 void test_f1_noise() {
-    run_f(Scene::noise, "F1",
-          "receiver noise only (ssb: usb noise; am/fm: unmodulated carrier, SNR 0-30 dB in 2500 Hz, fm CNR -7..23 dB), "
-          "6 levels",
-          true);
+    run_f(Scene::noise, "F1", "receiver noise only (HF: usb noise at 6 levels; FM: an unmodulated carrier, CNR -7..23 dB)");
 }
 
 void test_f2_carrier() {
-    run_f(Scene::carrier, "F2", "noise + steady carrier +20 dB, drift 0.02-0.3 Hz/s, new tone every 5 min", false);
+    run_f(Scene::carrier, "F2", "noise + steady carrier +20 dB, drift 0.02-0.3 Hz/s, new tone every 5 min");
 }
 
 void test_f3_cw() {
-    run_f(Scene::cw, "F3", "noise + keyed CW 12-30 WPM, random tones, -6..+30 dB, up to 2 stations", false);
+    run_f(Scene::cw, "F3", "noise + keyed CW 12-30 WPM, random tones, -6..+30 dB, up to 2 stations");
 }
 
 void test_f4_speech() {
-    run_f(Scene::speech, "F4", "noise + speech-shaped bursts (~4 syllables/s, f0 90-250 Hz, 3 formants), +10..+25 dB",
-          false);
-}
-
-// F7: package learning on non-signals. The learner's candidates are internal; what the events show is each sync
-// train accepted (PREAMBLE entries, the upper bound of candidates formed) and each N confirmed (PREAMBLE -> TRACK).
-// Per hour, every seed; a confirmation must still fail the guard: 0 `locked` in the gated runs.
-void test_f7_package_learning() {
-    const std::vector<FalseLock>& results = all_scenes();
-    FalseLock gated;
-    for (std::size_t scene = 0; scene < k_scene_count; ++scene) {
-        for (std::size_t i = 0; i < k_profile_count; ++i) {
-            const FalseLock& main = results[scene * k_profile_count + i];
-            add(gated, main);
-            FalseLock total = main;
-            std::size_t runs = 1;
-            for (std::size_t k = 0; k < k_rate_scene_count; ++k) {
-                if (static_cast<std::size_t>(k_rate_scenes[k]) != scene) continue;
-                for (std::size_t j = 0; j < k_extra_seeds; ++j) {
-                    add(total, results[k_main_runs + (k * k_profile_count + i) * k_extra_seeds + j]);
-                    ++runs;
-                }
-            }
-            const double hours = total.seconds / k_s_per_hour;
-            result("F7", format("%s, %zu x %g min, %s profile", k_scene_names[scene], runs, k_minutes,
-                                profile_name(k_profiles[i]).c_str()),
-                   format("sync trains %.1f/h, N confirmations %.2f/h (%zu), late-join TRACKs %.2f/h; locked %zu, "
-                          "bytes %zu",
-                          total.preambles / hours, total.confirmations / hours, total.confirmations,
-                          total.late_tracks / hours, total.locks, total.bytes),
-                   "report (candidates are internal: sync trains bound them)", true, Kind::report);
-        }
-    }
-    result("F7", "every confirmation of the gated F1-F4 runs (12 x 30 min) fails the guard",
-           format("%zu N confirmations, %zu late-join TRACKs -> %zu locked, %zu bytes", gated.confirmations,
-                  gated.late_tracks, gated.locks, gated.bytes),
-           "0 locked", gated.locks == 0);
+    run_f(Scene::speech, "F4", "noise + speech-shaped bursts (~4 syllables/s, f0 90-250 Hz, 3 formants), +10..+25 dB");
 }
 
 }  // namespace regression

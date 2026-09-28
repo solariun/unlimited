@@ -4,70 +4,64 @@
 
 namespace unlimited {
 
-// Receiver presets (spec 1.7): a profile only fills DecoderConfig's fields.
-enum class Profile : uint8_t {
-    ssb,  // HF SSB, USB or LSB: T 8..64 ms, passband 300..2700 Hz (the default)
-    am,   // AM receivers: T 8..64 ms, passband 100..3000 Hz
-    fm    // VHF/UHF FM: T 4..32 ms, passband 300..3000 Hz, tones from 1000 Hz
-};
+// Decision line (spec 3.5, V14): the fixed line sits at threshold_percent of the window's reference line.
+static const uint8_t k_default_threshold_percent = 70;
+static const uint8_t k_min_threshold_percent = 50;
+static const uint8_t k_max_threshold_percent = 90;
 
 enum class DecisionMode : uint8_t {
-    adaptive,     // the smart line: 50..75 % of the START-STOP reference line (about 70 % when weak), noise floor
-    fixed_ratio   // DecoderConfig::fixed_ratio of the reference line (0.70: the original rule)
+    fixed,    // threshold_percent of the reference line (70 %: Gustavo's rule, the default)
+    adaptive  // v0.3's smart line: 50..75 % of the reference line (about 70 % on weak signals), never below the noise
 };
 
-enum class DecoderState : uint8_t { search, acquire, preamble, track };
+enum class DecoderState : uint8_t { search, acquire, track };
 
-enum class EventType : uint8_t { state, locked, slot, package, byte, end, lost };
+enum class EventType : uint8_t { state, locked, slot, byte, end, lost };
 
-enum class LostReason : uint8_t { none, signal_gone, alias, preamble_timeout, reset, unsupported };
+enum class LostReason : uint8_t {
+    none,
+    framing,  // k_max_framing_errors windows in a row lost their START or STOP while a signal was present
+    reset     // reset() was called while tracking
+};
 
 enum EventFlag : uint8_t {
-    event_flag_late_join = 0x01,        // joined a running transmission: relock after a fade or cold join (spec 3.12)
-    event_flag_flywheel_start = 0x02,   // the package's START was not detected: measured where predicted
-    event_flag_flywheel_stop = 0x04,    // the same for its STOP
-    event_flag_blanked = 0x08,          // the impulse blanker cut part of the package
-    event_flag_weak = 0x10              // a bit within 12.5 % of its decision line
+    event_flag_weak = 0x01,     // a bit within 12.5 % of its decision line
+    event_flag_blanked = 0x02,  // the impulse blanker cut part of the window
+    event_flag_framing = 0x04   // slot: the window's START or STOP is missing; its byte is dropped (no byte event)
 };
 
 struct Event {
     EventType type;
     LostReason reason;             // lost
     DecoderState state;            // new state for EventType::state, current state otherwise
-    uint8_t flags;                 // EventFlag bits
-    uint8_t value;                 // byte: the byte; slot: the bit (0 or 1); package: d, its bit count
-    uint8_t slot;                  // slot: 1..d, the data slot in its package
-    uint8_t bits_per_package;      // N, from locked to end or lost; 0 before
-    uint8_t level_pct;             // slot: amplitude, % of the reference line at this slot (<= 255)
+    uint8_t flags;                 // slot, byte: EventFlag bits
+    uint8_t value;                 // byte: the byte; slot: the bit (0 or 1)
+    uint8_t slot;                  // slot: 1..8, the data slot in its window (bit 8 - slot)
+    uint8_t level_pct;             // slot: level, % of the reference line at this slot (<= 255)
     uint8_t threshold_pct;         // slot: the decision line, same units
-    uint8_t start_pct;             // slot, package: START crest, % of the running marker reference (<= 255)
-    uint8_t stop_pct;              // slot, package: STOP crest, same units
+    uint8_t start_pct;             // slot, byte: the window's START level, % of the running reference (<= 255)
+    uint8_t stop_pct;              // slot, byte: its STOP level, same units
     int8_t soft[k_bits_per_byte];  // byte: bits MSB first; slot: soft[0]; > 0 means 1, 64 = one line of margin
-    uint32_t package_index;        // slot, package, byte, locked: package number, 0 = the first after the train
-    uint32_t byte_index;           // byte: position in the transmission, 0 = the first byte
-    float tone_hz;
-    float slot_ms;                 // measured T (package: its own (STOP - START) / (d + 1))
-    float snr_db;
+    uint32_t byte_index;           // slot, byte: the window's position, 0 = the first byte after the anchor
+    float tone_hz;                 // locked, slot, byte: the pitch heard
+    float slot_ms;                 // locked, slot, byte: T as measured (the sender's clock)
+    float snr_db;                  // locked, slot, byte: key-down tone over the noise in 2500 Hz
 };
 
 typedef void (*EventHandler)(const Event& event, void* context);
 
-// The receiver chooses its T range and its audio passband; it learns the tone, T and N from the signal.
+// The receiver is told the speed (the same B as the sender) and its audio passband; it finds the pitch itself.
 struct DecoderConfig {
-    uint8_t min_slot_ms;           // k_min_window_slot_ms..k_max_window_slot_ms: accepted T = min_slot_ms ..
-                                   // 8 * min_slot_ms; block = min_slot_ms samples
-    Passband passband;             // the radio's audio passband; the tone search stays inside it (spec 3.6)
-    DecisionMode decision_mode;
-    float fixed_ratio;             // DecisionMode::fixed_ratio: fraction of the reference line
+    uint32_t slot_us;            // T = 1 / (10 B), k_min_slot_us..k_max_slot_us: slot_us_for_speed(B)
+    Passband passband;           // the radio's audio passband; the pitch search stays inside it (spec 3.2)
+    uint8_t threshold_percent;   // DecisionMode::fixed: k_min_threshold_percent..k_max_threshold_percent (70)
+    DecisionMode decision_mode;  // fixed (the default) or adaptive
     bool impulse_blanker;
 
-    DecoderConfig();  // for_profile(Profile::ssb)
-    static DecoderConfig for_profile(Profile profile);  // fills the fields; the profile itself is not kept
+    DecoderConfig();  // 6 bytes/s, 300..2700 Hz, the fixed 70 % line, blanker on
     ConfigError check() const;
     bool valid() const;  // check() == ConfigError::none
-    uint16_t max_slot_ms() const;
-    // Tones the search looks at: the passband less half the occupied band at max_slot_ms(), within
-    // [k_min_tone_hz, k_max_tone_hz], from k_min_fast_tone_hz when min_slot_ms < 8.
+    // Pitches the search looks at: search_range(passband, slot_us) (spec 3.2).
     Passband search_range() const;
 };
 
@@ -81,268 +75,123 @@ public:
 
     DecoderState state() const;
     bool dcd() const;                   // carrier detect: state() != DecoderState::search
-    float tone_hz() const;
-    float slot_ms() const;
-    float snr_db() const;
-    uint8_t bits_per_package() const;   // N once learnt (TRACK), else 0
+    float tone_hz() const;              // the pitch held; 0 in SEARCH
+    float slot_ms() const;              // T as measured while tracking, else the configured T
+    float snr_db() const;               // while tracking, else 0
+    uint32_t framing_errors() const;    // windows dropped since the last lock
+    uint16_t lookahead_samples() const; // the look-ahead delay: events come this much after the audio (spec 3.1)
+    uint8_t acquire_windows() const;    // windows checked before `locked` (spec 3.3): 2, and 4 at 25 bytes/s
     const DecoderConfig& config() const;
 
 private:
-    struct Marker {
-        float position;   // history blocks from origin_block_
-        float amplitude;  // crest A_mk
-        float balanced;   // q_bal of its flip
-        bool detected;
+    // One window measured on a grid (spec 3.3-3.5): the coherent sums of its 10 slots over their central 0.75 T, the
+    // levels (crest units, noise removed) and energies over the noise, and the tone slots' early/late balance.
+    struct Window {
+        dsp::Complex sum[k_window_slots];
+        float level[k_window_slots];
+        float snr[k_window_slots];      // |S|^2 / noise of the window
+        bool valid;                     // the history held it
     };
 
-    // A decided package (spec 3.10): bits MSB first as sent, their soft values and flags.
-    struct Package {
-        uint32_t index;   // package number from the first START
-        uint8_t bits[(k_max_bits_per_package + k_bits_per_byte - 1) / k_bits_per_byte];
-        int8_t soft[k_max_bits_per_package];
-        uint8_t count;    // d
+    // How a candidate START checked out (spec 3.3): a steady tone (loud slot edges: a VOX lead, a carrier, CW) is no
+    // data, so the scan may take the next onset after it; missing markers mean data on a wrong grid.
+    enum class Check : uint8_t { ok, steady, markers };
+
+    // A decided window: bits MSB first, soft values, the lines in % and flags.
+    struct Decision {
+        uint8_t value;
         uint8_t flags;
-        bool faded;       // decided on noise: an erasure, never released as bytes
-        bool stop_gone;   // its STOP read at the noise floor
+        uint8_t level_pct[k_bits_per_byte];
+        uint8_t threshold_pct[k_bits_per_byte];
+        int8_t soft[k_bits_per_byte];
+        uint8_t start_pct;
+        uint8_t stop_pct;
+        bool start_present;
+        bool stop_present;
     };
 
-    // What deciding a package gives besides its bits: the guard's tallies and the quiet-gap noise (spec 3.10, 3.11).
-    struct PackageStats {
-        float gap_noise;       // quiet-gap noise inputs, summed
-        float threshold_sum;   // decision lines, % of the reference line, summed over the bits
-        float ones_level_sum;  // levels of the decided ones, % of the reference line
-        float strongest;       // largest audit evidence
-        float edge_excess;     // boundary excess at the edges of its detected markers, summed
-        float edge_noise;
-        float edge_energy;     // at every slot edge, less the noise, summed (spec 1.1: nulls)
-        float one_energy;      // at the centres of the decided ones, same windows
-        uint8_t edges;
-        uint8_t gaps;
-        uint8_t ones;
-        uint8_t zeros;
-        uint8_t loud_zeros;
-        uint8_t twisted;       // data slot centres that flip at full strength (a marker, no data)
-    };
-
-    // PREAMBLE: a reading of a candidate package, measured and decided when its STOP was found (spec 3.8), with what
-    // the guard and the telemetry need once it is confirmed (the history may no longer hold it then).
-    struct Reading {
-        Package package;
-        PackageStats stats;
-        uint8_t level_pct[k_max_bits_per_package];
-        uint8_t threshold_pct[k_max_bits_per_package];
-        int8_t audit[dsp::AuditRing::k_max_positions];  // 1/k_audit_scale units
-        Marker start;
-        Marker stop;
-        float reference;  // running marker crest when it was decided
-        bool first;       // package 0: its STOP is the first marker after the train
-        bool flipped;     // a marker the walk took for noise lies among its data slots
-        bool valid;
-    };
-
-    // Station memory (spec 3.12): what a confirmed lock knew when it was lost or ended.
-    struct StationMemory {
-        float tone_hz;
-        float slot_blocks;
-        float crest;
-        uint32_t marker_block;      // absolute block of its last detected marker
-        float marker_fraction;
-        uint32_t marker_package;    // package index whose START that marker is
-        uint32_t expires_block;
-        uint8_t bits_per_package;
-        bool ended;                 // END was seen: the next transmission brings its own preamble
-        bool valid;
-    };
-
-    struct SyncScore {
-        float evidence;
-        float amplitude;      // mean crest of the hits
-        float boundary;       // boundary_energy() of the markers
-        uint8_t hit_bits;     // bit i: a hit at centre - i T
-        uint8_t marker_bits;  // the hits and the weak markers
-        uint8_t hits;
-        uint8_t positions;    // of the prefix scored
-    };
-
-    // Expected squares on noise alone of a data slot's and a marker's amplitude, and the decision floor.
-    struct SlotNoise {
-        float slot;    // N_a
-        float marker;  // N_m
-        float floor;   // k_floor_sigma sqrt(N_a)
-    };
-
-    static const uint8_t k_held_packages = 22;    // the full guard of N = 1 (36 slots), 4 packages recovered before
-    static const uint8_t k_readings = 3;          // a candidate's two readings, or the rejected one's and the new one
-    static const uint8_t k_cold_hypotheses = 4;   // N = 8, 16, 24, 32
-    static const uint8_t k_fold_grids = 4;        // a hypothesis's grid and its 3rd, 5th and 7th sub-grids
-
-    // Cold late join (spec 3.12): a chain of equal marker intervals with no preamble, folded on the slot grids of
-    // N = 8, 16, 24, 32.
-    struct ColdJoin {
-        float anchor;                                         // START of the first package to fold
-        float period;                                         // P, blocks
-        float edge[k_cold_hypotheses][k_fold_grids];          // noise-free edge energy, summed
-        float centre[k_cold_hypotheses][k_fold_grids];        // the same at the slot centres
-        uint8_t folded;
-        bool pending;
+    // The anchor scan (spec 3.3): slot-long windows of block energies, one start position per block, oldest first.
+    struct Scan {
+        uint32_t next;          // absolute block of the next slot start to look at
+        uint32_t origin;        // where the scan (re)started
+        uint32_t loud_until;    // one past the last loud position (the origin before any)
+        uint32_t watch_until;   // watching: the candidate is found once the scan passes this block
+        bool loud;              // a loud position was seen since the origin
+        bool in_data;           // beeps seen without a valid anchor: wait for a silent window
+        bool trusted;           // nothing before the origin can be a transmission already running
+        bool watching;          // `anchor` holds a candidate START; a much louder onset right after it replaces it
+        bool found;             // `anchor` holds a candidate START to verify
+        float anchor;           // its position, history blocks from origin_block_
+        float excess;           // watching: the candidate's slot energy over the noise
     };
 
     void initialize();
+    void on_search_block();
     void on_block(int32_t re, int32_t im, uint32_t energy);
     void rebase();
 
+    // State changes.
     void set_state(DecoderState state);
-    void enter_search(bool keep_statistics = false);
-    void follow_leader();
-    void lock_tone(float tone_hz);
-    void retune(float tone_hz, uint8_t mixed_samples);
-    void settle_lock();
-    void exclude_held(float tone_hz);
-    float remix_reach_hz() const;
+    void enter_search();
     void enter_acquire();
-    void enter_preamble(float anchor, float slot_blocks, float amplitude, uint8_t marker_bits, int32_t min_start);
-    void enter_track(const Marker& start, uint32_t package_index, uint8_t bits, bool late_join);
-    void lose(LostReason reason, bool keep_tone = true);
-    void finish(uint32_t last_package);
+    void retune(float tone_hz, uint8_t mixed_samples, uint32_t keep_from);
+    void forget_history(bool trusted);
 
-    // SEARCH and ACQUIRE (spec 3.6, 3.7).
-    void run_search();
-    bool watching() const;
-    bool train_line(float tone_hz) const;
-    bool harmonic_image(float tone_hz) const;
+    // Acquisition (spec 3.2, 3.3).
+    void steer(bool holding);
+    void restart_scan(uint32_t origin, bool trusted);
+    void scan_step_all();
+    bool scan_step(Scan& scan, uint32_t limit);
+    void watch(Scan& scan, uint32_t position, float excess) const;
+    float group_energy(float from, float blocks, float& noise, uint32_t& groups) const;
+    static float loud_ratio(uint32_t groups);
+    bool locate_onset(uint32_t loud_from, bool walk_back, float& position) const;
+    bool loud_slot(float start, float& excess) const;
+    bool loud_before(float position) const;
+    bool quiet_before(float start, float excess) const;
+    float refine_anchor(float anchor) const;
     void run_acquire();
-    void run_afc(int32_t re, int32_t im);
-    void afc_look();
-    void seed_afc();
-    void forget_history();
-    bool rescan_history(bool tuned);
-    void push_block_noise();
-    void run_candidates(bool tuned);
-    bool try_sync(const dsp::Candidate& candidate);
-    SyncScore sync_score(float centre, float slot_blocks) const;
-    bool boundary_excess(float boundary, float slot_blocks, float crest, float& excess, float& noise_ratio) const;
-    float boundary_energy(const dsp::FlipMeasure* measures, const bool* marker, float slot_blocks, float crest,
-                          float& allowance) const;
-    void refine_sync(float& centre, float& slot_blocks) const;
-    bool hidden_midpoints(float centre, float slot_blocks, uint8_t hit_bits, uint8_t& hidden_bits) const;
-    bool stream_tune(float end, float widest_half) const;
-    bool try_late_join(const dsp::Candidate& candidate);
-    bool chain_start(float newest, float period, float slot_blocks, float reach, uint8_t intervals, float& start,
-                     uint8_t& back) const;
-    bool train_behind(const dsp::Candidate& candidate, float slot_blocks) const;
-    bool has_candidate_near(float position, float tolerance, float q_min) const;
-    float candidate_q_near(float position, float tolerance) const;
-    float marker_q_near(const float* markers, float position, float tolerance) const;
-    bool try_cold_join(const dsp::Candidate& candidate);
-    void cold_join_step();
-    float chain_marker(uint8_t package) const;
-    float chain_slot(uint8_t bits) const;
-    float nearest_candidate(float position, float reach) const;
-    bool fold_ratio(uint8_t bits, float& ratio) const;
-    bool fold_unrivalled(uint8_t bits) const;
-    void fold_package(float start, float stop);
-    uint8_t cold_bits(uint8_t hypothesis) const;
-    bool fold_passes(uint8_t hypothesis, uint8_t grid) const;
+    void reject(Check check);
+    bool refine_pitch(float anchor);
+    float refine_timing(float anchor, uint8_t windows) const;
+    bool steady_start(float anchor) const;
+    float energy_density(float from, float blocks) const;
+    Check windows_check(float anchor, float& reference) const;
 
-    // PREAMBLE: the rest of the train, then the package length (spec 3.8).
-    void run_preamble();
-    bool preamble_step();
-    void on_marker(int32_t g, const dsp::FlipMeasure& m);
-    void continue_train(int32_t g, const dsp::FlipMeasure& m);
-    void add_train_point(float index, const dsp::FlipMeasure& m);
-    void seed_train_fit(float anchor, float slot_blocks);
-    bool train_fit(float index, float& slot_blocks, float& position) const;
-    int32_t train_end_bound(float anchor, float slot_blocks, float crest, bool& silent) const;
-    uint8_t sync_train_ones(float anchor, float slot_blocks, uint8_t marker_bits) const;
-    bool start_certain(const Reading& first, uint8_t bits) const;
-    uint8_t sub_rate_train(int32_t gap);
-    bool sync_in_phase(int32_t g, uint8_t multiple) const;
-    void restart_grid(float slot_blocks, float anchor);
-    void measure_reading(Reading& reading, const Marker& start, const Marker& stop, uint8_t bits, bool first);
-    bool end_before_confirmation();
-    bool whole_bytes(const Reading& first, const Reading* second) const;
-    bool readings_clean(const Reading& first, const Reading* second, float end_stop);
-    void emit_reading(const Reading& reading, uint32_t index);
-    bool confirmation_step();
-    void recover_packages(const Reading& first, uint32_t count, uint8_t bits);
-    uint8_t sub_chain(float first, float middle, float last, uint8_t bits) const;
-    bool sub_package_zeros(const Package& first, const Package& second, uint8_t bits) const;
-    bool train_follows_tune(int32_t min_start, bool silent, float slot_blocks) const;
-    bool train_closed() const;
-    float grid_position(int32_t g) const;
-    float preamble_span(int32_t gap) const;
-
-    // TRACK (spec 3.9 - 3.11).
+    // Tracking (spec 3.4-3.7).
     void run_track();
     bool track_step();
-    void track_afc(const Marker& start, const Marker& stop);
-    bool rotated_marker(const dsp::FlipMeasure& m) const;
-    void rotation_afc(const dsp::FlipMeasure& m, bool detected);
-    uint8_t scan_short_end();
-    void end_short_package(uint8_t stop_slot);
-    float end_evidence(float position) const;
-    bool end_of_transmission(float stop) const;
-    bool end_clean(float stop);
-    uint8_t tune_edges(const Marker& start, const Marker& stop, uint8_t bits, uint8_t& truncate);
-    void decide_package(const Marker& start, const Marker& stop, uint8_t bits, Package& package, PackageStats& stats,
-                        uint8_t* level_pct, uint8_t* threshold_pct, int8_t* audit);
-    bool marker_gone(const Marker& marker) const;
-    bool faded_package(const Package& package, const Marker& start, const Marker& stop) const;
-    void emit_package(const Package& package, const Marker& start, const Marker& stop, float reference,
-                      const uint8_t* level_pct, const uint8_t* threshold_pct);
-    void push_audit(const int8_t* audit, uint8_t bits);
-    void guard_package(const Package& package, const PackageStats& stats, const Marker& stop);
-    void release(const Package& package, bool detected);
-    void check_guard();
-    bool guard_refused() const;
-    bool guard_clean() const;
-    bool decodable() const;
-    bool zeros_quiet() const;
-    bool beep_shaped(float edge_energy, uint16_t edges, float one_energy, uint16_t ones) const;
-    bool slot_edges_quiet() const;
-    void add_marker_edges(float marker, float slot_blocks, float crest, PackageStats& stats) const;
-    void measure_shape(const Marker& start, float slot_blocks, uint8_t bits, const Package& package,
-                       PackageStats& stats) const;
-    void confirm();
-    void release_held();
-    void hold(const Package& package);
-    void assemble(const Package& package);  // bits into bytes by package index; byte events
+    bool window_ready(float start) const;
+    Window measure(float start) const;
+    Decision decide(const Window& window) const;
+    void emit_window(const Decision& decision, float start);
+    void update_loops(const Window& window, const Decision& decision, float start);
+    float timing_error(float start, const Decision& decision) const;
+    bool quiet_window(const Window& window, float reference) const;
+    bool silent_window(const Window& window) const;
+    bool tone_in(const Window& window, uint8_t slot, float reference) const;
+    bool markers_present(const Window& window, float reference) const;
+    bool resolve_pending();
+    void continue_after_pending(float next);
+    void finish_end(float next_start);
+    void lose(LostReason reason, float from);
+    void lock(float anchor, float reference);
 
-    // Station memory (spec 3.12).
-    void remember_station(bool ended);
-    bool memory_valid() const;
-    bool memory_usable() const;
-    bool stream_relock() const;
-    float memory_position() const;  // the remembered marker, history blocks from origin_block_
-
-    // Measurement and decision (spec 3.4, 3.10).
-    dsp::FlipMeasure measure_flip(float centre, float half) const;
-    dsp::FlipMeasure search_flip(float centre, float span, float half, float kappa_min) const;
-    bool peak_beyond(const dsp::FlipMeasure& m, float predicted, float span, float half) const;
-    bool bridges_trusted() const;
-    dsp::FlipMeasure bridge(float older, float newer, float slot_blocks) const;
-    Marker measure_marker(float position, float slot_blocks) const;
-    float slot_amplitude(float centre, float slot_blocks) const;
-    float window_energy(float centre, float half) const;
-    SlotNoise slot_noise(float slot_blocks) const;
-    float decision_threshold(const SlotNoise& noise, float reference) const;
+    // Measurement.
+    float slot_level(const dsp::Complex& sum) const;
+    float window_noise(float slots) const;  // expected |S|^2 of noise over `slots` of T
+    float edge_ratio(float start, uint8_t windows) const;
+    float slot_density(const dsp::Complex& sum) const;
+    float edge_density(float boundary) const;
     float noise_variance() const;
-    float marker_noise(float sigma2, float slot_blocks) const;
-    float end_position() const;
     float live_end() const;
-    float candidate_position(const dsp::Candidate& candidate) const;
-    float marker_position(const dsp::Candidate& candidate) const;  // its finest detection (the joins)
     float blocks_to_ms(float blocks) const;
-    float ms_to_blocks(float ms) const;
-    bool in_range(float slot_blocks) const;
-    bool banned(float slot_blocks) const;
-    void ban_alias(float slot_blocks);
-    void update_reference(float amplitude);
-    void reset_scales();
+    uint32_t absolute(float position) const;
+    float relative(uint32_t block) const;
+    bool marker_present(float level, float snr, float reference) const;
 
     Event make_event(EventType type) const;
     void emit(const Event& event);
-    void emit_locked(uint32_t package_index);
 
     DecoderConfig config_;
     EventHandler handler_;
@@ -350,10 +199,16 @@ private:
     DecoderState state_;
     uint8_t block_samples_;  // 0 = invalid configuration, the decoder stays idle
     uint8_t block_fill_;
-    uint8_t afc_decimation_;
     uint8_t settle_blocks_;
+    bool settle_trusted_;    // the scan restarts trusted after the settle (the tone came up fresh)
+    uint16_t fresh_blocks_;  // search blocks since a tone came up within which its START is still in the history
+    uint16_t protect_blocks_;  // ... within which the scan may not have reached it yet
+    float band_reach_hz_;      // half the occupied band and a search bin: a candidate's own sidebands lie within
+    float refine_reach_hz_;    // the largest pitch correction of a candidate (a quarter of the band, the re-mix reach)
+    uint8_t acquire_windows_;  // windows of the check before lock (spec 3.3)
     uint32_t block_energy_;
 
+    dsp::Lookahead lookahead_;
     dsp::Nco nco_;
     dsp::Cic2 cic_;
     dsp::ImpulseBlanker blanker_;
@@ -361,116 +216,39 @@ private:
     int32_t blank_delay_im_[dsp::ImpulseBlanker::k_latency];
     dsp::PrefixHistory history_;
     dsp::ToneSearch search_;
-    dsp::FineAfc afc_;
-    dsp::Complex afc_sum_;
-    uint8_t afc_fill_;
-    uint16_t afc_due_;               // AFC inputs at which the next look is due
-    dsp::QuantileTracker noise_;     // SEARCH..PREAMBLE: robust to the signal in its windows
-    dsp::NoiseTracker track_noise_;  // TRACK: the quiet gaps of decided zeros
-    dsp::CandidateList candidates_;
-    dsp::AuditRing audit_;
-    dsp::PackageLearner learner_;
-    float scale_q_[k_candidate_scales][2];
-    float scale_kappa_[k_candidate_scales];  // kappa of the newer measure of scale_q_
+    dsp::NoiseTracker noise_;       // TRACK: the central half of decided zeros
+    float search_noise_;            // sigma^2 per sample from the tone search's floor (SEARCH, ACQUIRE)
 
-    // Grid (PREAMBLE, history clock): slot index g sits at grid_position_ + (g - grid_last_) T.
-    uint32_t origin_block_;
-    float scan_end_;                 // the history's end as rescan_history() replays it, k_no_scan otherwise
-    float slot_blocks_;              // T in history blocks
-    float grid_position_;
-    int32_t grid_last_;              // grid index of the newest marker
-    int32_t grid_index_;             // grid index evaluated last
-    int32_t end_stop_;               // PREAMBLE: the marker whose END is being checked, -1 = none
-    float fit_weight_;               // weighted least-squares sums of the train's markers
-    float fit_x_;
-    float fit_y_;
-    float fit_xx_;
-    float fit_xy_;
-    Marker last_marker_;             // PREAMBLE: the newest marker (START of the next reading)
-    Marker train_last_;              // PREAMBLE: the train's newest marker L
-    dsp::FlipMeasure end_flip_;      // PREAMBLE: the marker after end_stop_, kept until the END check
-    uint8_t train_gap_;
-    uint8_t train_gap_count_;
-    uint8_t train_markers_;
-    uint8_t sync_hits_;              // the sync's markers, bit i at grid index -i
-    int32_t min_start_;              // the earliest START of package 0 by the train's length, dsp::k_no_start unknown
-    bool tuned_train_;               // the train follows a tune: a transmission's start, its package 0 can be placed
-    float first_after_;              // position of the first marker after the train's newest one (g1)
-    uint8_t candidate_reading_;      // readings_ of the current candidate (A; B at + 1)
-    uint8_t previous_reading_;       // readings_ of the candidate rejected at the newest marker, k_readings = none
-    bool confirm_pending_;           // N confirmed: the END rule of the confirming marker is waited for
-    bool data_flip_;                 // a marker taken for noise after the newest marker (in the next reading's data)
-    Reading readings_[k_readings];
+    uint32_t origin_block_;         // positions are float history blocks from here (rebased)
+    float slot_blocks_;             // T in history blocks (nominal)
+    float scan_group_;              // blocks summed coherently by the scan (k_scan_coherent_ms)
+    Scan scan_;
+    Scan pending_scan_;             // TRACK: the new transmission a silent START may begin (spec 3.7)
+    uint32_t acquire_block_;        // history block when ACQUIRE began (timeout)
+    bool start_checked_;            // the candidate's first slots passed the early steady test
+    bool pitch_refined_;            // the anchor's pitch was refined at the last block; its windows are checked next
+    float verify_hz_;               // the pitch before that refinement (restored when the candidate fails)
+    bool locked_tone_;              // the tone search locked (ACQUIRE by the search, not by an anchor)
+    float locked_hz_;
 
     // TRACK.
-    Marker start_;
-    Marker last_detected_;           // newest detected STOP (station memory)
-    uint32_t last_detected_package_;
-    float reference_average_;        // running marker crest
-    uint32_t package_index_;         // of the package starting at start_
-    float short_evidence_[3];        // the short-END triple's newest three slot centres
-    uint8_t short_cursor_;           // the next slot centre of the package to scan for it
-    uint8_t short_run_;              // centres scanned, up to three
-    uint8_t short_found_;            // its STOP's slot centre, 0 = none
-    bool start_rotated_;             // the current package's START was a STOP turned by a frequency step
-    uint8_t bits_per_package_;       // N, 0 until learnt
-    Package held_[k_held_packages];
-    uint8_t held_count_;
-    uint8_t presence_window_;        // STOPs in the LOST window: max(4, ceil(36 / (N + 1)))
-    uint32_t presence_bits_;         // STOPs present (q >= 1), newest in bit 0
-    uint32_t detected_bits_;
-    uint8_t strong_bits_;            // packages holding a full-strength flip at an audit position, last 4
-    uint8_t anti_bits_;              // STOPs that read as a steady carrier, last 8
-    uint8_t tune_run_;               // slot edges in a row on a steady carrier (the next tune)
-    float rotation_hz_;
-    uint16_t guard_slots_;           // slots of the packages held by the guard
-    uint8_t guard_packages_;
-    uint8_t guard_markers_;          // markers of the guard (its first START and every STOP)
-    uint8_t guard_detected_;
-    uint8_t guard_balanced_;         // detected STOPs with balanced halves
-    uint8_t guard_inner_;            // guard packages holding a flip at an audit position
-    uint8_t guard_edges_;
-    uint8_t guard_zeros_;
-    uint8_t guard_loud_zeros_;
-    uint16_t guard_ones_;
-    uint16_t guard_bits_;
-    float guard_edge_excess_;
-    float guard_edge_noise_;
-    float guard_edge_energy_;        // slot edges and ones of the guard's packages (PackageStats)
-    float guard_one_energy_;
-    float guard_stop_q_;             // weakest balanced STOP of the guard
-    float guard_threshold_sum_;      // decision lines of the guard, % of the reference, summed
-    float guard_ones_level_sum_;
-    bool guard_started_;             // the first guard package's START was detected
-    bool late_join_;
-    bool confirmed_;                 // locked was emitted and packages flow
-    bool tone_confirmed_;
-    bool tone_steady_;
-    bool afc_looked_;
-    bool tuned_;                     // ACQUIRE's joins were on at the last block (spec 3.7)
-    bool rescan_pending_;            // the history is searched again at the next ACQUIRE block
-    bool noise_frozen_;
-    bool watch_;
-    bool searching_;
-
-    // Bytes: bits are placed by package index, so a lost package leaves a gap, never a shift (spec 3.13).
-    uint32_t byte_index_;
-    uint32_t next_bit_;              // stream position of the bit that continues the byte being assembled
-    uint8_t byte_value_;
-    uint8_t byte_bits_;
-    uint8_t byte_skip_;              // bits to drop before the next byte starts (after a gap)
-    uint8_t byte_flags_;
-    bool assembling_;
-    int8_t byte_soft_[k_bits_per_byte];
-
-    StationMemory memory_;
-    ColdJoin cold_;
-    uint32_t state_blocks_;
-    uint32_t tone_blocks_;
-    float lock_hz_;                  // the tone search's estimate at the last lock
-    float watch_left_hz_;
-    float ban_slot_blocks_;
-    uint32_t ban_until_block_;
+    float window_start_;            // the next window's START, history blocks from origin_block_
+    uint32_t byte_index_;           // of the next window
+    float drift_;                   // timing loop integral: blocks per window beyond 10 T
+    float reference_;               // running START/STOP level (crest units)
+    dsp::Complex last_stop_;        // the previous window's STOP sum (pitch loop)
+    bool has_last_stop_;
+    uint8_t framing_run_;
+    uint32_t framing_errors_;
+    // A silent START (spec 3.7): the old transmission ended and a new one may begin inside that window (back to back),
+    // or the START faded and the old one goes on. Both are weighed on the next windows before anything is released.
+    bool pending_;
+    bool pending_new_;              // a new START inside the window checked out
+    uint8_t pending_stage_;         // both hypotheses held on this many more windows (0: not weighed yet)
+    float pending_start_;           // the silent START's window
+    float pending_anchor_;          // the new START
+    float pending_reference_;       // its reference
+    Window pending_window_;         // the window with the silent START
 };
 
 }  // namespace unlimited

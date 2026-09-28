@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+using unlimited::DecoderConfig;
 using unlimited::DecoderState;
 using unlimited::Encoder;
 using unlimited::EncoderConfig;
@@ -24,7 +25,6 @@ using unlimited::Event;
 using unlimited::EventType;
 using unlimited::LostReason;
 using unlimited::Passband;
-using unlimited::Preset;
 using unlimited::pc::Tui;
 using unlimited::pc::TuiMode;
 using unlimited::pc::display_width;
@@ -44,32 +44,35 @@ const double k_pi = 3.14159265358979323846;
 const uint32_t k_rate = 8000;
 const uint32_t k_high_rate = 48000;
 const double k_tone_hz = 1500.0;
-const float k_received_hz = 1580.0f;  // the hf pitch 80 Hz mistuned
+const float k_received_hz = 1580.0f;  // 80 Hz mistuned
 const double k_half_scale = 16384.0;
 const double k_near_full_scale = 30000.0;
 const double k_half_scale_dbfs = -6.02;
 const double k_scalloping_tolerance_db = 1.5;  // Hann window, tone up to half a bin off the column frequency
-const float k_slot_ms = 16.0f;
+const float k_speed = 6.0f;                    // bytes/s
+const float k_slot_ms = 16.667f;               // T at 6 bytes/s
 const float k_snr_db = 12.5f;
 const uint8_t k_bits = 8;
+const int k_window_cells = 10;
 const int k_columns = 80;
 const int k_rows = 24;
 const int k_wide_columns = 120;
 const int k_tall_rows = 30;
 const Passband k_ssb_passband = {300, 2700};
+const Passband k_am_passband = {100, 3000};
 
-// "H" = 0x48: the bits of one N = 8 package, their levels and decision lines (% of the reference line).
-const uint8_t k_h_bits[k_bits] = {0, 1, 0, 0, 1, 0, 0, 0};
+// Levels and decision lines of the slot events (% of the reference line at the slot).
 const uint8_t k_one_pct = 100;
 const uint8_t k_zero_pct = 10;
-const uint8_t k_line_pct = 60;
+const uint8_t k_line_pct = 70;
 const uint8_t k_flat_pct = 100;
+const uint8_t k_faded_pct = 20;  // a START under half the running reference: missing
 
 // The 80 x 24 decoder layout (plan_layout): 7 bar rows, the reference crest (100 %) on the 5th from the bottom, 140 %
 // at the top, 20 % per row.
 const int k_bar_rows = 7;
 const int k_reference_row = 4;  // from the bottom
-const int k_line_row = 2;       // 60 %: nearest row edge 60 %, the 3rd row
+const int k_line_row = 3;       // 70 %: nearest row edge 80 %, the 4th row
 const int k_cell_columns = 3;   // bar of 2 columns, 1 gap
 
 const uint32_t k_escape = 0x1B;
@@ -80,7 +83,9 @@ const uint32_t k_full_block = 0x2588;
 const uint32_t k_lower_eighth = 0x2581;
 const uint32_t k_caret = 0x25B2;            // ▲
 const uint32_t k_marker = 0x25C6;           // ◆
-const uint32_t k_pending_marker = 0x25C7;   // ◇
+const uint32_t k_missing_marker = 0x25C7;   // ◇
+const uint32_t k_lead_glyph = '~';
+const uint32_t k_middle_dot = 0x00B7;       // ·
 const uint32_t k_band_glyph = 0x2591;       // ░
 const uint32_t k_braille_first = 0x2800;
 const uint32_t k_braille_last = 0x28FF;
@@ -217,10 +222,10 @@ std::vector<std::string> render_lines(const Tui& tui, int columns, int rows) {
     return split_lines(tui.render(columns, rows));
 }
 
-// The bits row of the packages panel: the first line below `title` holding a marker glyph.
+// The bits row of the windows panel: the first line below `title` holding a marker glyph.
 int bits_row(const std::vector<std::string>& lines, int title) {
     for (size_t i = static_cast<size_t>(title) + 1; i < lines.size(); ++i)
-        if (count_glyph(lines[i], k_marker) > 0 || count_glyph(lines[i], k_pending_marker) > 0)
+        if (count_glyph(lines[i], k_marker) > 0 || count_glyph(lines[i], k_missing_marker) > 0)
             return static_cast<int>(i);
     return -1;
 }
@@ -228,6 +233,25 @@ int bits_row(const std::vector<std::string>& lines, int title) {
 // Row `level` of the bars (0 = the bottom one), in a column.
 uint32_t bar_cell(const std::vector<std::string>& lines, int bits, int level, int column) {
     return cell_at(lines[static_cast<size_t>(bits - 1 - level)], column);
+}
+
+// The glyphs of the bits row as text: M a marker, P a missing marker, ~ the VOX lead, . a silent slot, the bits.
+std::string glyph_text(const Cells& glyphs) {
+    std::string text;
+    for (size_t i = 0; i < glyphs.size(); ++i) {
+        const uint32_t glyph = glyphs[i];
+        if (glyph == k_marker)
+            text += 'M';
+        else if (glyph == k_missing_marker)
+            text += 'P';
+        else if (glyph == k_middle_dot)
+            text += '.';
+        else if (glyph < 0x80)
+            text += static_cast<char>(glyph);
+        else
+            text += '?';
+    }
+    return text;
 }
 
 // --- fixtures -----------------------------------------------------------------
@@ -246,67 +270,64 @@ Event make_event(EventType type, DecoderState state) {
     return event;
 }
 
-// An event of an hf lock (N = 8, T = 16 ms) received 80 Hz high.
-Event lock_event(EventType type, uint8_t bits = k_bits) {
+// An event of a lock at 6 bytes/s received 80 Hz high.
+Event lock_event(EventType type) {
     Event event = make_event(type, DecoderState::track);
-    event.bits_per_package = bits;
     event.tone_hz = k_received_hz;
     event.slot_ms = k_slot_ms;
     event.snr_db = k_snr_db;
     return event;
 }
 
-Event slot_event(uint32_t package, uint8_t slot, uint8_t bit, uint8_t level, uint8_t threshold, uint8_t start,
-                 uint8_t stop, uint8_t bits = k_bits) {
-    Event event = lock_event(EventType::slot, bits);
-    event.package_index = package;
+Event slot_event(uint32_t window, uint8_t slot, uint8_t bit, uint8_t level, uint8_t threshold, uint8_t start,
+                 uint8_t stop, uint8_t flags) {
+    Event event = lock_event(EventType::slot);
+    event.byte_index = window;
     event.slot = slot;
     event.value = bit;
     event.level_pct = level;
     event.threshold_pct = threshold;
     event.start_pct = start;
     event.stop_pct = stop;
+    event.flags = flags;
     return event;
 }
 
-Event package_event(uint32_t package, uint8_t count, uint8_t start, uint8_t stop, uint8_t bits = k_bits) {
-    Event event = lock_event(EventType::package, bits);
-    event.package_index = package;
-    event.value = count;
-    event.start_pct = start;
-    event.stop_pct = stop;
-    event.slot_ms = k_slot_ms;
-    return event;
-}
-
-Event byte_event(uint8_t value, uint32_t byte_index, uint32_t package) {
+Event byte_event(uint8_t value, uint32_t window, uint8_t start = k_flat_pct, uint8_t stop = k_flat_pct,
+                 uint8_t flags = 0) {
     Event event = lock_event(EventType::byte);
     event.value = value;
-    event.byte_index = byte_index;
-    event.package_index = package;
+    event.byte_index = window;
+    event.start_pct = start;
+    event.stop_pct = stop;
+    event.flags = flags;
     return event;
 }
 
-// One package: its slot events (ones at k_one_pct, zeros at k_zero_pct, all with the same decision line) and its
-// package event.
-void send_package(Tui& tui, uint32_t index, const uint8_t* bits, uint8_t count, uint8_t threshold, uint8_t start,
-                  uint8_t stop, uint8_t bits_per_package = k_bits) {
-    for (uint8_t i = 0; i < count; ++i)
-        tui.on_event(slot_event(index, static_cast<uint8_t>(i + 1), bits[i], bits[i] ? k_one_pct : k_zero_pct,
-                                threshold, start, stop, bits_per_package));
-    tui.on_event(package_event(index, count, start, stop, bits_per_package));
+// One window as the decoder reports it (spec 3.5): the slot events of its 8 data slots (ones at k_one_pct, zeros at
+// k_zero_pct, all with the same decision line), then its byte event unless it is a framing error.
+void send_window(Tui& tui, uint32_t index, uint8_t byte, uint8_t threshold = k_line_pct, uint8_t start = k_flat_pct,
+                 uint8_t stop = k_flat_pct, uint8_t flags = 0) {
+    for (uint8_t i = 0; i < k_bits; ++i) {
+        const uint8_t bit = static_cast<uint8_t>((byte >> (k_bits - 1 - i)) & 1u);
+        tui.on_event(slot_event(index, static_cast<uint8_t>(i + 1), bit, bit ? k_one_pct : k_zero_pct, threshold,
+                                start, stop, flags));
+    }
+    if ((flags & unlimited::event_flag_framing) == 0) tui.on_event(byte_event(byte, index, start, stop, flags));
+}
+
+void send_text(Tui& tui, const std::string& text, uint32_t first = 0) {
+    for (size_t i = 0; i < text.size(); ++i)
+        send_window(tui, first + static_cast<uint32_t>(i), static_cast<uint8_t>(text[i]));
 }
 
 void feed_decoder(Tui& tui) {
     const std::vector<int16_t> audio = tone(k_tone_hz, k_rate, k_rate / 4, k_half_scale);
     tui.push_audio(audio.data(), audio.size(), k_rate);
-    tui.set_profile("ssb 8-64 ms");
+    tui.set_speed(k_speed);
     tui.set_passband(k_ssb_passband);
-    send_package(tui, 0, k_h_bits, k_bits, k_line_pct, k_flat_pct, k_flat_pct);
     tui.on_event(lock_event(EventType::locked));
-    const std::string text = "CQ CQ DE UNLIMITED";
-    for (size_t i = 0; i < text.size(); ++i)
-        tui.on_event(byte_event(static_cast<uint8_t>(text[i]), static_cast<uint32_t>(i), static_cast<uint32_t>(i)));
+    send_text(tui, "CQ CQ DE UNLIMITED");
 }
 
 // Renders `data` with a real encoder and hands the Tui its status after every k_render_step samples (`repeats`
@@ -328,6 +349,7 @@ size_t feed_encoder(Tui& tui, const EncoderConfig& config, const std::vector<uin
         for (int r = 0; r < repeats; ++r) tui.on_encoder_status(status);
         if (stop(status)) break;
     }
+    tui.on_encoder_status(encoder.status());
     return samples;
 }
 
@@ -335,18 +357,19 @@ struct Never {
     bool operator()(const EncoderStatus&) const { return false; }
 };
 
-EncoderConfig hf_config(uint8_t bits_per_package) {
-    EncoderConfig config = EncoderConfig::from_preset(Preset::hf, k_rate);
-    config.bits_per_package = bits_per_package;
+// 6 bytes/s at 1500 Hz in 300..2700 Hz, 8 kHz.
+EncoderConfig six_config() {
+    EncoderConfig config;
+    config.sample_rate_hz = k_rate;
     return config;
 }
 
 void encoder_view(Tui& tui, const EncoderConfig& config) {
     tui.set_color(false);
-    tui.set_profile("hf");
+    tui.set_label("test");
+    tui.set_speed(unlimited::bytes_per_second(config.slot_us));
     tui.set_tone_hz(config.tone_hz);
     tui.set_slot_ms(config.slot_us / 1000.0f);
-    tui.set_package(config.bits_per_package);
     tui.set_passband(config.passband);
     tui.set_search_range(unlimited::search_range(config));
 }
@@ -438,25 +461,29 @@ TEST(tui_render_respects_size) {
     decoder.set_field("expect", "a long field value that will not fit in narrow terminals at all");
     decoder.set_field("raw", "\x1b[2J\t\a\r\n\xc2\x9b");  // control characters must never reach the terminal
     Tui encoder(TuiMode::encoder);
-    const EncoderConfig config = hf_config(k_bits);
+    const EncoderConfig config = six_config();
     encoder_view(encoder, config);
-    size_t slots = 0;
-    feed_encoder(encoder, config, bytes_of("CQ CQ DE UNLIMITED"), 1, [&](const EncoderStatus& status) {
-        return status.segment == EncoderSegment::package && status.package_index == 7 && ++slots > 0;
+    feed_encoder(encoder, config, bytes_of("CQ CQ DE UNLIMITED"), 1, [](const EncoderStatus& status) {
+        return status.segment == EncoderSegment::window && status.byte_index == 7;
     });
-    Tui wide(TuiMode::decoder);  // N = 32: 34 cells in one package
-    const uint8_t wide_bits = 32;
-    std::vector<uint8_t> pattern(wide_bits);
-    for (size_t i = 0; i < pattern.size(); ++i) pattern[i] = static_cast<uint8_t>(i % 3 == 0);
-    send_package(wide, 0, pattern.data(), wide_bits, k_line_pct, k_flat_pct, k_flat_pct, wide_bits);
-    Tui single(TuiMode::decoder);  // N = 1: many short packages
-    const uint8_t one_bit = 1;
-    for (uint32_t k = 0; k < 40; ++k) {
-        const uint8_t bit = static_cast<uint8_t>(k % 2);
-        send_package(single, k, &bit, one_bit, k_line_pct, static_cast<uint8_t>(90 + k % 20),
-                     static_cast<uint8_t>(95 + k % 15), one_bit);
+    Tui vox(TuiMode::encoder);  // in the VOX lead
+    EncoderConfig vox_config = six_config();
+    vox_config.vox_lead_ms = unlimited::k_default_vox_lead_ms;
+    encoder_view(vox, vox_config);
+    feed_encoder(vox, vox_config, bytes_of("Hi"), 1, [](const EncoderStatus& status) {
+        return status.segment == EncoderSegment::vox_lead && status.slot_index == 4;
+    });
+    Tui faded(TuiMode::decoder);  // fades, dropped windows, weak bits, new locks
+    const uint32_t windows = 60;
+    for (uint32_t k = 0; k < windows; ++k) {
+        const bool dropped = k % 7 == 3;
+        const uint8_t flags = dropped ? unlimited::event_flag_framing : (k % 5 == 1 ? unlimited::event_flag_weak : 0);
+        if (k % 13 == 12) faded.on_event(make_event(EventType::end, DecoderState::search));
+        send_window(faded, k, static_cast<uint8_t>(k * 37 + 11), static_cast<uint8_t>(50 + k % 41),
+                    static_cast<uint8_t>(dropped ? k_faded_pct : 60 + k % 90), static_cast<uint8_t>(40 + k % 200),
+                    flags);
     }
-    Tui* const views[] = {&decoder, &encoder, &wide, &single};
+    Tui* const views[] = {&decoder, &encoder, &vox, &faded};
     int violations = 0;
     for (size_t v = 0; v < count_of(views); ++v) {
         for (size_t c = 0; c < count_of(columns); ++c) {
@@ -486,36 +513,32 @@ TEST(tui_render_respects_size) {
     CHECK_EQ(violations, 0);
 }
 
-// The picture of spec 3.10: the START and STOP bars, the dashed reference line from crest to crest, the decision
-// line, one bar per data slot with its bit under it and the byte under the bits.
-TEST(tui_decoder_package_picture) {
+// The picture of spec 3.5: the START and STOP bars, the dashed reference line from crest to crest, the decision line
+// (70 % of the reference line), one bar per data slot with its bit under it and the byte under the bits.
+TEST(tui_decoder_window_picture) {
     Tui tui(TuiMode::decoder);
     tui.set_color(false);
-    send_package(tui, 0, k_h_bits, k_bits, k_line_pct, k_flat_pct, k_flat_pct);
     tui.on_event(lock_event(EventType::locked));
-    tui.on_event(byte_event('H', 0, 0));
+    send_window(tui, 0, 'H');
     const std::vector<std::string> lines = render_lines(tui, k_columns, k_rows);
 
-    const int title = find_line(lines, "package 0  8 bits");
+    const int title = find_line(lines, "window 0  byte 0x48 'H'");
     REQUIRE(title >= 0);
-    CHECK(contains(lines[static_cast<size_t>(title)], "START 100%  STOP 100%  line 60% of ref"));
+    CHECK(contains(lines[static_cast<size_t>(title)], "START 100%  STOP 100%  line 70% of ref"));
     const int bits = bits_row(lines, title);
     REQUIRE(bits == title + k_bar_rows + 1);
     const std::vector<int> columns = glyph_columns(lines[static_cast<size_t>(bits)]);
-    REQUIRE(columns.size() == static_cast<size_t>(k_bits) + 2);
-    const Cells glyphs = glyphs_at(lines[static_cast<size_t>(bits)], columns);
-    CHECK_EQ(glyphs.front(), k_marker);
-    CHECK_EQ(glyphs.back(), k_marker);
-    for (int i = 0; i < k_bits; ++i)
-        CHECK_EQ(glyphs[static_cast<size_t>(i) + 1], k_h_bits[i] ? uint32_t('1') : uint32_t('0'));
+    REQUIRE(columns.size() == static_cast<size_t>(k_window_cells));
+    CHECK_EQ(glyph_text(glyphs_at(lines[static_cast<size_t>(bits)], columns)), std::string("M01001000M"));
     for (size_t i = 1; i < columns.size(); ++i) CHECK_EQ(columns[i] - columns[i - 1], k_cell_columns);
     CHECK(contains(lines[static_cast<size_t>(bits) + 1], "0x48 'H'"));
     CHECK(find_in(cells_of(lines[static_cast<size_t>(bits - 1 - k_reference_row)]), "100%") == 0);
 
+    const std::string h_bits = "01001000";
     for (size_t i = 0; i < columns.size(); ++i) {
         const int column = columns[i];
         const bool marker = i == 0 || i + 1 == columns.size();
-        const bool one = !marker && k_h_bits[i - 1] != 0;
+        const bool one = !marker && h_bits[i - 1] == '1';
         if (marker || one) {
             // START, STOP and the ones reach the crest: full up to the reference row, nothing above.
             for (int level = 0; level <= k_reference_row; ++level)
@@ -542,23 +565,21 @@ TEST(tui_decoder_package_picture) {
     CHECK(colored[static_cast<size_t>(bits - 1 - k_line_row)].find("\x1b[0;38;5;214m") != std::string::npos);
 }
 
-// A fade across the package: START at 60 %, STOP at 120 %. The reference line climbs from the START crest to the
-// STOP crest and the decision line (fixed 70 % of it) follows.
+// A fade across the window: START at 60 %, STOP at 120 %. The reference line climbs from the START crest to the STOP
+// crest and the decision line (70 % of it) follows.
 TEST(tui_decoder_reference_line_follows_the_crests) {
     Tui tui(TuiMode::decoder);
     tui.set_color(false);
     const uint8_t start = 60;
     const uint8_t stop = 120;
-    const uint8_t fixed_line = 70;
-    const uint8_t zeros[k_bits] = {0, 0, 0, 0, 0, 0, 0, 0};
-    send_package(tui, 3, zeros, k_bits, fixed_line, start, stop);
+    send_window(tui, 3, 0x00, k_line_pct, start, stop);
     const std::vector<std::string> lines = render_lines(tui, k_columns, k_rows);
-    const int title = find_line(lines, "package 3");
+    const int title = find_line(lines, "window 3");
     REQUIRE(title >= 0);
     const int bits = bits_row(lines, title);
     REQUIRE(bits > title);
     const std::vector<int> columns = glyph_columns(lines[static_cast<size_t>(bits)]);
-    REQUIRE(columns.size() == static_cast<size_t>(k_bits) + 2);
+    REQUIRE(columns.size() == static_cast<size_t>(k_window_cells));
     // The line row of a glyph in a column: the lowest row from the top holding it.
     struct Finder {
         const std::vector<std::string>& lines;
@@ -597,103 +618,139 @@ TEST(tui_decoder_reference_line_follows_the_crests) {
     CHECK(stop_top > start_top);
 }
 
-TEST(tui_decoder_consecutive_packages_share_their_marker) {
+// Windows follow each other (spec 1.2): window 5's START comes right after window 4's STOP. A window that never came
+// (6) leaves an empty cell, and so does a new lock even when its first window's index follows.
+TEST(tui_decoder_windows_follow_each_other) {
     Tui tui(TuiMode::decoder);
     tui.set_color(false);
-    const uint8_t n = 4;
-    const uint8_t first[n] = {0, 1, 0, 0};
-    const uint8_t second[n] = {1, 0, 0, 0};
-    const uint8_t third[n] = {0, 1, 1, 0};
-    send_package(tui, 4, first, n, k_line_pct, k_flat_pct, k_flat_pct, n);
-    send_package(tui, 5, second, n, k_line_pct, k_flat_pct, k_flat_pct, n);
-    send_package(tui, 7, third, n, k_line_pct, k_flat_pct, k_flat_pct, n);  // package 6 was lost
-    const std::vector<std::string> lines = render_lines(tui, k_columns, k_rows);
-    const int title = find_line(lines, "package 7  4 bits");
+    send_window(tui, 4, 'H');
+    send_window(tui, 5, 'i');
+    send_window(tui, 7, '!');
+    const std::vector<std::string> lines = render_lines(tui, k_wide_columns, k_rows);
+    const int title = find_line(lines, "window 7  byte 0x21 '!'");
     REQUIRE(title >= 0);
     const int bits = bits_row(lines, title);
     REQUIRE(bits > title);
     const std::vector<int> columns = glyph_columns(lines[static_cast<size_t>(bits)]);
-    const Cells glyphs = glyphs_at(lines[static_cast<size_t>(bits)], columns);
-    const std::string expected = "M0100M1000MM0110M";  // M: a marker; 4 and 5 share one, 7 starts after a gap
-    REQUIRE(glyphs.size() == expected.size());
-    for (size_t i = 0; i < expected.size(); ++i)
-        CHECK_EQ(glyphs[i], expected[i] == 'M' ? k_marker : static_cast<uint32_t>(expected[i]));
-    const int shared = columns[10];
-    const int restart = columns[11];
-    CHECK_EQ(restart - shared, 2 * k_cell_columns);  // one empty cell between package 5's STOP and package 7's START
-    // The byte of packages 4 and 5 (N = 4: two packages per byte) is one bracket across their shared marker.
-    tui.on_event(byte_event(0x48, 2, 5));
-    const std::vector<std::string> labelled = render_lines(tui, k_columns, k_rows);
-    const std::string& labels = labelled[static_cast<size_t>(bits) + 1];
-    const int label = find_in(cells_of(labels), "0x48 'H'");
-    REQUIRE(label > 0);
-    CHECK(label > columns[1] && label < columns[9]);
-    CHECK_EQ(cell_at(labels, columns[1]), uint32_t(0x2514));  // └ under the first bit of package 4
-    CHECK_EQ(cell_at(labels, columns[9] + 1), uint32_t(0x2518));  // ┘ under the last bit of package 5
+    CHECK_EQ(glyph_text(glyphs_at(lines[static_cast<size_t>(bits)], columns)),
+             std::string("M01001000MM01101001MM00100001M"));
+    REQUIRE(columns.size() == static_cast<size_t>(3 * k_window_cells));
+    CHECK_EQ(columns[10] - columns[9], k_cell_columns);       // 4's STOP, 5's START: adjacent
+    CHECK_EQ(columns[20] - columns[19], 2 * k_cell_columns);  // an empty cell for the missing window 6
+    const std::string& labels = lines[static_cast<size_t>(bits) + 1];
+    CHECK(contains(labels, "0x48 'H'"));
+    CHECK(contains(labels, "0x69 'i'"));
+    CHECK(contains(labels, "0x21 '!'"));
+    CHECK_EQ(cell_at(labels, columns[1]), uint32_t(0x2514));      // └ under the first bit of window 4
+    CHECK_EQ(cell_at(labels, columns[8] + 1), uint32_t(0x2518));  // ┘ under its last bit
+    CHECK_EQ(cell_at(labels, columns[9]), k_space);               // nothing under a marker
+
+    Tui relock(TuiMode::decoder);
+    relock.set_color(false);
+    send_window(relock, 7, 'H');
+    relock.on_event(make_event(EventType::end, DecoderState::search));
+    relock.on_event(make_event(EventType::state, DecoderState::acquire));
+    relock.on_event(lock_event(EventType::locked));
+    send_window(relock, 8, 'i');
+    const std::vector<std::string> relocked = render_lines(relock, k_wide_columns, k_rows);
+    const int relock_bits = bits_row(relocked, find_line(relocked, "window 8"));
+    REQUIRE(relock_bits > 0);
+    const std::vector<int> relock_columns = glyph_columns(relocked[static_cast<size_t>(relock_bits)]);
+    REQUIRE(relock_columns.size() == static_cast<size_t>(2 * k_window_cells));
+    CHECK_EQ(relock_columns[10] - relock_columns[9], 2 * k_cell_columns);
+}
+
+// A window whose START is missing is a framing error (spec 3.6): its bits are drawn, its START hollow, "dropped" in red
+// under its bits and no byte; the status counts it.
+TEST(tui_decoder_marks_a_dropped_window) {
+    Tui tui(TuiMode::decoder);
+    tui.set_color(false);
+    tui.on_event(lock_event(EventType::locked));
+    send_window(tui, 0, 'H');
+    send_window(tui, 1, 'i', k_line_pct, k_faded_pct, k_flat_pct, unlimited::event_flag_framing);
+    std::vector<std::string> lines = render_lines(tui, k_wide_columns, k_tall_rows);
+    const int title = find_line(lines, "window 1  dropped  START 20%  STOP 100%  line 70% of ref  framing error");
+    REQUIRE(title >= 0);
+    const int bits = bits_row(lines, title);
+    REQUIRE(bits > title);
+    const std::vector<int> columns = glyph_columns(lines[static_cast<size_t>(bits)]);
+    CHECK_EQ(glyph_text(glyphs_at(lines[static_cast<size_t>(bits)], columns)), std::string("M01001000MP01101001M"));
+    const std::string& labels = lines[static_cast<size_t>(bits) + 1];
+    CHECK(contains(labels, "0x48 'H'"));
+    CHECK(contains(labels, "dropped"));
+    CHECK(!contains(labels, "0x69"));
+    CHECK(contains(lines[0] + lines[1] + lines[2], "dropped 1"));
+    CHECK(find_line(lines, "received  1 byte") > bits);
+
+    tui.set_color(true);
+    lines = render_lines(tui, k_wide_columns, k_tall_rows);
+    const std::string& colored = lines[static_cast<size_t>(bits) + 1];
+    const size_t red = colored.find("\x1b[0;31m");
+    REQUIRE(red != std::string::npos);
+    CHECK(colored.find("dropped", red) != std::string::npos);
 }
 
 TEST(tui_decoder_status_counts_and_text) {
     Tui tui(TuiMode::decoder);
     tui.set_color(false);
-    tui.set_profile("ssb 8-64 ms");
+    tui.set_label("test.wav");
+    tui.set_speed(k_speed);
     tui.set_passband(k_ssb_passband);
     tui.set_field("channel", "usb 10 dB");
     std::vector<std::string> lines = render_lines(tui, k_wide_columns, k_tall_rows);
-    CHECK(contains(lines[0], "RX ssb 8-64 ms"));
+    CHECK(contains(lines[0], "RX test.wav"));
     CHECK(contains(lines[0], "SEARCH, DCD off"));
+    CHECK(contains(lines[0], "6.00 bytes/s, 48.0 bit/s"));
     CHECK(contains(lines[0], "pitch --"));
-    CHECK(find_line(lines, "packages  waiting for a lock") > 0);
+    CHECK(find_line(lines, "windows  waiting for a lock") > 0);
 
     tui.on_event(make_event(EventType::state, DecoderState::acquire));
-    Event locked = lock_event(EventType::locked);
-    locked.flags = unlimited::event_flag_late_join;
-    tui.on_event(locked);
+    tui.on_event(lock_event(EventType::locked));
     const uint8_t bytes[] = {'H', 'i', '\n', 0x07};
-    for (size_t i = 0; i < count_of(bytes); ++i) {
-        Event byte = byte_event(bytes[i], static_cast<uint32_t>(i), static_cast<uint32_t>(i));
-        byte.flags = unlimited::event_flag_late_join | unlimited::event_flag_flywheel_stop;
-        tui.on_event(byte);
-    }
+    const uint8_t last_flags = unlimited::event_flag_weak | unlimited::event_flag_blanked;
+    for (size_t i = 0; i < count_of(bytes); ++i)
+        send_window(tui, static_cast<uint32_t>(i), bytes[i], k_line_pct, k_flat_pct, k_flat_pct,
+                    i + 1 == count_of(bytes) ? last_flags : 0);
     lines = render_lines(tui, k_wide_columns, k_tall_rows);
     const std::string status = lines[0] + lines[1] + lines[2];
     CHECK(contains(status, "TRACK, DCD on"));
     CHECK(contains(status, "1580.0 Hz"));
-    CHECK(contains(status, "T 16.00 ms"));
-    CHECK(contains(status, "N 8"));
-    CHECK(contains(status, "55.6 bit/s"));
+    CHECK(contains(status, "T 16.67 ms"));
     CHECK(contains(status, "SNR 12.5 dB"));
-    CHECK(contains(status, "band 1442-1718 Hz fits, shift -1142/+982 Hz"));  // received band in the ssb passband
+    CHECK(contains(status, "band 1448-1712 Hz fits, shift -1148/+988 Hz"));  // received band in the ssb passband
     CHECK(contains(status, "passband 300-2700 Hz"));
     CHECK(contains(status, "4 bytes"));
-    CHECK(contains(status, "locks 1  lost 0  ends 0"));
-    CHECK(contains(status, "last: locked (late join)"));
+    CHECK(contains(status, "locks 1  lost 0  ends 0  dropped 0"));
+    CHECK(contains(status, "last: locked"));
     CHECK(contains(status, "channel usb 10 dB"));
     const int text_title = find_line(lines, "received");
     REQUIRE(text_title > 0);
-    CHECK(contains(lines[static_cast<size_t>(text_title)], "4 bytes  late join  STOP flywheeled"));
+    CHECK(contains(lines[static_cast<size_t>(text_title)], "4 bytes  blanked  weak bit"));
     CHECK(contains(lines[static_cast<size_t>(text_title) + 1], "Hi\xe2\x86\xb5\xc2\xb7"));  // "Hi↵·"
+    CHECK(find_line(lines, "window 3  byte 0x07  START 100%  STOP 100%  line 70% of ref  blanked") > 0);
 
     tui.on_event(make_event(EventType::end, DecoderState::search));
     tui.on_event(make_event(EventType::state, DecoderState::search));
     Event lost = make_event(EventType::lost, DecoderState::acquire);
-    lost.reason = LostReason::signal_gone;
+    lost.reason = LostReason::framing;
     tui.on_event(lost);
     tui.set_field("channel", "");
     lines = render_lines(tui, k_wide_columns, k_tall_rows);
     const std::string after = lines[0] + lines[1] + lines[2];
     CHECK(contains(after, "ACQUIRE, DCD on"));
     CHECK(contains(after, "locks 1  lost 1  ends 1"));
-    CHECK(contains(after, "last: lost (signal gone)"));
+    CHECK(contains(after, "last: lost (framing errors)"));
     CHECK(!contains(after, "channel"));
 }
 
-// The encoder view rebuilds the sent text from the bits of every package, so a short final package is exact.
-TEST(tui_encoder_rebuilds_the_sent_bytes) {
-    const uint8_t sizes[] = {1, 3, 8, 16, 32};
+// The encoder view adds a window's byte to the sent text when its STOP is sent (spec 2.2), with or without a VOX lead.
+TEST(tui_encoder_shows_the_sent_bytes) {
     const std::string first = "Hello";
     const std::string second = " World";
-    for (size_t s = 0; s < count_of(sizes); ++s) {
-        const EncoderConfig config = hf_config(sizes[s]);
+    const uint16_t vox_leads[] = {0, unlimited::k_default_vox_lead_ms};
+    for (size_t v = 0; v < count_of(vox_leads); ++v) {
+        EncoderConfig config = six_config();
+        config.vox_lead_ms = vox_leads[v];
         Tui tui(TuiMode::encoder);
         encoder_view(tui, config);
         feed_encoder(tui, config, bytes_of(first), 3, Never());   // repeated statuses count once
@@ -701,124 +758,152 @@ TEST(tui_encoder_rebuilds_the_sent_bytes) {
         const std::vector<std::string> lines = render_lines(tui, k_columns, k_rows);
         const int title = find_line(lines, "sent  11 bytes");
         if (!CHECK(title > 0)) {
-            NOTE("N = %u", unsigned(sizes[s]));
+            NOTE("VOX lead %u ms", unsigned(vox_leads[v]));
             continue;
         }
         CHECK(contains(lines[static_cast<size_t>(title) + 1], first + second));
         CHECK(contains(lines[0] + lines[1] + lines[2], "sent 11 bytes"));
+        CHECK(find_line(lines, "idle  the transmission has ended") > 0);
     }
-    Tui without_package(TuiMode::encoder);  // no set_package(): the text still comes from the bits
-    without_package.set_color(false);
-    feed_encoder(without_package, hf_config(k_bits), bytes_of("Hi"), 1, Never());
-    CHECK(find_line(render_lines(without_package, k_columns, k_rows), "sent  2 bytes") > 0);
+    // A byte is sent once its STOP is: the second byte's last data slot leaves one byte sent.
+    const EncoderConfig config = six_config();
+    Tui partial(TuiMode::encoder);
+    encoder_view(partial, config);
+    feed_encoder(partial, config, bytes_of("Hi"), 1, [](const EncoderStatus& status) {
+        return status.segment == EncoderSegment::window && status.byte_index == 1 && status.slot == k_bits;
+    });
+    CHECK(find_line(render_lines(partial, k_columns, k_rows), "sent  1 byte") > 0);
 }
 
-// The package being sent: its START, the bits sent so far, the caret on the current slot, the bits of the current
-// byte not sent yet, the pending STOP and the bytes under the bits.
-TEST(tui_encoder_shows_the_package_being_sent) {
-    const EncoderConfig config = hf_config(k_bits);
+// The window being sent: the windows before it, its START and the bits sent so far, the caret on the current slot,
+// its bits not sent yet, its STOP not sent yet (hollow) and the bytes under the bits.
+TEST(tui_encoder_shows_the_window_being_sent) {
+    const EncoderConfig config = six_config();
     Tui tui(TuiMode::encoder);
     encoder_view(tui, config);
-    const uint32_t package = 1;
+    const uint32_t window = 1;
     const uint8_t slot = 3;
     feed_encoder(tui, config, bytes_of("Hi!"), 1, [&](const EncoderStatus& status) {
-        return status.segment == EncoderSegment::package && status.package_index == package && status.slot == slot;
+        return status.segment == EncoderSegment::window && status.byte_index == window && status.slot == slot;
     });
     const std::vector<std::string> lines = render_lines(tui, k_columns, k_rows);
-    CHECK(contains(lines[0], "TX hf"));
-    CHECK(contains(lines[0], "PACKAGE"));
-    CHECK(contains(lines[0], "1500 Hz"));
-    const int title = find_line(lines, "package 1  slot 3/9  bit 2 of byte 1 = 0x69 'i'");
+    const std::string status = lines[0] + lines[1];
+    CHECK(contains(status, "TX test"));
+    CHECK(contains(status, "WINDOW"));
+    CHECK(contains(status, "6.00 bytes/s, 48.0 bit/s"));
+    CHECK(contains(status, "1500 Hz"));
+    CHECK(contains(status, "T 16.67 ms"));
+    CHECK(contains(status, "window 1"));
+    const int title = find_line(lines, "window 1  slot 3/9  bit 2 of byte 1 = 0x69 'i'");
     REQUIRE(title > 0);
     const int bits = bits_row(lines, title);
     REQUIRE(bits > title);
     const std::vector<int> columns = glyph_columns(lines[static_cast<size_t>(bits)]);
     const Cells glyphs = glyphs_at(lines[static_cast<size_t>(bits)], columns);
-    // ... START 01001000 STOP=START 011 | 01001 (the rest of 'i', not sent yet) STOP (not sent yet).
-    const std::string tail = "M01001000M01101001P";
-    REQUIRE(glyphs.size() >= tail.size());
-    const size_t offset = glyphs.size() - tail.size();
-    for (size_t i = 0; i < tail.size(); ++i) {
-        const uint32_t expected = tail[i] == 'M' ? k_marker : tail[i] == 'P' ? k_pending_marker : uint32_t(tail[i]);
-        CHECK_EQ(glyphs[offset + i], expected);
-    }
-    // The caret sits under the third bit of package 1.
+    // Window 0 whole; window 1: START, 011 sent, 01001 (the rest of 'i') and its STOP not sent yet.
+    const std::string sent = "M01001000MM01101001P";
+    REQUIRE(glyphs.size() == sent.size());
+    CHECK_EQ(glyph_text(glyphs), sent);
     const int caret = find_in(cells_of(lines[static_cast<size_t>(bits) + 2]), "\xe2\x96\xb2");
-    CHECK_EQ(caret, columns[offset + 10 + slot - 1]);
+    CHECK_EQ(caret, columns[static_cast<size_t>(k_window_cells + slot)]);
     CHECK_EQ(count_glyph(lines[static_cast<size_t>(bits) + 2], k_caret), 1);
-    // Bars: a beep is a full bar up to the crest, a silence none, the unsent slots none.
-    CHECK_EQ(bar_cell(lines, bits, 0, columns[offset + 11]), k_full_block);  // package 1, bit 1 = 1
-    CHECK_EQ(bar_cell(lines, bits, 0, columns[offset + 10]), k_space);       // bit 0 = 0
-    CHECK_EQ(bar_cell(lines, bits, 0, columns[offset + 13]), k_space);       // bit 3, not sent yet
+    // Bars: a beep is a full bar up to the crest, a silence none, the slots not sent yet none.
+    CHECK_EQ(bar_cell(lines, bits, 0, columns[k_window_cells]), k_full_block);      // window 1's START
+    CHECK_EQ(bar_cell(lines, bits, 0, columns[k_window_cells + 1]), k_space);       // slot 1 = 0
+    CHECK_EQ(bar_cell(lines, bits, 0, columns[k_window_cells + 2]), k_full_block);  // slot 2 = 1
+    CHECK_EQ(bar_cell(lines, bits, 0, columns[k_window_cells + 5]), k_space);       // slot 5 = 1, not sent yet
     const std::string& labels = lines[static_cast<size_t>(bits) + 1];
     CHECK(contains(labels, "0x48 'H'"));
     CHECK(contains(labels, "0x69 'i'"));
     CHECK(find_line(lines, "sent  1 byte") > bits);  // the text panel: 'H' so far
-
-    // The view starts on a marker (whole packages) and the tune and sync segments are named.
-    CHECK(glyphs.front() == k_marker);
-    Tui tune(TuiMode::encoder);
-    encoder_view(tune, config);
-    feed_encoder(tune, config, bytes_of("Hi"), 1, [](const EncoderStatus& status) {
-        return status.segment == EncoderSegment::tune && status.slot_index == 4;
-    });
-    CHECK(find_line(render_lines(tune, k_columns, k_rows), "tune tone  slot 5") > 0);
-    Tui sync(TuiMode::encoder);
-    encoder_view(sync, config);
-    feed_encoder(sync, config, bytes_of("Hi"), 1,
-                 [](const EncoderStatus& status) { return status.segment == EncoderSegment::sync; });
-    const std::vector<std::string> sync_lines = render_lines(sync, k_columns, k_rows);
-    CHECK(find_line(sync_lines, "sync train  marker 1") > 0);
-    CHECK(find_line(sync_lines, "tune tone") > 0);  // the bracket under the tune slots
 }
 
-// Segments and bytes never share a bracket: in a 5-byte message the END markers follow byte 4.
-TEST(tui_encoder_end_markers_have_their_own_bracket) {
-    const EncoderConfig config = hf_config(k_bits);
-    Tui tui(TuiMode::encoder);
-    encoder_view(tui, config);
-    bool in_end = false;
-    uint32_t first_end = 0;
-    feed_encoder(tui, config, bytes_of("Hello"), 1, [&](const EncoderStatus& status) {
-        if (status.segment != EncoderSegment::end) return false;
-        if (!in_end) first_end = status.slot_index;
-        in_end = true;
-        return status.slot_index == first_end + 1;
+// The segments before the first START and after the last STOP are named and bracketed (spec 2.1): the lead-in, the
+// VOX lead's steady tone, the 2-slot gap and the tail; the view ends idle.
+TEST(tui_encoder_names_the_segments) {
+    EncoderConfig config = six_config();
+    config.vox_lead_ms = unlimited::k_default_vox_lead_ms;  // 9 slots at 6 bytes/s
+    const uint32_t vox_slots = 9;
+    const uint8_t vox_stop = 3;
+    Tui lead(TuiMode::encoder);
+    encoder_view(lead, config);
+    uint8_t seen = 0;
+    uint32_t last_slot = 0;
+    feed_encoder(lead, config, bytes_of("Hi"), 1, [&](const EncoderStatus& status) {
+        if (status.segment != EncoderSegment::vox_lead) return false;
+        if (seen == 0 || status.slot_index != last_slot) ++seen;
+        last_slot = status.slot_index;
+        return seen == vox_stop;
     });
-    const std::vector<std::string> lines = render_lines(tui, k_columns, k_rows);
-    const int title = find_line(lines, "END  marker 2/2");
+    std::vector<std::string> lines = render_lines(lead, k_columns, k_rows);
+    int title = find_line(lines, "VOX lead  slot 3");
     REQUIRE(title > 0);
-    const int bits = bits_row(lines, title);
-    REQUIRE(bits > title);
-    const std::vector<int> columns = glyph_columns(lines[static_cast<size_t>(bits)]);
-    REQUIRE(columns.size() >= 3u);
-    const std::string& labels = lines[static_cast<size_t>(bits) + 1];
-    const int end_label = find_in(cells_of(labels), "END");
-    const int byte_label = find_in(cells_of(labels), "0x6F 'o'");
-    REQUIRE(end_label > 0);
-    REQUIRE(byte_label > 0);
-    CHECK(end_label > columns[columns.size() - 3]);  // under the two END markers, after the last STOP
-    CHECK(byte_label < columns[columns.size() - 3]);
-    CHECK_EQ(cell_at(labels, columns[columns.size() - 3]), k_space);  // nothing under the last STOP
+    int bits = bits_row(lines, title);
+    CHECK(bits < 0);  // no marker yet: the bits row holds the lead's glyphs only
+    CHECK(contains(lines[0], "VOX LEAD"));
+
+    Tui gap(TuiMode::encoder);
+    encoder_view(gap, config);
+    feed_encoder(gap, config, bytes_of("Hi"), 1,
+                 [](const EncoderStatus& status) { return status.segment == EncoderSegment::gap; });
+    lines = render_lines(gap, k_columns, k_rows);
+    title = find_line(lines, "gap  silence before the first START");
+    REQUIRE(title > 0);
+    // The lead's glyphs and the gap's first slot on the bits row, below the bars.
+    int glyph_row = -1;
+    for (size_t i = static_cast<size_t>(title) + 1; i < lines.size(); ++i)
+        if (count_glyph(lines[i], k_lead_glyph) > 0) {
+            glyph_row = static_cast<int>(i);
+            break;
+        }
+    REQUIRE(glyph_row > title);
+    const std::vector<int> columns = glyph_columns(lines[static_cast<size_t>(glyph_row)]);
+    CHECK_EQ(glyph_text(glyphs_at(lines[static_cast<size_t>(glyph_row)], columns)),
+             std::string(vox_slots, '~') + ".");
+    const std::string& labels = lines[static_cast<size_t>(glyph_row) + 1];
+    CHECK(contains(labels, "VOX lead"));
+    // The lead is one steady tone: its bars fill the gap columns between its slots too.
+    CHECK_EQ(bar_cell(lines, glyph_row, 0, columns[0] + 2), k_full_block);
+
+    Tui tail(TuiMode::encoder);
+    encoder_view(tail, config);
+    feed_encoder(tail, config, bytes_of("Hi"), 1,
+                 [](const EncoderStatus& status) { return status.segment == EncoderSegment::tail; });
+    lines = render_lines(tail, k_columns, k_rows);
+    REQUIRE(find_line(lines, "tail  silence") > 0);
+    CHECK(contains(lines[0], "TAIL"));
+
+    Tui ended(TuiMode::encoder);
+    encoder_view(ended, config);
+    feed_encoder(ended, config, bytes_of("Hi"), 1, Never());
+    lines = render_lines(ended, k_columns, k_rows);
+    CHECK(find_line(lines, "idle  the transmission has ended") > 0);
+    CHECK(contains(lines[0], "IDLE"));
 }
 
-// Spec 1.5: the status shift is the one a receiver follows. The fm preset's receiver searches from 1000 Hz: 500 Hz
-// below 1500 Hz, not the filter's 650 Hz; a decoder prints what its own search_range() still follows.
+// Spec 1.3: the status shift is the one a receiver follows: it also stops where the pitch would leave the pitches the
+// receiver searches (never below 300 Hz or above 2700 Hz), not only at the filter's edges.
 TEST(tui_status_shift_follows_the_search) {
+    EncoderConfig config = six_config();
+    config.slot_us = unlimited::slot_us_for_speed(1.0f);
+    config.passband = k_am_passband;
     Tui encoder(TuiMode::encoder);
-    encoder_view(encoder, EncoderConfig::from_preset(Preset::fm, k_rate));
+    encoder_view(encoder, config);
     std::vector<std::string> lines = render_lines(encoder, k_wide_columns, k_tall_rows);
-    CHECK(contains(lines[0] + lines[1] + lines[2], "band 950-2050 Hz fits, shift -500/+950 Hz"));
+    CHECK(contains(lines[0] + lines[1] + lines[2], "1.00 bytes/s, 8.0 bit/s"));
+    CHECK(contains(lines[0] + lines[1] + lines[2], "band 1478-1522 Hz fits, shift -1200/+1200 Hz"));
 
     Tui decoder(TuiMode::decoder);
     decoder.set_color(false);
-    const unlimited::DecoderConfig fm = unlimited::DecoderConfig::for_profile(unlimited::Profile::fm);
-    decoder.set_passband(fm.passband);
-    decoder.set_search_range(fm.search_range());
+    DecoderConfig receiver;
+    receiver.slot_us = config.slot_us;
+    receiver.passband = k_am_passband;
+    decoder.set_passband(receiver.passband);
+    decoder.set_search_range(receiver.search_range());
     decoder.set_tone_hz(1100.0f);
-    decoder.set_slot_ms(4.0f);
+    decoder.set_slot_ms(100.0f);
     lines = render_lines(decoder, k_wide_columns, k_tall_rows);
-    CHECK(contains(lines[0] + lines[1] + lines[2], "band 550-1650 Hz fits, shift -100/+1350 Hz"));
+    CHECK(contains(lines[0] + lines[1] + lines[2], "band 1078-1122 Hz fits, shift -800/+1600 Hz"));
 }
 
 TEST(tui_spectrum_marks_the_passband_the_band_and_the_pitch) {
@@ -838,13 +923,13 @@ TEST(tui_spectrum_marks_the_passband_the_band_and_the_pitch) {
     CHECK_EQ(cell_at(row, spectrum_column(2700.0, k_columns)), uint32_t(']'));
     const int pitch = spectrum_column(k_tone_hz, k_columns);
     CHECK_EQ(cell_at(row, pitch), k_caret);
-    for (int column = spectrum_column(1362.0, k_columns); column <= spectrum_column(1638.0, k_columns); ++column)
-        if (column != pitch) CHECK_EQ(cell_at(row, column), k_band_glyph);  // the occupied band of hf
+    for (int column = spectrum_column(1368.0, k_columns); column <= spectrum_column(1632.0, k_columns); ++column)
+        if (column != pitch) CHECK_EQ(cell_at(row, column), k_band_glyph);  // the occupied band at 6 bytes/s
     CHECK(cell_at(row, spectrum_column(1200.0, k_columns)) != k_band_glyph);
     CHECK(contains(lines[static_cast<size_t>(markers) + 1], "1.5k"));
 
     // A band that leaves the passband is drawn red where it is outside.
-    tui.set_tone_hz(2600.0f);  // 16 ms: 2462-2738 Hz in 300-2700 Hz
+    tui.set_tone_hz(2600.0f);  // 6 bytes/s: 2468-2732 Hz in 300-2700 Hz
     tui.set_color(true);
     lines = render_lines(tui, k_columns, k_rows);
     const int colored = find_line(lines, "]", find_line(lines, "spectrum") + 1);
@@ -862,7 +947,7 @@ TEST(tui_text_panel_shows_the_newest_bytes) {
     for (int i = 0; i < count; ++i) {
         const char letter = static_cast<char>('a' + i % 26);
         sent += letter;
-        tui.on_event(byte_event(static_cast<uint8_t>(letter), static_cast<uint32_t>(i), static_cast<uint32_t>(i)));
+        tui.on_event(byte_event(static_cast<uint8_t>(letter), static_cast<uint32_t>(i)));
     }
     const std::vector<std::string> lines = render_lines(tui, narrow, k_rows);
     std::string shown;
@@ -879,7 +964,7 @@ TEST(tui_small_terminal_drops_panels) {
     feed_decoder(tui);
     const std::string full = tui.render(k_columns, k_rows);
     CHECK(contains(full, "scope"));
-    CHECK(contains(full, "package 0"));
+    CHECK(contains(full, "window 17"));
     CHECK(contains(full, "spectrum"));
     CHECK(contains(full, "received"));
 
@@ -889,7 +974,7 @@ TEST(tui_small_terminal_drops_panels) {
     CHECK(contains(short_frame, "received"));
     CHECK(contains(short_frame, "spectrum"));
     CHECK(!contains(short_frame, "scope"));
-    CHECK(!contains(short_frame, "package 0"));
+    CHECK(!contains(short_frame, "window 17"));
 
     const int tiny_rows = 4;
     const std::string tiny_frame = tui.render(k_columns, tiny_rows);
@@ -914,7 +999,7 @@ TEST(tui_scope_draws_the_envelope) {
     const std::vector<std::string> lines = render_lines(tui, k_columns, k_rows);
     const int title = find_line(lines, "scope 64 ms");
     REQUIRE(title > 0);
-    const int next_title = find_line(lines, "packages", title + 1);
+    const int next_title = find_line(lines, "windows", title + 1);
     REQUIRE(next_title > title + 1);
     const int half = k_columns / 2;
     int rows_with_left_dots = 0;

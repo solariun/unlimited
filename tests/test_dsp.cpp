@@ -15,6 +15,7 @@ const double k_pi = 3.14159265358979323846;
 const double k_two_pi = 2.0 * k_pi;
 const double k_rate = k_decoder_rate_hz;
 const double k_db_amplitude = 20.0;
+const uint32_t k_test_slot_us = 16667;  // 6 bytes/s: the leading average spans the fast average's 8 blocks
 
 double cic2_response(double hz, int block) {
     const double x = k_pi * hz / k_rate;
@@ -228,14 +229,14 @@ TEST(dsp_prefix_history_rotate) {
     }
     Complex before;
     REQUIRE(history.window(origin, 100.0f, 400.0f, before));
-    history.rotate(0.0f, 0.0f);
+    history.rotate(history.first_block(), 0.0f, 0.0f);
     Complex same;
     REQUIRE(history.window(origin, 100.0f, 400.0f, same));
     CHECK_EQ(same.re, before.re);
     CHECK_EQ(same.im, before.im);
     const double newest = 0.37;
     const double step = 0.0123;
-    history.rotate(static_cast<float>(newest), static_cast<float>(step));
+    history.rotate(history.first_block(), static_cast<float>(newest), static_cast<float>(step));
     for (int k = 0; k < blocks; ++k) {
         const double angle = newest + step * (blocks - 1 - k);
         const double r = re[k] * std::cos(angle) - im[k] * std::sin(angle);
@@ -365,39 +366,12 @@ TEST(dsp_noise_tracker) {
     CHECK_NEAR(seeded.mean_estimate() / mean, 1.0, 0.3);
 }
 
-// U12: flip statistics on synthetic windows.
-TEST(dsp_flip_measure) {
-    const float noise = 10.0f;
-    const Complex a = {30.0f, 40.0f};
-    const Complex minus_a = {-30.0f, -40.0f};
-    const Complex tiny = {0.1f, -0.2f};
-    const FlipMeasure flip = flip_measure(a, minus_a, noise, 50.0f);
-    CHECK(flip.kappa > 0.9f);
-    CHECK(flip.q > 0.0f);
-    CHECK_NEAR(flip.q, 2500.0 / noise, 1e-3);
-    CHECK_NEAR(flip.q_balanced, flip.q, 1e-3);
-    CHECK_NEAR(flip.amplitude, 100.0 / (50.0 * k_g_marker), 1e-4);
-    const FlipMeasure continuous = flip_measure(a, a, noise, 50.0f);
-    CHECK(continuous.kappa < -0.9f);
-    CHECK(continuous.q < 0.0f);
-    const FlipMeasure onset = flip_measure(tiny, a, noise, 50.0f);
-    CHECK(onset.q_balanced < 0.0f);
-    const FlipMeasure offset = flip_measure(a, tiny, noise, 50.0f);
-    CHECK(offset.q_balanced < 0.0f);
-    // phase step: after = -before rotated by +0.3 rad
-    const float angle = 0.3f;
-    const Complex rotated = {-(a.re * std::cos(angle) - a.im * std::sin(angle)),
-                             -(a.re * std::sin(angle) + a.im * std::cos(angle))};
-    CHECK_NEAR(flip_measure(a, rotated, noise, 50.0f).phase_step, angle, 1e-4);
-    CHECK_NEAR(noise_samples(8.0f, 16), (8.0 - 1.0 / 3.0) * 16.0, 1e-4);
-}
-
 // U13: floor, between-bin tones, steady-carrier mask.
 TEST(dsp_tone_search_floor) {
     const double sigmas[] = {30.0, 1000.0};
     for (std::size_t s = 0; s < test::count_of(sigmas); ++s) {
         ToneSearch search;
-        search.configure(300, 2700);
+        search.configure(300, 2700, k_test_slot_us);
         std::mt19937 generator(static_cast<std::uint32_t>(13 + s));
         std::normal_distribution<double> noise(0.0, sigmas[s]);
         const int blocks = 300;
@@ -421,7 +395,7 @@ TEST(dsp_tone_search_between_bins) {
     double worst = 0.0;
     for (std::size_t t = 0; t < test::count_of(tones); ++t) {
         ToneSearch search;
-        search.configure(300, 2700);
+        search.configure(300, 2700, k_test_slot_us);
         std::mt19937 generator(static_cast<std::uint32_t>(100 + t));
         std::normal_distribution<double> noise(0.0, sigma);
         float estimate = 0.0f;
@@ -439,9 +413,9 @@ TEST(dsp_tone_search_between_bins) {
     NOTE("worst tone estimate error at %+.0f dB: %.2f Hz", snr_db, worst);
 }
 
-// A tune at the hf_weak gate (-9.5 dB in 2500 Hz, 7.5 dB in a bin at its centre) halfway between two bins: the half-bin
-// powers find it within its 1.5 s, and the half-block phase picks the right side of the bin (the power pattern alone
-// took the neighbour bin 50 Hz off in 1 of 100 A3' transmissions).
+// A steady tone at -9.5 dB in 2500 Hz (7.5 dB in a bin at its centre) halfway between two bins: the half-bin powers
+// find it within 1.5 s, and the half-block phase picks the right side of the bin (the power pattern alone took the
+// neighbour bin 50 Hz off in 1 of 100 of v0.3's A3' transmissions).
 TEST(dsp_tone_search_weak_half_bin) {
     const double tones[] = {1525.0, 1574.0, 2073.0, 2126.0, 912.0};
     const double snr_db = -9.5;
@@ -455,7 +429,7 @@ TEST(dsp_tone_search_weak_half_bin) {
     for (std::size_t t = 0; t < test::count_of(tones); ++t) {
         for (int seed = 0; seed < seeds; ++seed) {
             ToneSearch search;
-            search.configure(300, 2700);
+            search.configure(300, 2700, k_test_slot_us);
             std::mt19937 generator(static_cast<std::uint32_t>(300 + 10 * t + seed));
             std::normal_distribution<double> noise(0.0, sigma);
             float estimate = 0.0f;
@@ -481,10 +455,10 @@ TEST(dsp_tone_search_weak_half_bin) {
 }
 
 // A receiver AGC raises the noise 20 dB within a second after a strong signal ends: the recent floor follows it, so
-// the rising noise is no tone to lock on (C13: the decoder chased such locks while the next tune went by).
+// the rising noise is no tone to lock on (v0.3's C13: the decoder chased such locks while the next tune went by).
 TEST(dsp_tone_search_recent_floor) {
     ToneSearch search;
-    search.configure(300, 2700);
+    search.configure(300, 2700, k_test_slot_us);
     std::mt19937 generator(31);
     std::normal_distribution<double> noise(0.0, 1.0);
     const double quiet_sigma = 100.0;
@@ -510,7 +484,7 @@ TEST(dsp_tone_search_recent_floor) {
 
 TEST(dsp_tone_search_steady_mask) {
     ToneSearch search;
-    search.configure(300, 2700);
+    search.configure(300, 2700, k_test_slot_us);
     std::mt19937 generator(21);
     std::normal_distribution<double> noise(0.0, 300.0);
     const double carrier_hz = 1000.0;
@@ -530,7 +504,7 @@ TEST(dsp_tone_search_steady_mask) {
 
 TEST(dsp_tone_search_ban) {
     ToneSearch search;
-    search.configure(300, 2700);
+    search.configure(300, 2700, k_test_slot_us);
     const double tone = 1500.0;
     const uint16_t ban_blocks = 50;
     search.ban(static_cast<float>(tone), ban_blocks);
@@ -547,272 +521,6 @@ TEST(dsp_tone_search_ban) {
     NOTE("banned tone locked at block %d (ban %d blocks)", locked_block, ban_blocks);
     CHECK(locked_block >= ban_blocks);
     CHECK_NEAR(estimate, tone, 5.0);
-}
-
-// U14: fine AFC on the real front end at 0 dB (key-down in 2500 Hz). One look within +-10 Hz (1 Hz bins);
-// offsets out to +-30 Hz are pulled in by a first correction and refined by the next (as the decoder does).
-// Signals for the ToneSearch train-onset tests, one sample at a time.
-namespace {
-
-const double k_onset_amplitude = 6000.0;
-const double k_onset_noise = 300.0;
-const double k_onset_tone_hz = 1523.0;
-const double k_onset_steady_s = 0.3;  // the tune tone
-const double k_onset_slot_s = 0.032;  // marker train: a reversal in every slot
-const double k_keying_s = 0.06;       // 20 WPM dot
-const double k_key_edge_s = 0.005;
-
-enum class Onset { train, carrier, keyed, noise };
-
-double onset_signal(Onset kind, double t, double phase) {
-    const double tone = std::sin(k_two_pi * k_onset_tone_hz * t + phase);
-    switch (kind) {
-    case Onset::train: {
-        if (t < k_onset_steady_s) return k_onset_amplitude * tone;
-        const long slots = static_cast<long>((t - k_onset_steady_s) / k_onset_slot_s + 0.5);  // flips at slot centres
-        return k_onset_amplitude * ((slots & 1) != 0 ? -tone : tone);
-    }
-    case Onset::carrier:
-        return k_onset_amplitude * tone;
-    case Onset::keyed: {
-        const double u = std::fmod(t, 2.0 * k_keying_s);  // continuous phase, 5 ms raised-cosine edges
-        double key = 0.0;
-        if (u < k_keying_s) key = std::min(1.0, std::min(u, k_keying_s - u) / k_key_edge_s);
-        return k_onset_amplitude * (0.5 - 0.5 * std::cos(k_pi * key)) * tone;
-    }
-    case Onset::noise:
-        return 0.0;
-    }
-    return 0.0;
-}
-
-// First search block (from the start) at which train_onset() fires after `products` steady products (the decoder
-// asks 3, or 4 while it holds a tune tone), or -1; tone estimate in `tone_hz`.
-int first_onset(Onset kind, double seconds, std::uint32_t seed, float& tone_hz, std::uint8_t products = 3) {
-    ToneSearch search;
-    search.configure(300, 2700);
-    std::mt19937 generator(seed);
-    std::normal_distribution<double> noise(0.0, k_onset_noise);
-    const int samples = static_cast<int>(seconds * k_rate);
-    int block = 0;
-    for (int n = 0; n < samples; ++n) {
-        const double value = onset_signal(kind, n / k_rate, 0.7) + noise(generator);
-        if (!search.push(static_cast<int16_t>(std::lround(value)))) continue;
-        ++block;
-        if (search.train_onset(tone_hz, products)) return block;
-    }
-    return -1;
-}
-
-}  // namespace
-
-// A tune tone that turns into a marker train is reported within three search blocks, with the tone
-// measured on the steady part; carriers, keyed CW and noise never are (the ACQUIRE watch relies on this).
-TEST(dsp_tone_search_train_onset) {
-    const int onset_block = static_cast<int>(k_onset_steady_s * k_rate / ToneSearch::k_block_samples);
-    const int max_delay_blocks = 3;
-    for (std::uint32_t seed = 1; seed <= 3; ++seed) {
-        float tone = 0.0f;
-        const int block = first_onset(Onset::train, 1.0, seed, tone);
-        NOTE("seed %u: onset at block %d (train from block %d), tone %.2f Hz", seed, block, onset_block, tone);
-        CHECK(block > onset_block);
-        CHECK(block <= onset_block + max_delay_blocks);
-        CHECK_NEAR(tone, k_onset_tone_hz, 3.0);
-        const int held_tune = first_onset(Onset::train, 1.0, seed, tone, 4);  // the stricter onset of a held tune
-        CHECK(held_tune > onset_block);
-        CHECK(held_tune <= onset_block + max_delay_blocks);
-        CHECK_EQ(first_onset(Onset::carrier, 3.0, seed, tone), -1);
-        CHECK_EQ(first_onset(Onset::keyed, 3.0, seed, tone), -1);
-        CHECK_EQ(first_onset(Onset::noise, 3.0, seed, tone), -1);
-    }
-}
-
-// The noise seed of a lock comes from the floor before its tone appeared: an off-bin tone 50 dB over the
-// noise leaks into every search bin and lifts the current floor.
-TEST(dsp_tone_search_onset_floor) {
-    ToneSearch search;
-    search.configure(300, 2700);
-    std::mt19937 generator(5);
-    const double sigma = 30.0;
-    std::normal_distribution<double> noise(0.0, sigma);
-    const int quiet_blocks = 100;
-    const int tone_blocks = 20;
-    for (int n = 0; n < (quiet_blocks + tone_blocks) * ToneSearch::k_block_samples; ++n) {
-        double value = noise(generator);
-        if (n >= quiet_blocks * ToneSearch::k_block_samples) value += 20000.0 * std::sin(k_two_pi * 1523.0 * n / k_rate);
-        search.push(static_cast<int16_t>(std::lround(value)));
-    }
-    const double truth = ToneSearch::k_block_samples * sigma * sigma;
-    NOTE("floor / noise: current %.2f, before the tone %.2f", search.floor() / truth, search.onset_floor() / truth);
-    CHECK(search.floor() > 2.0 * truth);
-    CHECK_NEAR(search.onset_floor() / truth, 1.0, 0.15);
-}
-
-// An excluded tone (the lock that is being tried) leaves the search free to follow the next one.
-TEST(dsp_tone_search_exclude) {
-    const float k_train_line_hz = 125.0f;  // a train at T = 4 ms
-    ToneSearch search;
-    search.configure(300, 2700);
-    std::mt19937 generator(9);
-    std::normal_distribution<double> noise(0.0, 200.0);
-    const double strong_hz = 1000.0;
-    const double weak_hz = 1800.0;
-    float tone = 0.0f;
-    bool excluded = false;
-    bool found_weak = false;
-    for (int n = 0; n < 60 * ToneSearch::k_block_samples && !found_weak; ++n) {
-        const double t = n / k_rate;
-        const double value = 8000.0 * std::sin(k_two_pi * strong_hz * t) + 2000.0 * std::sin(k_two_pi * weak_hz * t) +
-                             noise(generator);
-        if (!search.push(static_cast<int16_t>(std::lround(value))) || !search.candidate(tone)) continue;
-        if (!excluded) {
-            CHECK_NEAR(tone, strong_hz, 5.0);
-            search.exclude(tone, k_train_line_hz);
-            excluded = true;
-        } else {
-            found_weak = std::fabs(tone - weak_hz) < 5.0;
-        }
-    }
-    CHECK(excluded);
-    CHECK(found_weak);
-}
-
-TEST(dsp_fine_afc) {
-    const double offsets[] = {3.3, -7.7, 0.4, 9.6};
-    const int block = 8;
-    const int decimation = 8;  // 64 samples: 125 Hz
-    const double amplitude = 8000.0;
-    const double sigma = amplitude * std::sqrt(0.5 * (k_rate / 2.0) / 2500.0);
-    for (std::size_t i = 0; i < test::count_of(offsets); ++i) {
-        const double nco_hz = 1500.0;
-        const std::vector<Complex> h = mix_tone(nco_hz + offsets[i], nco_hz, amplitude, block, 0.6, sigma,
-                                                static_cast<std::uint32_t>(40 + i));
-        FineAfc afc;
-        for (std::size_t k = 0; k + decimation <= h.size(); k += decimation) {
-            Complex w = {0.0f, 0.0f};
-            for (int j = 0; j < decimation; ++j) {
-                w.re += h[k + j].re;
-                w.im += h[k + j].im;
-            }
-            const float scale = 1.0f / (k_mixer_gain * block * decimation);
-            w.re *= scale;
-            w.im *= scale;
-            afc.push(w);
-        }
-        float estimate = 0.0f;
-        REQUIRE(afc.offset(estimate, false));
-        NOTE("AFC offset %.2f Hz: estimate %.3f Hz", offsets[i], estimate);
-        CHECK_NEAR(estimate, offsets[i], 0.2);
-    }
-    FineAfc empty;
-    float estimate = 0.0f;
-    CHECK(!empty.offset(estimate, true));
-}
-
-TEST(dsp_fine_afc_pull_in) {
-    const double offsets[] = {12.5, -18.0, 24.0, -29.0};
-    const int block = 8;
-    const int decimation = 8;
-    const double amplitude = 8000.0;
-    const double sigma = amplitude * std::sqrt(0.5 * (k_rate / 2.0) / 2500.0);
-    const int looks = 2;
-    for (std::size_t i = 0; i < test::count_of(offsets); ++i) {
-        double nco_hz = 1500.0;
-        const double tone_hz = nco_hz + offsets[i];
-        for (int look = 0; look < looks; ++look) {
-            const std::vector<Complex> h = mix_tone(tone_hz, nco_hz, amplitude, block, 0.6, sigma,
-                                                    static_cast<std::uint32_t>(60 + 7 * i + look));
-            FineAfc afc;
-            for (std::size_t k = 0; k + decimation <= h.size(); k += decimation) {
-                Complex w = {0.0f, 0.0f};
-                for (int j = 0; j < decimation; ++j) {
-                    w.re += h[k + j].re;
-                    w.im += h[k + j].im;
-                }
-                const float scale = 1.0f / (k_mixer_gain * block * decimation);
-                w.re *= scale;
-                w.im *= scale;
-                afc.push(w);
-            }
-            float estimate = 0.0f;
-            REQUIRE(afc.offset(estimate, true));
-            nco_hz += estimate;
-        }
-        NOTE("AFC pull-in from %.1f Hz: residual after %d looks %.3f Hz", offsets[i], looks, tone_hz - nco_hz);
-        CHECK_NEAR(nco_hz, tone_hz, 0.2);
-    }
-}
-
-// Spec 3.7: a detection within the T_min half-window of the newest entry merges into it (a stronger one replaces its
-// position and q); the entry's finest position stays with its finest detection, so a chain of wider echoes, each
-// within reach of the last, never walks it away from the marker; one T_min later is a marker of its own.
-TEST(dsp_candidate_list_merge) {
-    CandidateList list;
-    const Candidate first = {1000, 0.25f, 5.0f, 2, 2, 0};
-    CHECK(list.add(first));
-    const Candidate weaker = {1002, 0.0f, 4.0f, 3, 3, 0};
-    CHECK(!list.add(weaker));
-    const Candidate stronger = {1001, 0.5f, 9.0f, 3, 3, 0};
-    CHECK(list.add(stronger));
-    CHECK_EQ(+list.count(), 1);
-    CHECK_EQ(list.newest(0).block, 1001u);
-    CHECK_NEAR(list.newest(0).block + list.newest(0).fraction + CandidateList::finest(list.newest(0)), 1000.25, 0.02);
-    const Candidate echo = {999, 0.0f, 15.0f, 6, 6, 0};  // 2.5 blocks further: the position moves, the finest stays
-    CHECK(list.add(echo));
-    CHECK_EQ(list.newest(0).block, 999u);
-    CHECK_NEAR(list.newest(0).block + list.newest(0).fraction + CandidateList::finest(list.newest(0)), 1000.25, 0.02);
-    const Candidate finer = {1000, 0.5f, 3.0f, 0, 0, 0};  // weaker but finer: only the finest position moves
-    CHECK(!list.add(finer));
-    CHECK_NEAR(list.newest(0).q, 15.0, 1e-6);
-    CHECK_NEAR(list.newest(0).block + list.newest(0).fraction + CandidateList::finest(list.newest(0)), 1000.5, 0.02);
-    const Candidate next_marker = {1009, 0.5f, 3.5f, 1, 1, 0};  // one T_min later: a distinct marker
-    CHECK(list.add(next_marker));
-    CHECK_EQ(+list.count(), 2);
-    CHECK_EQ(list.newest(1).block, 999u);
-    for (uint32_t k = 0; k < 40; ++k) {
-        const Candidate c = {2000 + 100 * k, 0.0f, 3.0f, 0, 0, 0};
-        list.add(c);
-    }
-    CHECK_EQ(+list.count(), +CandidateList::k_size);
-    CHECK_EQ(list.newest(0).block, 2000u + 100u * 39u);
-}
-
-// Alias audit ring (spec 3.11): 2N + 1 positions, int8 in 1/15 units, committed per frame.
-// U25: 2N + 1 positions for N = 1..cap, int8 storage in 1/15, the maximum of the 4-package sums.
-TEST(dsp_audit_ring) {
-    AuditRing ring;
-    for (unsigned n = 1; n <= k_max_bits_per_package; ++n) {
-        ring.reset(static_cast<uint8_t>(2 * n + 1));
-        CHECK_EQ(unsigned(ring.positions()), 2 * n + 1);
-    }
-    CHECK_EQ(unsigned(AuditRing::k_max_positions), 2u * k_max_bits_per_package + 1u);
-    const uint8_t positions = 2 * 16 + 1;
-    ring.reset(positions);
-    CHECK_EQ(+ring.positions(), +positions);
-    CHECK_EQ(+ring.packages(), 0);
-    CHECK_NEAR(ring.max_evidence(), 0.0, 1e-6);
-    for (int p = 0; p < 3; ++p) {
-        ring.set(8, 5.0f);
-        ring.set(3, -4.0f);
-        ring.set(positions, 8.0f);  // outside: ignored
-        CHECK_NEAR(ring.max_evidence(), 5.0 * p, 1e-6);  // the package being measured does not count
-        ring.next_package();
-    }
-    CHECK_NEAR(ring.max_evidence(), 15.0, 1e-6);
-    CHECK_EQ(+ring.packages(), 3);
-    ring.set(8, 8.0f);
-    ring.next_package();
-    CHECK_NEAR(ring.max_evidence(), 23.0, 1e-6);
-    for (int p = 0; p < 4; ++p) ring.next_package();
-    CHECK_NEAR(ring.max_evidence(), 0.0, 1e-6);
-    CHECK_EQ(+ring.packages(), +AuditRing::k_packages);
-    ring.set(0, 2.0f / 3.0f);  // 10 / 15, exact in the int8 scale
-    ring.next_package();
-    CHECK_NEAR(ring.max_evidence(), 2.0 / 3.0, 1e-6);
-    ring.reset(3);
-    ring.set(2, -4.0f);
-    ring.next_package();
-    CHECK_NEAR(ring.max_evidence(), 0.0, 1e-6);  // positions 0 and 1 hold 0
 }
 
 TEST(dsp_impulse_blanker) {
@@ -856,7 +564,8 @@ TEST(dsp_impulse_blanker) {
     CHECK(step_blanks <= 3);
 }
 
-// U11: the smart line, spec 3.10 table (+-0.005), clamps at 0.50 and 0.75, 0.75 for a^2 <= 0.
+// U11: the smart line (the adaptive decision, spec 3.5), v0.3's table (+-0.005), clamps at 0.50 and 0.75, 0.75 for
+// a^2 <= 0.
 TEST(dsp_smart_line) {
     const float a[] = {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f, 10.0f, 15.0f};
     const float rho[] = {0.750f, 0.705f, 0.630f, 0.591f, 0.567f, 0.542f, 0.529f, 0.515f};
@@ -872,149 +581,13 @@ TEST(dsp_smart_line) {
     }
 }
 
-// U9: the history holds (cap + 5) slots of the slowest T (64 blocks) and 32 guard cells.
-TEST(dsp_history_cells_follow_the_cap) {
-    CHECK_EQ(unsigned(k_history_cells), (unsigned(k_max_bits_per_package) + 5u) * 64u + 32u);
-    CHECK(k_rebase_blocks > k_history_cells);
-    NOTE("cap %u: %u cells", unsigned(k_max_bits_per_package), unsigned(k_history_cells));
-}
-
-namespace {
-
-// Feeds grid indices to a learner; returns the step of the last one.
-LearnStep feed(PackageLearner& learner, const std::vector<int32_t>& markers) {
-    LearnStep step = LearnStep::train;
-    for (std::size_t i = 0; i < markers.size(); ++i) step = learner.push(markers[i]);
-    return step;
-}
-
-}  // namespace
-
-// U26: synthetic marker index sequences (spec 3.8).
-TEST(dsp_package_learner) {
-    const int32_t train_end = 7;  // a train of markers 0..7, the last the first START
-    for (int32_t n = 1; n <= static_cast<int32_t>(k_max_bits_per_package); ++n) {
-        const int32_t span = n + 1;
-        // Clean: confirmed at the second STOP, package 0 on L.
-        {
-            PackageLearner learner;
-            learner.reset(train_end, 7);
-            CHECK(learner.push(train_end + span) == LearnStep::candidate);
-            CHECK_EQ(int(learner.bits()), int(n));
-            CHECK_EQ(int(learner.faded_bits()), int(n >= 2 ? n - 1 : 0));
-            CHECK(learner.push(train_end + 2 * span) == LearnStep::confirmed);
-            CHECK_EQ(int(learner.bits()), int(n));
-            CHECK(!learner.faded_start());
-            CHECK_EQ(learner.first_start(), train_end);
-            CHECK_EQ(learner.candidate_start(), train_end);
-            CHECK(learner.start_exact());
-        }
-        // A train marker in the middle faded: a gap of 2 and then gaps of 1 drop the candidate.
-        {
-            PackageLearner learner;
-            learner.reset(3, 3);
-            CHECK(learner.push(5) == LearnStep::candidate);
-            CHECK(learner.push(6) == LearnStep::train);
-            CHECK_EQ(int(learner.bits()), 0);
-            CHECK(learner.push(train_end) == LearnStep::train);
-            CHECK_EQ(learner.train_index(), train_end);
-            CHECK(learner.push(train_end + span) == LearnStep::candidate);
-            CHECK(learner.push(train_end + 2 * span) == LearnStep::confirmed);
-            CHECK_EQ(learner.first_start(), train_end);
-        }
-        // The last train marker (the first START) faded: reading B confirms, package 0 starts one slot after L.
-        if (n + 1 <= static_cast<int32_t>(k_max_bits_per_package)) {
-            PackageLearner learner;
-            learner.reset(train_end - 1, 6);
-            CHECK(learner.push(train_end + span) == LearnStep::candidate);
-            CHECK_EQ(int(learner.bits()), int(n + 1));
-            CHECK_EQ(int(learner.faded_bits()), int(n));
-            CHECK(learner.push(train_end + 2 * span) == LearnStep::confirmed);
-            CHECK(learner.faded_start());
-            CHECK_EQ(int(learner.bits()), int(n));
-            CHECK_EQ(learner.first_start(), train_end);
-            CHECK_EQ(learner.candidate_start(), train_end);
-            CHECK(learner.start_exact());
-        }
-        // The last two train markers faded: a rejection, then N from the next spans; package 0 still on the START.
-        if (n + 2 <= static_cast<int32_t>(k_max_bits_per_package)) {
-            PackageLearner learner;
-            learner.reset(train_end - 2, 5);
-            CHECK(learner.push(train_end + span) == LearnStep::candidate);
-            CHECK(learner.push(train_end + 2 * span) == LearnStep::candidate);  // rejects N + 2, forms N
-            CHECK(learner.push(train_end + 3 * span) == LearnStep::confirmed);
-            CHECK_EQ(int(learner.bits()), int(n));
-            CHECK_EQ(int(learner.rejections()), 1);
-            CHECK(learner.start_exact());  // N = 1: g1 - L = 4, left to the carrier check of the decoder
-            if (n >= 2) CHECK_EQ(learner.first_start(), train_end);
-        }
-        // The first STOP faded: packages 0 and 1 are lost, N learnt from the next spans.
-        if (2 * n + 1 <= static_cast<int32_t>(k_max_bits_per_package)) {
-            PackageLearner learner;
-            learner.reset(train_end, 7);
-            CHECK(learner.push(train_end + 2 * span) == LearnStep::candidate);
-            CHECK(learner.push(train_end + 3 * span) == LearnStep::candidate);
-            CHECK(learner.push(train_end + 4 * span) == LearnStep::confirmed);
-            CHECK_EQ(int(learner.bits()), int(n));
-            CHECK_EQ(learner.candidate_start(), train_end + 2 * span);
-            CHECK_EQ(learner.first_start(), train_end);
-            CHECK(learner.start_exact());  // N = 1: g1 - L = 4, left to the carrier check of the decoder
-        }
-        // The START and the first STOP faded.
-        if (2 * n + 2 <= static_cast<int32_t>(k_max_bits_per_package)) {
-            PackageLearner learner;
-            learner.reset(train_end - 1, 6);
-            CHECK(learner.push(train_end + 2 * span) == LearnStep::candidate);
-            CHECK(learner.push(train_end + 3 * span) == LearnStep::candidate);
-            CHECK(learner.push(train_end + 4 * span) == LearnStep::confirmed);
-            CHECK_EQ(int(learner.bits()), int(n));
-            if (n >= 2) CHECK_EQ(learner.first_start(), train_end);
-        }
-        // A gap of 1 after a candidate drops it: the train goes on.
-        {
-            PackageLearner learner;
-            learner.reset(train_end, 7);
-            CHECK(learner.push(train_end + span) == LearnStep::candidate);
-            CHECK(learner.push(train_end + span + 1) == LearnStep::train);
-            CHECK_EQ(int(learner.bits()), 0);
-            CHECK_EQ(learner.train_index(), train_end + span + 1);
-        }
-    }
-    // N = 1 whose first marker came 5 slots after L is refused.
-    PackageLearner one;
-    one.reset(train_end, 7);
-    const std::vector<int32_t> far = {train_end + 5, train_end + 7, train_end + 9};
-    CHECK(feed(one, far) == LearnStep::confirmed);
-    CHECK_EQ(int(one.bits()), 1);
-    CHECK(!one.start_exact());
-    // A sub-rate reading (gaps of 2 and no gap of 1) would read as N = 1: the learner reports no train gaps of one, and
-    // the decoder's sub-rate check (train_ones() < 3) takes it for a train read at T / 2 first.
-    PackageLearner sub_rate;
-    sub_rate.reset(0, 0);
-    CHECK(sub_rate.push(2) == LearnStep::candidate);
-    CHECK_EQ(int(sub_rate.train_ones()), 0);
-    // Gaps above the cap: nothing on the first, unsupported on the second equal one.
-    const int32_t long_gap = static_cast<int32_t>(k_max_bits_per_package) + 2;
-    PackageLearner above;
-    above.reset(train_end, 7);
-    CHECK(above.push(train_end + long_gap) == LearnStep::rejected);
-    CHECK_EQ(int(above.bits()), 0);
-    CHECK(above.push(train_end + 2 * long_gap) == LearnStep::unsupported);
-    // Contradicting spans are counted.
-    PackageLearner noisy;
-    noisy.reset(train_end, 7);
-    const std::vector<int32_t> contradictions = {train_end + 5, train_end + 8, train_end + 12, train_end + 18};
-    feed(noisy, contradictions);
-    CHECK_EQ(int(noisy.rejections()), 3);
-}
-
 // U13: the search looks only inside search_range(): a strong tone just outside it is not a candidate.
 TEST(dsp_tone_search_stays_inside_range) {
     const double tones[] = {310.0, 340.0, 2660.0, 2690.0};
     const bool inside[] = {false, true, true, false};
     for (std::size_t t = 0; t < test::count_of(tones); ++t) {
         ToneSearch search;
-        search.configure(335, 2665);
+        search.configure(335, 2665, k_test_slot_us);
         std::mt19937 generator(static_cast<std::uint32_t>(50 + t));
         std::normal_distribution<double> noise(0.0, 100.0);
         float estimate = 0.0f;
@@ -1028,4 +601,195 @@ TEST(dsp_tone_search_stays_inside_range) {
         if (locked) CHECK_NEAR(estimate, tones[t], 5.0);
         if (locked) CHECK(estimate >= 335.0f && estimate <= 2665.0f);
     }
+}
+
+// Spec 3.2: a keyed tone 5 Hz inside either edge of the search range leads (the provisional tune): the lock bins
+// include the ones nearest to the edges (with the multiples of 50 Hz inside the range only, the guard bin beside such a
+// tone took its power and no local peak was left: L19 lost up to 25 % of the transmissions at 12 bytes/s).
+TEST(dsp_tone_search_edge_bins) {
+    const uint16_t low = 464;   // 12 bytes/s in a 200..2900 Hz filter
+    const uint16_t high = 2636;
+    const double tones[] = {low + 5.0, high - 5.0};
+    for (std::size_t t = 0; t < test::count_of(tones); ++t) {
+        ToneSearch search;
+        search.configure(low, high, k_test_slot_us);
+        std::mt19937 generator(static_cast<std::uint32_t>(60 + t));
+        std::normal_distribution<double> noise(0.0, 300.0);
+        const double slot = k_test_slot_us * k_rate / 1e6;
+        float lead = 0.0f;
+        float estimate = 0.0f;
+        bool led = false;
+        bool locked = false;
+        for (int n = 0; n < 100 * ToneSearch::k_block_samples; ++n) {
+            double value = noise(generator);
+            const bool on = n >= 20 * ToneSearch::k_block_samples && std::fmod(n / slot, 2.0) < 1.0;
+            if (on) value += 6000.0 * std::sin(k_two_pi * tones[t] * n / k_rate);
+            if (!search.push(static_cast<int16_t>(std::lround(value)))) continue;
+            if (search.leading(lead)) led = true;
+            if (search.candidate(estimate)) locked = true;
+        }
+        CHECK(led);
+        CHECK_NEAR(lead, tones[t], 25.0);
+        if (locked) CHECK_NEAR(estimate, tones[t], 20.0);  // keyed without ramps: the estimate is looser
+    }
+}
+
+// Spec 3.1: the look-ahead delays by exactly its delay, zeros first; 0 passes straight through.
+TEST(dsp_lookahead_delays) {
+    Lookahead line;
+    const uint16_t delay = 37;
+    line.configure(delay);
+    CHECK_EQ(line.delay(), delay);
+    for (int n = 0; n < 200; ++n) {
+        const int16_t out = line.push(static_cast<int16_t>(n + 1));
+        CHECK_EQ(out, n < delay ? 0 : n + 1 - delay);
+    }
+    line.configure(0);
+    CHECK_EQ(line.push(123), 123);
+    line.configure(k_lookahead_max_samples);
+    CHECK_EQ(line.delay(), k_lookahead_max_samples);
+    int16_t last = -1;
+    for (int n = 0; n <= k_lookahead_max_samples; ++n) last = line.push(static_cast<int16_t>(n + 1));
+    CHECK_EQ(last, 1);
+}
+
+// A partial re-mix: rotate(first, ...) turns the blocks from `first` on; the history then starts at `first` (the
+// prefixes before it are forgotten) and windows before it are refused.
+TEST(dsp_prefix_history_partial_rotate) {
+    PrefixHistory history;
+    const uint32_t origin = history.end_block();
+    const int blocks = 200;
+    for (int k = 0; k < blocks; ++k) history.push(1000, 0, false);
+    const uint32_t first = origin + 120;
+    const float quarter_turn = 1.5707963f;
+    history.rotate(first, quarter_turn, 0.0f);  // every block from `first` on turned by 90 degrees
+    CHECK_EQ(history.first_block(), first);
+    CHECK(history.holds(first));
+    CHECK(!history.holds(first - 1));
+    Complex turned;
+    REQUIRE(history.window(origin, 150.0f, 160.0f, turned));
+    CHECK_NEAR(turned.re * k_mixer_gain, 0.0, 1.0);
+    CHECK_NEAR(turned.im * k_mixer_gain, 10000.0, 1.0);
+    Complex refused;
+    CHECK(!history.window(origin, 100.0f, 130.0f, refused));
+    Complex block;
+    REQUIRE(history.block(first + 10, block));
+    CHECK_NEAR(block.im * k_mixer_gain, 1000.0, 1.0);
+}
+
+namespace {
+
+// A tone search fed noise, then (from `tone_from` blocks) keyed beeps of one slot every other slot at tone_hz.
+struct KeyedFeed {
+    ToneSearch search;
+    std::mt19937 generator;
+    std::normal_distribution<double> noise;
+    int sample;
+    double carrier_hz;  // a steady carrier as well when > 0
+    explicit KeyedFeed(uint32_t seed) : generator(seed), noise(0.0, 300.0), sample(0), carrier_hz(0.0) {
+        search.configure(300, 2700, k_test_slot_us);
+    }
+    // Returns true when a search block ended.
+    bool push(double tone_hz, bool tone) {
+        const double slot = k_test_slot_us * k_rate / 1e6;
+        const bool on = tone && std::fmod(sample / slot, 2.0) < 1.0;
+        double value = noise(generator);
+        if (on) value += 6000.0 * std::sin(k_two_pi * tone_hz * sample / k_rate);
+        if (carrier_hz > 0.0) value += 3000.0 * std::sin(k_two_pi * carrier_hz * sample / k_rate);
+        ++sample;
+        return search.push(static_cast<int16_t>(std::lround(value)));
+    }
+};
+
+}  // namespace
+
+// Spec 3.2: the leading bin (the provisional tune) is the keyed tone's, once the warm-up is over; following() holds
+// while it is there and ends after it stops.
+TEST(dsp_tone_search_leading_and_following) {
+    KeyedFeed feed(71);
+    const double tone = 1850.0;
+    float lead = 0.0f;
+    bool led = false;
+    for (int block = 0; block < 60;) {
+        if (!feed.push(tone, block >= 20)) continue;
+        ++block;
+        if (block < 20) CHECK(!feed.search.leading(lead));
+        if (block >= 30 && feed.search.leading(lead)) led = true;
+    }
+    CHECK(led);
+    CHECK_NEAR(lead, tone, 25.0);
+    CHECK(feed.search.following(static_cast<float>(tone)));
+    CHECK(!feed.search.following(1000.0f));
+    for (int block = 0; block < 60;) {
+        if (feed.push(tone, false)) ++block;
+    }
+    CHECK(!feed.search.following(static_cast<float>(tone)));
+}
+
+// Spec 3.3, V6: fresh() is true for a tone that came up after a whole quiet window, within the blocks asked; not for
+// one heard from the search's start (a receiver joining a transmission already running), nor long after it came up,
+// nor for a quiet bin (noise alone: it kept ACQUIRE alive in noise when it was).
+TEST(dsp_tone_search_fresh) {
+    const double tone = 1200.0;
+    const uint16_t within = 15;
+    KeyedFeed late(72);
+    int block = 0;
+    bool fresh_soon = false;
+    bool fresh_quiet = false;
+    while (block < 100) {
+        if (!late.push(tone, block >= 60)) continue;
+        ++block;
+        if (block >= 20 && block < 60) fresh_quiet = fresh_quiet || late.search.fresh(static_cast<float>(tone), within);
+        if (block >= 64 && block <= 70 && late.search.fresh(static_cast<float>(tone), within)) fresh_soon = true;
+    }
+    CHECK(!fresh_quiet);
+    CHECK(fresh_soon);
+    CHECK(!late.search.fresh(static_cast<float>(tone), within));  // 40 blocks after it came up
+    KeyedFeed running(73);
+    bool fresh_ever = false;
+    for (block = 0; block < 100;) {
+        if (!running.push(tone, true)) continue;
+        ++block;
+        fresh_ever = fresh_ever || running.search.fresh(static_cast<float>(tone), within);
+    }
+    CHECK(!fresh_ever);
+}
+
+// Spec 3.7: after an end, forget() drops the lock and the averages that still hold the finished signal: no candidate
+// comes from what is gone, and a new tone is found as from a quiet band. A steady carrier 800 Hz away stays masked (a
+// carrier unmasked after every end would be grabbed before the next transmission).
+TEST(dsp_tone_search_forget) {
+    KeyedFeed feed(74);
+    feed.carrier_hz = 700.0;
+    const double tone = 1500.0;
+    float estimate = 0.0f;
+    bool locked = false;
+    for (int block = 0; block < 200;) {
+        if (!feed.push(tone, block >= 130)) continue;
+        ++block;
+        if (block > 140) locked = locked || feed.search.candidate(estimate);
+    }
+    REQUIRE(locked);
+    CHECK_NEAR(estimate, tone, 25.0);
+    CHECK(feed.search.masked(static_cast<float>(feed.carrier_hz)));
+    feed.search.forget();
+    CHECK(!feed.search.candidate(estimate));
+    CHECK(feed.search.masked(static_cast<float>(feed.carrier_hz)));
+    bool relocked = false;
+    for (int block = 0; block < 100;) {
+        if (!feed.push(tone, false)) continue;
+        ++block;
+        relocked = relocked || feed.search.candidate(estimate);
+    }
+    CHECK(!relocked);
+    const double floor = feed.search.floor();
+    CHECK(floor > 0.0);
+    bool found = false;
+    for (int block = 0; block < 60;) {
+        if (!feed.push(2100.0, true)) continue;
+        ++block;
+        found = found || feed.search.candidate(estimate);
+    }
+    CHECK(found);
+    CHECK_NEAR(estimate, 2100.0, 10.0);
 }

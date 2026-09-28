@@ -16,9 +16,9 @@ const double k_us_per_ms = 1e3;
 const double k_full_scale = 32768.0;
 const double k_int16_max = 32767.0;
 const double k_int16_min = -32768.0;
-const std::size_t k_render_chunk = 32;        // shorter than any package, so the queue never runs dry
-const std::size_t k_min_tune_slots = 6;
-const double k_trailing_slots = 4.0;          // single(): silence after a transmission, at least 4 T
+const std::size_t k_render_chunk = 32;        // shorter than any slot, so the queue never runs dry
+const double k_trailing_windows = 2.0;        // single(): silence after a transmission, at least 2 windows
+const double k_leading_slots = 15.0;          // a whole silent window, the search's warm-up and a margin
 const double k_reference_bandwidth_hz = 2500.0;
 const double k_receiver_bandwidth_hz = 2400.0;
 const double k_noise_peak_sigmas = 5.0;
@@ -26,6 +26,11 @@ const double k_headroom = 0.9;
 const int k_byte_bits = 8;
 const double k_pi = 3.14159265358979323846;
 const unsigned k_byte_mask = 0xFFu;
+// A lock comes once the history holds its check windows: at least 2 windows and half a slot after the anchor (spec
+// 3.3); after a silent START (back to back, spec 3.7) up to about 7 windows after it, when the old grid's next
+// windows are weighed too.
+const double k_lock_min_slots = 19.5;
+const double k_lock_max_slots = 75.0;
 
 struct Sink {
     Capture* capture;
@@ -48,14 +53,21 @@ double lead_in_samples(const EncoderConfig& config) {
     return static_cast<double>(config.lead_in_ms) * config.sample_rate_hz / k_ms_per_s;
 }
 
-std::size_t data_bits(const Transmission& transmission) {
-    return transmission.data.size() * static_cast<std::size_t>(k_byte_bits);
-}
-
-long transmission_at(const Recording& recording, std::size_t sample) {
+// The transmission a lock at `sample` belongs to: the latest whose first START lies between k_lock_max_slots and
+// k_lock_min_slots before the lock (look-ahead and channel delay removed); -1 when none does.
+long transmission_of_lock(const Recording& recording, double sample, std::size_t lookahead, double delay) {
     long found = -1;
+    double latest = 0.0;
     for (std::size_t t = 0; t < recording.transmissions.size(); ++t) {
-        if (recording.transmissions[t].start_sample <= sample) found = static_cast<long>(t);
+        const Transmission& tx = recording.transmissions[t];
+        const double slot = slot_samples(tx.config) * k_decoder_rate_hz / tx.config.sample_rate_hz;
+        const double heard = sample - static_cast<double>(lookahead) - delay;
+        const double start = first_start_sample(tx) * k_decoder_rate_hz / tx.config.sample_rate_hz;
+        if (start > heard - k_lock_min_slots * slot || start < heard - k_lock_max_slots * slot) continue;
+        if (found < 0 || start > latest) {
+            found = static_cast<long>(t);
+            latest = start;
+        }
     }
     return found;
 }
@@ -84,20 +96,23 @@ std::vector<std::int16_t> encode(const std::vector<std::uint8_t>& data, const En
     return out;
 }
 
-EncoderConfig preset_config(Preset preset) {
-    return EncoderConfig::from_preset(preset, k_decoder_rate_hz);
-}
-
-EncoderConfig slot_config(double slot_ms, std::uint8_t bits, std::uint16_t tone_hz) {
-    EncoderConfig config = EncoderConfig::from_preset(Preset::hf, k_decoder_rate_hz);
-    config.slot_us = static_cast<std::uint32_t>(std::lround(slot_ms * k_us_per_ms));
-    config.bits_per_package = bits;
+EncoderConfig speed_config(float bytes_per_second, std::uint16_t tone_hz) {
+    EncoderConfig config;
+    config.sample_rate_hz = k_decoder_rate_hz;
+    config.slot_us = slot_us_for_speed(bytes_per_second);
     config.tone_hz = tone_hz;
     if (!passband_fit(config).fits) {
         config.passband.low_hz = k_am_passband_low_hz;
         config.passband.high_hz = k_am_passband_high_hz;
     }
     return config;
+}
+
+DecoderConfig receiver_for(const EncoderConfig& config) {
+    DecoderConfig receiver;
+    receiver.slot_us = config.slot_us;
+    receiver.passband = config.passband;
+    return receiver;
 }
 
 void append_silence(Recording& recording, double ms, std::uint32_t rate_hz) {
@@ -116,11 +131,15 @@ void append_transmission(Recording& recording, const std::vector<std::uint8_t>& 
     recording.transmissions.push_back(transmission);
 }
 
+double leading_silence_ms(const EncoderConfig& config, double ms) {
+    return std::max(ms, k_leading_slots * config.slot_us / k_us_per_ms);
+}
+
 Recording single(const std::vector<std::uint8_t>& data, const EncoderConfig& config, double silence_ms) {
     Recording recording;
-    append_silence(recording, silence_ms, config.sample_rate_hz);
+    append_silence(recording, leading_silence_ms(config, silence_ms), config.sample_rate_hz);
     append_transmission(recording, data, config);
-    const double trailing_ms = k_trailing_slots * config.slot_us / k_us_per_ms;
+    const double trailing_ms = k_trailing_windows * k_window_slots * config.slot_us / k_us_per_ms;
     append_silence(recording, std::max(silence_ms, trailing_ms), config.sample_rate_hz);
     return recording;
 }
@@ -129,47 +148,30 @@ double slot_samples(const EncoderConfig& config) {
     return static_cast<double>(config.slot_us) * config.sample_rate_hz / k_us_per_s;
 }
 
-double slot_start_sample(const Transmission& transmission, std::size_t slot) {
+std::size_t vox_slots(const EncoderConfig& config) {
+    if (config.vox_lead_ms == 0) return 0;
+    const std::size_t lead = static_cast<std::size_t>(
+        std::ceil(config.vox_lead_ms * k_us_per_ms / static_cast<double>(config.slot_us) - 1e-9));
+    return std::max<std::size_t>(lead, k_min_vox_lead_slots) + k_vox_gap_slots;
+}
+
+double first_start_sample(const Transmission& transmission) {
     return static_cast<double>(transmission.start_sample) + lead_in_samples(transmission.config) +
-           static_cast<double>(slot) * slot_samples(transmission.config);
+           static_cast<double>(vox_slots(transmission.config)) * slot_samples(transmission.config);
 }
 
-std::size_t tune_slots(const EncoderConfig& config) {
-    const std::size_t slots =
-        static_cast<std::size_t>(std::ceil(config.tune_ms * (k_us_per_s / k_ms_per_s) / config.slot_us - 1e-9));
-    return std::max<std::size_t>(slots, k_min_tune_slots);
+double slot_start_sample(const Transmission& transmission, std::size_t byte, std::size_t slot) {
+    return first_start_sample(transmission) +
+           static_cast<double>(byte * k_window_slots + slot) * slot_samples(transmission.config);
 }
 
-std::size_t first_start_slot(const EncoderConfig& config) {
-    return tune_slots(config) + config.sync_markers - 1;
+double end_sample(const Transmission& transmission) {
+    return slot_start_sample(transmission, transmission.data.size(), 0);
 }
 
-std::size_t package_count(const Transmission& transmission) {
-    const std::size_t n = transmission.config.bits_per_package;
-    return (data_bits(transmission) + n - 1) / n;
-}
-
-std::size_t package_bits(const Transmission& transmission, std::size_t package) {
-    const std::size_t n = transmission.config.bits_per_package;
-    const std::size_t left = data_bits(transmission) - package * n;
-    return left < n ? left : n;
-}
-
-std::size_t package_start_slot(const Transmission& transmission, std::size_t package) {
-    return first_start_slot(transmission.config) + package * (transmission.config.bits_per_package + 1u);
-}
-
-std::size_t stop_slot(const Transmission& transmission, std::size_t package) {
-    return package_start_slot(transmission, package) + package_bits(transmission, package) + 1u;
-}
-
-std::size_t end_slot(const Transmission& transmission) {
-    return stop_slot(transmission, package_count(transmission) - 1u) + 1u;
-}
-
-void scale_slot(Recording& recording, std::size_t transmission, std::size_t slot, double gain) {
+void scale_slot(Recording& recording, std::size_t transmission, std::size_t byte, std::size_t slot, double gain) {
     const Transmission& t = recording.transmissions[transmission];
-    const double begin = slot_start_sample(t, slot);
+    const double begin = slot_start_sample(t, byte, slot);
     const std::size_t first = static_cast<std::size_t>(std::floor(begin));
     const std::size_t last = static_cast<std::size_t>(std::ceil(begin + slot_samples(t.config)));
     for (std::size_t i = first; i < last && i < recording.samples.size(); ++i) {
@@ -246,6 +248,7 @@ Capture run_decoder(const std::vector<std::int16_t>& samples, const DecoderConfi
     std::size_t consumed = 0;
     Sink sink = {&capture, &consumed};
     Decoder decoder(config, &on_event, &sink);
+    capture.lookahead = decoder.lookahead_samples();
     if (chunk == 0) {
         for (std::size_t i = 0; i < samples.size(); ++i) {
             consumed = i + 1;
@@ -269,7 +272,7 @@ double Score::loss() const {
     return bytes_sent == 0 ? 0.0 : static_cast<double>(lost_bytes) / static_cast<double>(bytes_sent);
 }
 
-Mapping map_events(const Recording& recording, const Capture& capture) {
+Mapping map_events(const Recording& recording, const Capture& capture, double delay_samples) {
     Mapping mapping;
     Score& s = mapping.score;
     for (std::size_t t = 0; t < recording.transmissions.size(); ++t) {
@@ -277,82 +280,55 @@ Mapping map_events(const Recording& recording, const Capture& capture) {
         mapping.received.push_back(std::vector<int>(recording.transmissions[t].data.size(), -1));
         mapping.byte_events.push_back(std::vector<Event>(recording.transmissions[t].data.size()));
     }
-
-    std::vector<std::size_t> segment;  // indices of the byte events of the current lock
-    bool late = false;
-    const auto close_segment = [&]() {
-        if (segment.empty()) return;
-        const long t = transmission_at(recording, capture.event_sample[segment.front()]);
-        long offset = 0;
-        if (t >= 0 && late) {
-            // A cold join counts bytes from the join: the offset where most of them match.
-            const std::vector<std::uint8_t>& data = recording.transmissions[t].data;
-            const long size = static_cast<long>(data.size());
-            std::size_t best = 0;
-            for (long o = -size; o < size; ++o) {
-                std::size_t matches = 0;
-                for (std::size_t i = 0; i < segment.size(); ++i) {
-                    const Event& e = capture.events[segment[i]];
-                    const long k = static_cast<long>(e.byte_index) + o;
-                    if (k >= 0 && k < size && data[k] == e.value) ++matches;
-                }
-                if (matches > best || (matches == best && std::labs(o) < std::labs(offset))) {
-                    best = matches;
-                    offset = o;
-                }
-            }
-            if (offset != 0) ++s.shifted_segments;
-        }
-        mapping.offsets.push_back(offset);
-        for (std::size_t i = 0; i < segment.size(); ++i) {
-            const Event& e = capture.events[segment[i]];
-            const long k = t < 0 ? -1 : static_cast<long>(e.byte_index) + offset;
-            if (t < 0 || k < 0 || k >= static_cast<long>(recording.transmissions[t].data.size()) ||
-                mapping.received[t][k] >= 0) {
-                ++s.extra_bytes;
-                continue;
-            }
-            mapping.received[t][k] = e.value;
-            mapping.byte_events[t][k] = e;
-            ++s.matched;
-            const int errors = popcount(static_cast<unsigned>(e.value ^ recording.transmissions[t].data[k]));
-            s.bit_errors += static_cast<std::size_t>(errors);
-            if (errors != 0) ++s.wrong_bytes;
-        }
-        segment.clear();
-    };
-
+    std::vector<bool> locked(recording.transmissions.size(), false);
+    long current = -1;  // the transmission of the open lock, -1 when none (bytes outside a lock are extra)
+    bool open = false;
     for (std::size_t i = 0; i < capture.events.size(); ++i) {
         const Event& e = capture.events[i];
         switch (e.type) {
-        case EventType::locked:
-            close_segment();
-            ++s.locks;
-            late = (e.flags & event_flag_late_join) != 0;
-            if (late) ++s.late_joins;
-            break;
-        case EventType::byte:
-            ++s.bytes_released;
-            if ((e.flags & (event_flag_flywheel_start | event_flag_flywheel_stop)) != 0) ++s.flywheel_bytes;
-            segment.push_back(i);
-            break;
-        case EventType::lost:
-            close_segment();
-            ++s.lost_events;
-            if (e.reason == LostReason::alias) ++s.alias_losts;
-            break;
-        case EventType::end:
-            close_segment();
-            ++s.ends;
-            break;
-        case EventType::state:
-        case EventType::slot:
-        case EventType::package:
-            break;
+            case EventType::locked:
+                ++s.locks;
+                open = true;
+                current = transmission_of_lock(recording, static_cast<double>(capture.event_sample[i]),
+                                               capture.lookahead, delay_samples);
+                break;
+            case EventType::byte: {
+                ++s.bytes_released;
+                const long t = open ? current : -1;
+                const long k = static_cast<long>(e.byte_index);
+                if (t < 0 || k >= static_cast<long>(recording.transmissions[static_cast<std::size_t>(t)].data.size()) ||
+                    mapping.received[static_cast<std::size_t>(t)][static_cast<std::size_t>(k)] >= 0) {
+                    ++s.extra_bytes;
+                    break;
+                }
+                const std::size_t tt = static_cast<std::size_t>(t);
+                const std::size_t kk = static_cast<std::size_t>(k);
+                if (kk == 0) locked[tt] = true;
+                mapping.received[tt][kk] = e.value;
+                mapping.byte_events[tt][kk] = e;
+                ++s.matched;
+                const int errors = popcount(static_cast<unsigned>(e.value ^ recording.transmissions[tt].data[kk]));
+                s.bit_errors += static_cast<std::size_t>(errors);
+                if (errors != 0) ++s.wrong_bytes;
+                break;
+            }
+            case EventType::slot:
+                if ((e.flags & event_flag_framing) != 0 && e.slot == k_first_data_slot) ++s.framing_windows;
+                break;
+            case EventType::lost:
+                ++s.lost_events;
+                open = false;
+                break;
+            case EventType::end:
+                ++s.ends;
+                open = false;
+                break;
+            case EventType::state:
+                break;
         }
     }
-    close_segment();
     for (std::size_t t = 0; t < mapping.received.size(); ++t) {
+        if (locked[t]) ++s.locked_transmissions;
         for (std::size_t k = 0; k < mapping.received[t].size(); ++k) {
             if (mapping.received[t][k] < 0) ++s.lost_bytes;
         }
@@ -360,8 +336,8 @@ Mapping map_events(const Recording& recording, const Capture& capture) {
     return mapping;
 }
 
-Score score(const Recording& recording, const Capture& capture) {
-    return map_events(recording, capture).score;
+Score score(const Recording& recording, const Capture& capture, double delay_samples) {
+    return map_events(recording, capture, delay_samples).score;
 }
 
 std::size_t count_events(const Capture& capture, EventType type) {

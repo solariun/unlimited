@@ -7,6 +7,17 @@ CXXFLAGS ?= -O2
 CXXFLAGS += -std=c++11 $(WARN) -MMD -MP
 INCLUDES  = -Isrc -Ipc -Itests
 
+# ── Platform: the live audio backend and the serial/PTY calls of pc/ (spec 12.5) ──
+# Linked into every program and test binary built from pc/; the core and check_embedded never see them.
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+PC_LIBS   = -framework CoreAudio -framework AudioToolbox -framework CoreFoundation
+else ifeq ($(UNAME_S),Linux)
+PC_LIBS   = -lasound -lpthread -lutil
+else
+PC_LIBS   = -lpthread
+endif
+
 # ── Directory layout ────────────────────────────────────────────────────────
 BUILDDIR  = build
 BINDIR    = bin
@@ -34,14 +45,9 @@ LONG_BIN    = $(BINDIR)/unlimited_regression
 
 # Core flags for the embedded check: no exceptions, no RTTI, freestanding-friendly.
 EMBED_FLAGS = -std=c++11 -O2 $(WARN) -fno-exceptions -fno-rtti -Isrc
-# Decoder builds check_embedded compiles besides the default cap (32; 16 on Arduino), spec 8.6 B1: caps 16 and 64,
-# each with its sizeof(Decoder) static_assert. '+' separates flags.
-DECODER_VARIANTS = -DUNLIMITED_MAX_BITS_PER_PACKAGE=16 \
-                   -DUNLIMITED_MAX_BITS_PER_PACKAGE=64
-DECODER_SRC = src/unlimited/decoder.cpp src/unlimited/dsp.cpp
-# Encoder queue sizes besides the default 64 (the AVR size gate B5 holds for any of them).
+# Encoder queue sizes besides the default 64 (the AVR size gate holds for any of them).
 QUEUE_VARIANTS = 16 128
-# AVR ISR gate (B5): tx_uno's ISR body, built as Arduino builds a sketch, run on tests/avr/isr_cycles.cpp's
+# AVR ISR gate (spec 3.9, 8): tx_uno's ISR body, built as Arduino builds a sketch, run on tests/avr/isr_cycles.cpp's
 # interpreter for each case of tests/avr/isr_cases.hpp.
 AVR_SKETCH_FLAGS = -std=c++11 -Os -flto $(WARN) -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
                    -fno-threadsafe-statics -mmcu=atmega328p -DF_CPU=16000000L -Isrc -Wl,--gc-sections
@@ -85,19 +91,19 @@ $(BUILDDIR)/%.o: %.cpp
 
 $(ENCODE_BIN): $(BUILDDIR)/demo/unlimited_encode.o $(PC_OBJ) $(LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(PC_LIBS)
 
 $(DECODE_BIN): $(BUILDDIR)/demo/unlimited_decode.o $(PC_OBJ) $(LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(PC_LIBS)
 
 $(TEST_BIN): $(TEST_OBJ) $(SUPPORT_OBJ) $(PC_OBJ) $(LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(PC_LIBS)
 
 $(LONG_BIN): $(MAIN_OBJ) $(LONG_OBJ) $(SUPPORT_OBJ) $(PC_OBJ) $(LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(PC_LIBS)
 
 test: $(TEST_BIN)
 	./$(TEST_BIN) $(FILTER)
@@ -120,22 +126,12 @@ check_embedded:
 		$(CXX) $(EMBED_FLAGS) $$f $(CORE_SRC) -o $(BUILDDIR)/embedded/$$(basename $$f .cpp) && \
 		./$(BUILDDIR)/embedded/$$(basename $$f .cpp) || exit 1; \
 	done
-	@for v in $(DECODER_VARIANTS); do \
-		flags=$$(echo $$v | tr '+' ' '); echo "  embedded decoder $$flags"; \
-		for f in $(DECODER_SRC); do $(CXX) $(EMBED_FLAGS) $$flags -c $$f -o /dev/null || exit 1; done; \
-	done
 	@if [ -n "$(ARM_GXX)" ]; then \
 		for f in $(CORE_SRC); do $(ARM_GXX) $(EMBED_FLAGS) -mcpu=cortex-m4 -mthumb -c $$f -o /dev/null || exit 1; done; \
-		for v in $(DECODER_VARIANTS); do for f in $(DECODER_SRC); do \
-			$(ARM_GXX) $(EMBED_FLAGS) $$(echo $$v | tr '+' ' ') -mcpu=cortex-m4 -mthumb -c $$f -o /dev/null || exit 1; \
-		done; done; \
 		echo "check_embedded: arm-none-eabi OK"; else echo "check_embedded: arm-none-eabi-g++ not found, skipped"; fi
 	@if [ -n "$(XTENSA_GXX)" ]; then \
 		for f in $(CORE_SRC); do $(XTENSA_GXX) $(EMBED_FLAGS) -mlongcalls -c $$f -o /dev/null || exit 1; done; \
-		for v in $(DECODER_VARIANTS); do for f in $(DECODER_SRC); do \
-			$(XTENSA_GXX) $(EMBED_FLAGS) $$(echo $$v | tr '+' ' ') -mlongcalls -c $$f -o /dev/null || exit 1; \
-		done; done; \
-		echo "check_embedded: xtensa-esp32 OK (decoder variants included)"; \
+		echo "check_embedded: xtensa-esp32 OK (the decoder's size static_assert included)"; \
 	else echo "check_embedded: xtensa-esp32-elf-g++ not found, skipped"; fi
 	@if [ -n "$(AVR_GXX)" ]; then \
 		for f in $(CORE_SRC); do $(AVR_GXX) $(EMBED_FLAGS) -mmcu=atmega328p -c $$f -o /dev/null || exit 1; done; \
@@ -182,35 +178,36 @@ arduino_check:
 	else echo "arduino_check: tx_uno has no float routine"; fi
 	@echo "arduino_check: all examples compile warning-free"
 
-# Encode → channel → decode round trips with the v0.3 presets (spec 7, L14): the text must come back exactly, and the
-# receiver is told neither T nor N (only its profile and passband). Each run: name, channel, receiver profile, preset,
-# SNR (dB; am/fm: carrier), TX sample rate, frequency offset (Hz; lsb: the shift after the inversion), then the extra
-# encoder and decoder options ('+' separates words, '-' = none). Then a configuration the sender must refuse.
+# Encode → channel → decode round trips (spec 7): the text must come back exactly. Both sides are told the same speed
+# (--bps); the receiver finds the pitch. Each run: name, channel, speed (bytes/s), SNR (dB; am/fm: carrier), TX sample
+# rate, frequency offset (Hz; lsb: the shift after the inversion), then the extra encoder and decoder options ('+'
+# separates words, '-' = none). Then a configuration the sender must refuse.
 DEMO_TEXT = CQ CQ DE UNLIMITED TEST 0123456789
 DEMO_DIR  = $(BUILDDIR)/demo_run
-DEMO_RUNS = "usb_hf usb ssb hf 10 8000 80 - -" \
-            "lsb_hf_fast lsb ssb hf_fast 10 48000 -150 - -" \
-            "usb_hf_slow_narrow usb ssb hf_slow 8 8000 50 --tone+1200+--passband+300:2100 --passband+300:2100" \
-            "usb_n32 usb ssb hf 12 8000 80 --bits+32 -" \
-            "am_am am am am 10 8000 80 --packet --packet" \
-            "fm_fm fm fm fm 20 8000 80 - -"
-# hf_fast occupies 550 Hz (1225-1775 Hz): it cannot fit a 500 Hz passband.
-DEMO_REFUSED = --preset hf_fast --passband 1250:1750
+DEMO_RUNS = "usb_6 usb 6 10 8000 80 - -" \
+            "lsb_12_48k lsb 12 13 48000 -150 - -" \
+            "usb_1_narrow usb 1 0 8000 40 --tone+1200+--passband+300:2100 --passband+300:2100" \
+            "usb_3_vox usb 3 6 8000 -35 --vox-lead-ms+150 -" \
+            "usb_6_auto usb 6 8 22050 25 - --threshold+auto" \
+            "am_12 am 12 12 8000 60 --passband+100:3000 --passband+100:3000" \
+            "fm_25 fm 25 22 8000 60 --passband+300:3000 --passband+300:3000"
+# 25 bytes/s occupies 1100 Hz (950-2050 Hz): it cannot fit a 500 Hz passband.
+DEMO_REFUSED = --bps 25 --passband 1250:1750
 demo_run: demo
 	@mkdir -p $(DEMO_DIR)
 	@printf '%s' "$(DEMO_TEXT)" > $(DEMO_DIR)/expect.txt
 	@for run in $(DEMO_RUNS); do \
-		set -- $$run; name=$$1; ch=$$2; profile=$$3; preset=$$4; snr=$$5; rate=$$6; offset=$$7; \
-		tx=$$(echo "$$8" | tr '+' ' '); rx=$$(echo "$$9" | tr '+' ' '); \
+		set -- $$run; name=$$1; ch=$$2; speed=$$3; snr=$$4; rate=$$5; offset=$$6; \
+		tx=$$(echo "$$7" | tr '+' ' '); rx=$$(echo "$$8" | tr '+' ' '); \
 		if [ "$$tx" = - ]; then tx=; fi; if [ "$$rx" = - ]; then rx=; fi; \
-		echo "== $$name: $$ch channel, preset $$preset$${tx:+ $$tx}, receiver profile $$profile$${rx:+ $$rx}, SNR $$snr dB, offset $$offset Hz, TX rate $$rate Hz"; \
-		./$(ENCODE_BIN) --text "$(DEMO_TEXT)" --preset $$preset --rate $$rate $$tx \
+		echo "== $$name: $$ch channel, $$speed bytes/s$${tx:+ $$tx}$${rx:+, receiver $$rx}, SNR $$snr dB, offset $$offset Hz, TX rate $$rate Hz"; \
+		./$(ENCODE_BIN) --text "$(DEMO_TEXT)" --bps $$speed --rate $$rate $$tx \
 			--channel $$ch --snr $$snr --offset $$offset --out $(DEMO_DIR)/$$name.wav \
 			--clean-out $(DEMO_DIR)/$${name}_clean.wav || exit 1; \
-		./$(DECODE_BIN) --in $(DEMO_DIR)/$$name.wav --profile $$profile $$rx \
+		./$(DECODE_BIN) --in $(DEMO_DIR)/$$name.wav --bps $$speed $$rx \
 			--expect $(DEMO_DIR)/expect.txt || exit 1; \
 	done
-	@echo "== refused: $(DEMO_REFUSED) (550 Hz of signal in a 500 Hz passband) must fail with exit code 2"
+	@echo "== refused: $(DEMO_REFUSED) (1100 Hz of signal in a 500 Hz passband) must fail with exit code 2"
 	@./$(ENCODE_BIN) --text "$(DEMO_TEXT)" $(DEMO_REFUSED) --out $(DEMO_DIR)/refused.wav 2> $(DEMO_DIR)/refused.txt; \
 		status=$$?; cat $(DEMO_DIR)/refused.txt; \
 		if [ $$status -ne 2 ] || ! grep -q "does not fit" $(DEMO_DIR)/refused.txt; then \
@@ -232,7 +229,7 @@ $(GEN_TABLES): tools/gen_tables.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-# Documentation generated from the library itself (spec 12.2): tools/doc_examples.cpp prints the bit-exact protocol
+# Documentation generated from the library itself (spec 8): tools/doc_examples.cpp prints the bit-exact protocol
 # examples of docs/protocol_examples.md; tools/doc_figures.cpp draws docs/images/*.svg from the real Encoder,
 # sim::Channel and Decoder (the BER figure runs the chain on every core). Both stop with an error when the library
 # disagrees with an example of spec.md. Everything is built in $(DOCS_BUILD) first; docs/ is replaced only when both
@@ -253,7 +250,7 @@ docs: $(DOC_FIGURES) $(DOC_EXAMPLES)
 
 $(DOC_FIGURES): $(BUILDDIR)/tools/doc_figures.o $(SUPPORT_OBJ) $(PC_OBJ) $(LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(PC_LIBS)
 
 $(DOC_EXAMPLES): $(BUILDDIR)/tools/doc_examples.o $(LIB_DEP)
 	@mkdir -p $(dir $@)

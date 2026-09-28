@@ -2,7 +2,6 @@
 
 #include "unlimited/decoder.hpp"
 #include "unlimited/encoder.hpp"
-#include "unlimited/packet.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -18,9 +17,9 @@
 #include <string>
 #include <vector>
 
-// Command-line helpers shared by the demos: argument reader, number parsing, name tables, the bandwidth line, the
-// plain-words reason for a refused configuration, file reading, the --packet framing and the console that holds lines
-// while the TUI owns the screen.
+// Command-line helpers shared by the demos: argument reader, number parsing, name tables, the speed and bandwidth
+// lines, the plain-words reason for a refused configuration, file reading and the console that holds lines while the
+// TUI owns the screen.
 namespace unlimited {
 namespace cli {
 
@@ -28,12 +27,15 @@ const int k_exit_ok = 0;
 const int k_exit_usage = 2;
 const int k_exit_io = 3;
 
-const int k_range_decimals = 1;  // how an out-of-range value is printed
-const int k_ms_max_decimals = 3; // a T given in ms, to the µs
-const int k_baud_decimals = 2;
+const int k_range_decimals = 1;   // how an out-of-range value is printed
+const int k_ms_max_decimals = 3;  // a T in ms, to the µs
+const int k_speed_decimals = 2;   // bytes/s, the resolution of spec 1.3
+const int k_bit_rate_decimals = 2;
 const double k_us_per_ms = 1e3;
 const double k_ms_per_s = 1e3;
-const uint32_t k_us_per_ms_int = 1000;
+const double k_percent = 100.0;
+const double k_bits_per_byte_f = 8.0;
+const char* const k_auto_threshold = "auto";
 
 class UsageError : public std::runtime_error {
 public:
@@ -55,7 +57,7 @@ inline std::string trimmed(double value, int max_decimals) {
     return text;
 }
 
-// A duration in ms, to the µs: 16, 12.5, 16.001.
+// A duration in ms, to the µs: 16, 12.5, 16.667.
 inline std::string ms_text(double ms) {
     return trimmed(ms, k_ms_max_decimals);
 }
@@ -132,38 +134,6 @@ const T& find_name(const T (&table)[N], const std::string& option, const std::st
     throw UsageError(option + ": '" + name + "' is not one of " + names);
 }
 
-template <typename T, std::size_t N, typename V>
-const char* name_of(const T (&table)[N], V value) {
-    for (std::size_t i = 0; i < N; ++i)
-        if (table[i].value == value) return table[i].name;
-    return "?";
-}
-
-struct PresetName {
-    const char* name;
-    Preset value;
-};
-
-const PresetName k_presets[] = {{"hf_slow", Preset::hf_slow},
-                                {"hf", Preset::hf},
-                                {"hf_fast", Preset::hf_fast},
-                                {"am", Preset::am},
-                                {"fm", Preset::fm}};
-
-struct ProfileName {
-    const char* name;
-    Profile value;
-};
-
-const ProfileName k_profiles[] = {{"ssb", Profile::ssb}, {"am", Profile::am}, {"fm", Profile::fm}};
-
-struct RuleName {
-    const char* name;
-    DecisionMode value;
-};
-
-const RuleName k_rules[] = {{"adaptive", DecisionMode::adaptive}, {"fixed", DecisionMode::fixed_ratio}};
-
 // "300:2700" -> {300, 2700}; each edge a whole number of Hz (check() judges the pair).
 inline Passband to_passband(const std::string& option, const std::string& text) {
     const std::vector<double> edges = to_fields(option, text, 2, 2);
@@ -173,13 +143,37 @@ inline Passband to_passband(const std::string& option, const std::string& text) 
     return passband;
 }
 
+// --bps B: the slot of B rounded to 0.01 bytes/s (spec 1.3). A speed outside 1..25 gives a slot outside the range,
+// which check() refuses in plain words.
+inline uint32_t to_slot_us(const std::string& option, const std::string& text) {
+    const double speed = to_number(option, text);
+    if (!(speed > 0.0)) throw UsageError(option + ": the speed must be above 0 bytes/s");
+    return slot_us_for_centi_speed(to_clamped<uint16_t>(speed * k_percent));
+}
+
+// --threshold PCT|auto: the fixed line at PCT % of the reference, or the adaptive line.
+inline void to_threshold(const std::string& option, const std::string& text, DecoderConfig& config) {
+    if (text == k_auto_threshold) {
+        config.decision_mode = DecisionMode::adaptive;
+        return;
+    }
+    config.decision_mode = DecisionMode::fixed;
+    config.threshold_percent = to_clamped<uint8_t>(to_number(option, text));
+}
+
 inline double slot_ms_of(uint32_t slot_us) {
     return slot_us / k_us_per_ms;
 }
 
-// Net rate (spec 1.7): N bits per (N + 1) slots of T.
-inline double net_bit_rate(unsigned bits_per_package, double slot_ms) {
-    return slot_ms > 0.0 ? bits_per_package * k_ms_per_s / ((bits_per_package + 1) * slot_ms) : 0.0;
+inline std::string speed_number(uint32_t slot_us) {
+    return fixed(bytes_per_second(slot_us), k_speed_decimals);
+}
+
+// "6.00 bytes/s = 48 bit/s, slot T 16.667 ms"
+inline std::string speed_text(uint32_t slot_us) {
+    const double speed = bytes_per_second(slot_us);
+    return speed_number(slot_us) + " bytes/s = " + trimmed(k_bits_per_byte_f * speed, k_bit_rate_decimals) +
+           " bit/s, slot T " + ms_text(slot_ms_of(slot_us)) + " ms";
 }
 
 inline std::string range_text(uint16_t low_hz, uint16_t high_hz) {
@@ -190,15 +184,9 @@ inline std::string passband_text(const Passband& passband) {
     return range_text(passband.low_hz, passband.high_hz) + " Hz";
 }
 
-// Half of the occupied band at slot_us: the room a pitch needs from each passband edge.
-inline uint16_t half_band_hz(uint32_t slot_us) {
-    const Band band = occupied_band(k_default_tone_hz, slot_us);
-    return static_cast<uint16_t>(band.width_hz / 2);
-}
-
-// The bandwidth line (spec 7), e.g. "occupied bandwidth 276 Hz (1362-1638 Hz); passband 300-2700 Hz: fits; shift
-// tolerance -1062/+1062 Hz". The tolerance is how far the pitch may move down / up (mistuning) and still be heard:
-// `fit` is passband_fit() limited by the receiver's pitch search (spec 1.5), never the pure filter fit.
+// The bandwidth line (spec 1.3), e.g. "occupied bandwidth 264 Hz (1368-1632 Hz); passband 300-2700 Hz: fits; shift
+// tolerance -1068/+1068 Hz". The tolerance is how far the pitch may move down / up (mistuning) and still be heard:
+// `fit` is passband_fit() limited by the receiver's pitch search, never the pure filter fit.
 inline std::string bandwidth_line(const Band& band, const Passband& passband, const PassbandFit& fit) {
     const std::string line = "occupied bandwidth " + std::to_string(band.width_hz) + " Hz (" +
                              range_text(band.low_hz, band.high_hz) + " Hz); passband " + passband_text(passband) +
@@ -229,11 +217,6 @@ inline uint32_t received_slot_us(float slot_ms) {
     return static_cast<uint32_t>(std::lround(std::max(0.0f, slot_ms) * k_us_per_ms));
 }
 
-// The band a received signal occupies.
-inline Band received_band(float tone_hz, float slot_ms) {
-    return occupied_band(received_tone_hz(tone_hz), received_slot_us(slot_ms));
-}
-
 // The receiver's line: the received signal against its own passband, the tolerance limited by its own pitch search.
 inline std::string bandwidth_line(const DecoderConfig& config, float tone_hz, float slot_ms) {
     const uint16_t tone = received_tone_hz(tone_hz);
@@ -247,14 +230,14 @@ inline std::string outside_passband_problem(const EncoderConfig& config) {
     const Band band = occupied_band(config);
     const uint16_t half = static_cast<uint16_t>(band.width_hz / 2);
     const int passband_width = config.passband.high_hz - config.passband.low_hz;
-    const std::string what = "the signal does not fit the receiver's passband: at T = " +
-                             ms_text(slot_ms_of(config.slot_us)) + " ms it is " + std::to_string(band.width_hz) +
-                             " Hz wide (" + range_text(band.low_hz, band.high_hz) + " Hz around the pitch " +
+    const std::string what = "the signal does not fit the receiver's passband: at " + speed_number(config.slot_us) +
+                             " bytes/s it is " + std::to_string(band.width_hz) + " Hz wide (" +
+                             range_text(band.low_hz, band.high_hz) + " Hz around the pitch " +
                              std::to_string(config.tone_hz) + " Hz) and the passband is " +
                              passband_text(config.passband);
     if (band.width_hz > passband_width)
         return what + ", only " + std::to_string(passband_width) +
-               " Hz wide; use longer slots (--slot-ms, or a slower --preset) or a wider --passband";
+               " Hz wide; use a slower speed (--bps) or a wider --passband";
     const int lowest = std::max<int>(config.passband.low_hz + half, k_min_tone_hz);
     const int highest = std::min<int>(config.passband.high_hz - half, k_max_tone_hz);
     if (lowest > highest)
@@ -263,10 +246,20 @@ inline std::string outside_passband_problem(const EncoderConfig& config) {
     return what + "; move --tone to " + std::to_string(lowest) + ".." + std::to_string(highest) + " Hz";
 }
 
+inline std::string slot_problem(uint32_t slot_us) {
+    return "the speed " + speed_number(slot_us) + " bytes/s is outside " +
+           fixed(k_min_bytes_per_second, k_speed_decimals) + ".." + fixed(k_max_bytes_per_second, k_speed_decimals) +
+           " bytes/s (--bps)";
+}
+
+inline std::string passband_problem(const Passband& passband) {
+    return "the passband " + passband_text(passband) + " is not valid: it needs LO < HI <= " +
+           std::to_string(k_max_passband_hz) + " Hz (--passband LO:HI)";
+}
+
 // The EncoderConfig::check() rule `config` breaks, in plain words with the option to change (spec 7); empty when
 // valid. Every ConfigError has its text; the receiver-only ones cannot come from an encoder.
 inline std::string encoder_problem(const EncoderConfig& config) {
-    const double slot_ms = slot_ms_of(config.slot_us);
     switch (config.check()) {
     case ConfigError::none:
         return "";
@@ -277,38 +270,15 @@ inline std::string encoder_problem(const EncoderConfig& config) {
         return "the pitch " + std::to_string(config.tone_hz) + " Hz is outside " + std::to_string(k_min_tone_hz) +
                ".." + std::to_string(k_max_tone_hz) + " Hz (--tone)";
     case ConfigError::slot:
-        return "the slot length T = " + ms_text(slot_ms) + " ms is outside " +
-               ms_text(slot_ms_of(k_min_slot_us)) + ".." + ms_text(slot_ms_of(k_max_slot_us)) +
-               " ms (--slot-ms; --baud is 1000/T)";
-    case ConfigError::fast_tone:
-        return "slots shorter than " + ms_text(slot_ms_of(k_fast_slot_us)) + " ms need a pitch of at least " +
-               std::to_string(k_min_fast_tone_hz) + " Hz, and the pitch is " + std::to_string(config.tone_hz) +
-               " Hz: raise --tone or use longer slots (--slot-ms)";
-    case ConfigError::bits_per_package:
-        return "the bits per package N = " + std::to_string(config.bits_per_package) + " is outside " +
-               std::to_string(k_min_bits_per_package) + ".." + std::to_string(k_max_bits_per_package) + " (--bits)";
-    case ConfigError::package_length: {
-        const uint32_t most = static_cast<uint32_t>(k_max_package_us / config.slot_us) - 1;
-        return "a package of " + std::to_string(config.bits_per_package) + " bits at T = " + ms_text(slot_ms) +
-               " ms lasts (N + 1) x T = " + ms_text((config.bits_per_package + 1u) * slot_ms) +
-               " ms, more than the " + ms_text(slot_ms_of(k_max_package_us)) + " ms limit: use --bits " +
-               std::to_string(std::min<uint32_t>(most, k_max_bits_per_package)) +
-               " or less, or shorter slots (--slot-ms)";
-    }
+        return slot_problem(config.slot_us);
     case ConfigError::passband:
-        return "the passband " + passband_text(config.passband) + " is not valid: it needs LO < HI <= " +
-               std::to_string(k_max_passband_hz) + " Hz (--passband LO:HI)";
+        return passband_problem(config.passband);
     case ConfigError::outside_passband:
         return outside_passband_problem(config);
-    case ConfigError::sync_markers:
-        return "the sync train must have " + std::to_string(k_min_sync_markers) + ".." +
-               std::to_string(k_max_sync_markers) + " markers, not " + std::to_string(config.sync_markers) +
-               " (--sync)";
     case ConfigError::amplitude:
         return "the level is too low: the beep's crest rounds to 0 (--level-dbfs)";
-    case ConfigError::min_slot:
+    case ConfigError::threshold:
     case ConfigError::decision_mode:
-    case ConfigError::fixed_ratio:
         return "a receiver setting was refused";
     }
     return "the encoder refuses this combination";
@@ -319,46 +289,35 @@ inline std::string decoder_problem(const DecoderConfig& config) {
     switch (config.check()) {
     case ConfigError::none:
         return "";
-    case ConfigError::min_slot:
-        return "the shortest slot must be " + std::to_string(k_min_window_slot_ms) + ".." +
-               std::to_string(k_max_window_slot_ms) + " ms, not " + std::to_string(config.min_slot_ms) +
-               " (--min-slot-ms N: the receiver then hears slots of N.." + std::to_string(k_speed_span) + "N ms)";
+    case ConfigError::slot:
+        return slot_problem(config.slot_us);
     case ConfigError::passband: {
-        if (!passband_valid(config.passband))
-            return "the passband " + passband_text(config.passband) + " is not valid: it needs LO < HI <= " +
-                   std::to_string(k_max_passband_hz) + " Hz (--passband LO:HI)";
-        const uint32_t slowest_us = static_cast<uint32_t>(config.max_slot_ms()) * k_us_per_ms_int;
-        const bool fast = static_cast<uint32_t>(config.min_slot_ms) * k_us_per_ms_int < k_fast_slot_us;
-        return "the passband " + passband_text(config.passband) + " leaves no pitch to search for: the search keeps " +
-               std::to_string(half_band_hz(slowest_us)) + " Hz from each edge (half the band of " +
-               std::to_string(config.max_slot_ms()) + " ms slots) and stays within " +
-               std::to_string(fast ? k_min_fast_tone_hz : k_min_tone_hz) + ".." + std::to_string(k_max_tone_hz) +
-               " Hz; widen --passband";
+        if (!passband_valid(config.passband)) return passband_problem(config.passband);
+        const Band band = occupied_band(k_default_tone_hz, config.slot_us);
+        return "the passband " + passband_text(config.passband) + " leaves no pitch to search for at " +
+               speed_number(config.slot_us) + " bytes/s: the search keeps " + std::to_string(band.width_hz / 2) +
+               " Hz from each edge (half the occupied band) and stays within " + std::to_string(k_min_tone_hz) +
+               ".." + std::to_string(k_max_tone_hz) + " Hz; widen --passband or use a slower --bps";
     }
+    case ConfigError::threshold:
+        return "the decision threshold " + std::to_string(config.threshold_percent) + " % is outside " +
+               std::to_string(k_min_threshold_percent) + ".." + std::to_string(k_max_threshold_percent) +
+               " % of the reference (--threshold PCT, or auto)";
     case ConfigError::decision_mode:
-        return "the decision rule must be adaptive or fixed (--rule)";
-    case ConfigError::fixed_ratio:
-        return "the fixed decision line must lie between 0 and 1 of the reference line, not " +
-               fixed(config.fixed_ratio, 2) + " (--ratio, e.g. 0.70)";
+        return "the decision rule must be fixed or adaptive (--threshold PCT or auto)";
     case ConfigError::sample_rate:
     case ConfigError::tone:
-    case ConfigError::slot:
-    case ConfigError::fast_tone:
-    case ConfigError::bits_per_package:
-    case ConfigError::package_length:
     case ConfigError::outside_passband:
-    case ConfigError::sync_markers:
     case ConfigError::amplitude:
         return "a sender setting was refused";
     }
     return "the decoder refuses this combination";
 }
 
-// "smart decision line" or "fixed decision line at 70 %".
-inline std::string rule_text(const DecoderConfig& config) {
-    if (config.decision_mode == DecisionMode::fixed_ratio)
-        return "fixed decision line at " + fixed(100.0 * config.fixed_ratio, 0) + " % of the reference";
-    return "smart decision line";
+// "decision line at 70 % of the reference" or "adaptive decision line (auto)".
+inline std::string threshold_text(const DecoderConfig& config) {
+    if (config.decision_mode == DecisionMode::adaptive) return "adaptive decision line (auto: 50-75 % of the reference)";
+    return "decision line at " + std::to_string(config.threshold_percent) + " % of the reference";
 }
 
 inline bool read_file(const std::string& path, std::vector<std::uint8_t>& data) {
@@ -366,21 +325,6 @@ inline bool read_file(const std::string& path, std::vector<std::uint8_t>& data) 
     if (!file) return false;
     data.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     return !file.bad();
-}
-
-// The framing of unlimited_encode --packet: consecutive packets of up to k_packet_max_payload bytes.
-// Returns the number of packets.
-inline std::size_t packetize(const std::vector<std::uint8_t>& payload, std::vector<std::uint8_t>& framed) {
-    framed.clear();
-    std::size_t packets = 0;
-    for (std::size_t position = 0; position < payload.size(); ++packets) {
-        const std::size_t size = std::min<std::size_t>(k_packet_max_payload, payload.size() - position);
-        const std::size_t start = framed.size();
-        framed.resize(start + size + k_packet_overhead);
-        packet_build(&payload[position], static_cast<std::uint16_t>(size), &framed[start], size + k_packet_overhead);
-        position += size;
-    }
-    return packets;
 }
 
 // Lines go to stdout at once, or wait while the TUI owns the screen.

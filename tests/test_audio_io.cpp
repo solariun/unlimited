@@ -14,7 +14,6 @@ using unlimited::ByteSource;
 using unlimited::Encoder;
 using unlimited::EncoderConfig;
 using unlimited::EncoderSource;
-using unlimited::Preset;
 using unlimited::SampleSink;
 using unlimited::SampleSource;
 using unlimited::WavOutput;
@@ -24,6 +23,14 @@ using unlimited::k_wav_header_bytes;
 using unlimited::k_wav_unknown_size;
 
 namespace {
+
+// A sender at `speed` bytes/s and `rate` Hz (1500 Hz in the default 300..2700 Hz passband).
+unlimited::EncoderConfig at_speed(float speed, uint32_t rate) {
+    unlimited::EncoderConfig config;
+    config.sample_rate_hz = rate;
+    config.slot_us = unlimited::slot_us_for_speed(speed);
+    return config;
+}
 
 using std::int16_t;
 using std::size_t;
@@ -120,13 +127,13 @@ uint32_t u32_at(const Bytes& bytes, size_t offset) {
 }  // namespace
 
 TEST(audio_io_encoder_source_returns_duration_then_zero) {
-    const Preset presets[] = {Preset::fm, Preset::hf};
+    const float speeds[] = {25.0f, 6.0f};
     const uint32_t rates[] = {8000, 44100};
     const size_t chunks[] = {1, 100, 4096};
     const std::vector<uint8_t> data = message();
-    for (size_t p = 0; p < count_of(presets); ++p) {
+    for (size_t p = 0; p < count_of(speeds); ++p) {
         for (size_t r = 0; r < count_of(rates); ++r) {
-            const EncoderConfig config = EncoderConfig::from_preset(presets[p], rates[r]);
+            const EncoderConfig config = at_speed(speeds[p], rates[r]);
             const std::vector<int16_t> direct = render_direct(config, data);
             for (size_t c = 0; c < count_of(chunks); ++c) {
                 Encoder encoder(config);
@@ -152,7 +159,7 @@ TEST(audio_io_encoder_source_idle_encoder_reads_zero) {
 }
 
 TEST(audio_io_wav_output_writes_readable_wav) {
-    const EncoderConfig config = EncoderConfig::from_preset(Preset::hf_fast, 11025);
+    const EncoderConfig config = at_speed(12.0f, 11025);
     const std::vector<uint8_t> data = message();
     const std::vector<int16_t> direct = render_direct(config, data);
 

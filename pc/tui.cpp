@@ -31,7 +31,6 @@ const double k_hann_coherent_gain = 0.5;
 const double k_goertzel_coefficient_scale = 2.0;
 const float k_percent = 100.0f;
 const int k_format_buffer = 64;
-const unsigned k_bits_per_byte_u = k_bits_per_byte;
 
 // Display precision (decimals)
 const int k_hz_decimals = 1;
@@ -72,9 +71,9 @@ const uint32_t k_glyph_axis_tick = 0x2524;
 const uint32_t k_glyph_corner_left = 0x2514;     // bracket under the bits of a byte
 const uint32_t k_glyph_corner_right = 0x2518;
 const uint32_t k_glyph_caret = 0x25B2;           // current slot, the pitch on the spectrum
-const uint32_t k_glyph_marker = 0x25C6;          // START / STOP / sync / END marker
-const uint32_t k_glyph_flywheel = 0x25C7;        // a marker the receiver did not detect, or not sent yet
-const uint32_t k_glyph_tune = '~';
+const uint32_t k_glyph_marker = 0x25C6;          // START / STOP
+const uint32_t k_glyph_missing = 0x25C7;         // a START or STOP the receiver did not find, or not sent yet
+const uint32_t k_glyph_lead = '~';               // the VOX lead's steady tone
 const uint32_t k_glyph_one = '1';
 const uint32_t k_glyph_zero = '0';
 const uint32_t k_glyph_band = 0x2591;            // the occupied band on the spectrum
@@ -110,7 +109,7 @@ const uint8_t k_braille_bits[k_braille_dot_columns][k_braille_dot_rows] = {{0x01
                                                                             {0x08, 0x10, 0x20, 0x80}};
 const int k_eighths = 8;  // block elements resolve a text row in eighths
 
-// Layout: rows of each panel; the scope, packages, spectrum and text panels have one title row.
+// Layout: rows of each panel; the scope, windows, spectrum and text panels have one title row.
 const int k_title_rows = 1;
 const int k_status_rows_min = 1;
 const int k_status_rows_preferred = 2;
@@ -137,7 +136,7 @@ const int k_scope_min_columns = 4;
 const int k_title_lead = 2;     // rule cells before a panel title
 const int k_status_margin = 1;  // blank cell before the status text
 
-// Packages panel: a cell is its bar plus one gap column; the widest cell that fits the newest package is used.
+// Windows panel: a cell is its bar plus one gap column; the widest cell that fits the newest window is used.
 const int k_cell_widths[] = {3, 2, 1};
 const int k_gap_columns = 1;
 const int k_min_cell_columns = 2;
@@ -147,10 +146,12 @@ const int k_axis_columns = k_axis_label_columns + 1;
 const float k_reference_share = 2.0f / 3.0f;  // rows below the reference crest: the bars reach about 150 %
 const float k_reference_pct = 100.0f;
 const float k_weak_margin = 0.125f;     // a bit within 12.5 % of its decision line (event_flag_weak)
-const int k_max_strip_slots = 40;       // data slots shown at most (spec 6.5)
-const size_t k_max_packages = 40;       // decoder packages kept
-const size_t k_max_byte_views = 256;
+const uint8_t k_marker_pct = 50;        // a START or STOP under half the running reference is missing (spec 3.6)
+const int k_max_strip_slots = 40;       // slots shown at most (spec 6): four windows
+const size_t k_max_windows = 40;        // decoder windows kept
 const size_t k_max_sent_slots = 256;    // encoder slots kept
+const double k_bits_per_second_per_byte = 8.0;
+const int k_speed_decimals = 2;
 const int k_no_cell = -1;
 const int k_no_group = -1;
 const unsigned k_group_key_shift = 32;
@@ -303,7 +304,6 @@ const char* state_name(DecoderState state) {
     switch (state) {
     case DecoderState::search: return "SEARCH";
     case DecoderState::acquire: return "ACQUIRE";
-    case DecoderState::preamble: return "PREAMBLE";
     case DecoderState::track: return "TRACK";
     }
     return "?";
@@ -312,11 +312,8 @@ const char* state_name(DecoderState state) {
 const char* reason_name(LostReason reason) {
     switch (reason) {
     case LostReason::none: return "none";
-    case LostReason::signal_gone: return "signal gone";
-    case LostReason::alias: return "alias";
-    case LostReason::preamble_timeout: return "preamble timeout";
+    case LostReason::framing: return "framing errors";
     case LostReason::reset: return "reset";
-    case LostReason::unsupported: return "unsupported N";
     }
     return "?";
 }
@@ -325,10 +322,9 @@ const char* segment_name(EncoderSegment segment) {
     switch (segment) {
     case EncoderSegment::idle: return "idle";
     case EncoderSegment::lead_in: return "lead-in";
-    case EncoderSegment::tune: return "tune";
-    case EncoderSegment::sync: return "sync";
-    case EncoderSegment::package: return "package";
-    case EncoderSegment::end: return "end";
+    case EncoderSegment::vox_lead: return "VOX lead";
+    case EncoderSegment::gap: return "gap";
+    case EncoderSegment::window: return "window";
     case EncoderSegment::tail: return "tail";
     }
     return "?";
@@ -341,20 +337,13 @@ std::string upper(const std::string& text) {
     return out;
 }
 
-// Flags of a byte or a package in words.
+// Flags of a byte or a window in words.
 std::string flag_text(uint8_t flags) {
     std::string text;
-    if (flags & event_flag_late_join) text += "  late join";
-    if (flags & event_flag_flywheel_start) text += "  START flywheeled";
-    if (flags & event_flag_flywheel_stop) text += "  STOP flywheeled";
+    if (flags & event_flag_framing) text += "  framing error";
     if (flags & event_flag_blanked) text += "  blanked";
     if (flags & event_flag_weak) text += "  weak bit";
     return text;
-}
-
-// Net rate (spec 1.7): N bits per (N + 1) slots of T.
-double net_bit_rate(unsigned bits_per_package, double slot_ms) {
-    return bits_per_package * k_ms_per_s / ((bits_per_package + 1) * slot_ms);
 }
 
 std::string range_text(unsigned low_hz, unsigned high_hz) {
@@ -510,7 +499,7 @@ int level_row(double level, double top, int rows) {
 struct Layout {
     int status;           // rows
     int scope;            // braille rows, 0 = hidden
-    int bars;             // package bar rows, 0 = hidden
+    int bars;             // window bar rows, 0 = hidden
     int spectrum;         // spectrum bar rows, 0 = hidden
     int spectrum_labels;  // frequency label rows
     int text;             // text rows, 0 = hidden
@@ -534,7 +523,7 @@ Layout plan_layout(int columns, int rows, int footer_rows) {
     if (columns <= 0 || rows <= 0) return layout;
     int free_rows = rows - k_status_rows_min;
     layout.status = k_status_rows_min;
-    // Priority: status, text, packages, spectrum, scope.
+    // Priority: status, text, windows, spectrum, scope.
     reserve(layout.text, k_text_rows_min, k_title_rows, true, free_rows);
     reserve(layout.bars, k_bar_rows_min, k_title_rows + footer_rows, true, free_rows);
     reserve(layout.spectrum, k_spectrum_rows_min, k_title_rows + k_spectrum_marker_rows,
@@ -778,14 +767,14 @@ void draw_spectrum(Canvas& canvas, int top, int bar_rows, int label_rows, const 
 }
 
 // ===========================================================================
-// Packages panel: bars, reference and decision lines, bits and bytes
+// Windows panel: bars, reference and decision lines, bits and bytes
 // ===========================================================================
 
 enum class CellKind : uint8_t { spacer, silent, tone, marker, data, pending };
 
 struct StripCell {
     CellKind kind;
-    float level;       // bar height, % of the reference crest
+    float level;       // bar height, % of the running reference
     Color bar_color;
     uint32_t glyph;    // under the bar
     Color glyph_color;
@@ -793,7 +782,7 @@ struct StripCell {
     bool joined;       // a continuous tone: the gap column after it is filled too
 };
 
-// One package: the reference line from the START crest to the STOP crest, and the decision line over its bits.
+// One window: the reference line from the START level to the STOP level, and the decision line over its bits.
 struct StripSpan {
     int start_cell;
     int stop_cell;
@@ -812,9 +801,9 @@ struct Strip {
     std::vector<StripCell> cells;
     std::vector<StripSpan> spans;
     std::vector<StripGroup> groups;
-    std::vector<int> starts;  // cells a view may begin at (whole packages); empty: any cell
+    std::vector<int> starts;  // cells a view may begin at (whole windows); empty: any cell
     int current;              // cell under the caret, k_no_cell for none
-    int fit_cells;            // cells the chosen width must fit: the newest package with its markers
+    int fit_cells;            // cells the chosen width must fit: the newest window
     bool caret_row;
 };
 
@@ -860,93 +849,85 @@ uint64_t group_key(uint32_t generation, bool segment, uint32_t value) {
            (static_cast<uint64_t>(segment ? 1 : 0) << k_group_key_shift) | value;
 }
 
-enum class SegmentKey : uint32_t { lead_in = 1, tune, sync, end, tail };
+enum class SegmentKey : uint32_t { lead_in = 1, vox_lead, gap, tail };
 
-// The group of the slots of a segment (tune, sync, END, lead-in, tail) of transmission `generation`.
+// The group of the slots of a segment (lead-in, VOX lead, gap, tail) of transmission `generation`.
 int segment_group(Groups& groups, uint32_t generation, SegmentKey key, const char* wide, const char* narrow,
                   Color color) {
     return groups.of(group_key(generation, true, static_cast<uint32_t>(key)), labels_of(wide, narrow), color);
 }
 
-const Tui::ByteView* find_byte(const std::deque<Tui::ByteView>& bytes, uint32_t generation, uint32_t byte_index) {
-    for (size_t i = bytes.size(); i > 0; --i) {
-        const Tui::ByteView& view = bytes[i - 1];
-        if (view.generation == generation && view.byte_index == byte_index) return &view;
-    }
-    return nullptr;
+uint32_t marker_glyph(uint8_t pct) {
+    return pct >= k_marker_pct ? k_glyph_marker : k_glyph_missing;
 }
 
-// Decoder: the newest packages with at most k_max_strip_slots data slots (at least one package). Levels are drawn in
-// % of the running marker reference: a slot's reference is the START-STOP line at its place (spec 3.10), its bar
-// level_pct of that and its decision line threshold_pct of that.
-Strip decoder_strip(const std::deque<Tui::PackageView>& packages, const std::deque<Tui::ByteView>& bytes) {
+// Decoder: the newest windows, at most k_max_strip_slots slots (at least one window). Levels are drawn in % of the
+// running reference: a slot's reference is the START-STOP line at its place (spec 3.5), its bar level_pct of that and
+// its decision line threshold_pct of that.
+Strip decoder_strip(const std::deque<Tui::WindowView>& windows) {
     Strip strip;
     strip.current = k_no_cell;
     strip.caret_row = false;
-    strip.fit_cells = 0;
-    if (packages.empty()) {
-        strip.title = "packages  waiting for a lock";
+    strip.fit_cells = k_window_slots;
+    if (windows.empty()) {
+        strip.title = "windows  waiting for a lock";
         return strip;
     }
-    size_t first = packages.size();
+    size_t first = windows.size();
     int slots = 0;
     while (first > 0) {
-        const Tui::PackageView& view = packages[first - 1];
-        if (first < packages.size() && slots + view.count > k_max_strip_slots) break;
-        slots += view.count;
+        if (first < windows.size() && slots + k_window_slots > k_max_strip_slots) break;
+        slots += k_window_slots;
         --first;
     }
     Groups groups(strip);
-    for (size_t k = first; k < packages.size(); ++k) {
-        const Tui::PackageView& p = packages[k];
-        const bool joined = k > first && packages[k - 1].generation == p.generation &&
-                            packages[k - 1].index + 1 == p.index;
-        const uint32_t marker_glyph_start = (p.flags & event_flag_flywheel_start) ? k_glyph_flywheel : k_glyph_marker;
-        if (!joined) {
-            if (k > first) strip.cells.push_back(strip_cell(CellKind::spacer, 0.0f, Color::plain, k_glyph_space,
-                                                            Color::plain, k_no_group));
-            groups.end();
-            strip.cells.push_back(strip_cell(CellKind::marker, p.start_pct, Color::cyan, marker_glyph_start,
-                                             Color::cyan, k_no_group));
-        } else {
-            strip.cells.back().level = p.start_pct;  // the previous STOP is this START
+    for (size_t k = first; k < windows.size(); ++k) {
+        const Tui::WindowView& w = windows[k];
+        const bool joined =
+            k > first && windows[k - 1].generation == w.generation && windows[k - 1].index + 1 == w.index;
+        if (k > first && !joined) {
+            strip.cells.push_back(
+                strip_cell(CellKind::spacer, 0.0f, Color::plain, k_glyph_space, Color::plain, k_no_group));
         }
+        groups.end();
         StripSpan span;
-        span.start_cell = static_cast<int>(strip.cells.size()) - 1;
-        span.start_level = p.start_pct;
-        span.stop_level = p.stop_pct;
+        span.start_cell = static_cast<int>(strip.cells.size());
+        span.start_level = w.start_pct;
+        span.stop_level = w.stop_pct;
         strip.starts.push_back(span.start_cell);
-        for (uint8_t i = 0; i < p.count; ++i) {
-            const SlotBar& slot = p.slots[i];
-            const float reference =
-                p.start_pct + (static_cast<float>(p.stop_pct) - p.start_pct) * (i + 1) / (p.count + 1);
+        strip.cells.push_back(strip_cell(CellKind::marker, w.start_pct, Color::cyan, marker_glyph(w.start_pct),
+                                         Color::cyan, k_no_group));
+        std::vector<std::string> labels;
+        if (w.complete) labels = byte_labels(w.value);
+        if (w.dropped) labels = labels_of("dropped", "x");
+        const int group =
+            groups.of(group_key(w.generation, false, w.index), labels, w.dropped ? Color::red : Color::plain);
+        for (uint8_t i = 0; i < k_bits_per_byte; ++i) {
+            if (i >= w.count) {
+                strip.cells.push_back(
+                    strip_cell(CellKind::pending, 0.0f, Color::dim, k_glyph_middle_dot, Color::dim, group));
+                span.lines.push_back(-1.0f);
+                continue;
+            }
+            const SlotBar& slot = w.slots[i];
+            const float reference = w.start_pct + (static_cast<float>(w.stop_pct) - w.start_pct) * (i + 1) /
+                                                      static_cast<float>(k_stop_slot);
             const float level = slot.level_pct * reference / k_percent;
             const float line = slot.threshold_pct > 0 ? slot.threshold_pct * reference / k_percent : -1.0f;
             const float margin = std::fabs(static_cast<float>(slot.level_pct) - slot.threshold_pct);
             const bool weak = slot.threshold_pct > 0 && margin < k_weak_margin * slot.threshold_pct;
             const Color color = weak ? Color::yellow : (slot.bit ? Color::green : Color::dim);
-            int group = k_no_group;
-            if (p.bits_per_package > 0) {
-                const uint32_t bit = p.index * p.bits_per_package + i;
-                const uint32_t byte_index = bit / k_bits_per_byte_u;
-                const Tui::ByteView* byte = find_byte(bytes, p.generation, byte_index);
-                group = groups.of(group_key(p.generation, false, byte_index),
-                                  byte != nullptr ? byte_labels(byte->value) : std::vector<std::string>(),
-                                  Color::plain);
-            }
             strip.cells.push_back(strip_cell(CellKind::data, level, color, slot.bit ? k_glyph_one : k_glyph_zero,
                                              slot.bit ? Color::green : Color::plain, group));
             span.lines.push_back(line);
         }
-        const uint32_t marker_glyph_stop = (p.flags & event_flag_flywheel_stop) ? k_glyph_flywheel : k_glyph_marker;
-        strip.cells.push_back(strip_cell(CellKind::marker, p.stop_pct, Color::cyan, marker_glyph_stop, Color::cyan,
-                                         k_no_group));
-        span.stop_cell = static_cast<int>(strip.cells.size()) - 1;
+        span.stop_cell = static_cast<int>(strip.cells.size());
+        strip.cells.push_back(strip_cell(CellKind::marker, w.stop_pct, Color::cyan, marker_glyph(w.stop_pct),
+                                         Color::cyan, k_no_group));
         strip.spans.push_back(span);
     }
 
-    const Tui::PackageView& newest = packages.back();
-    strip.fit_cells = newest.count + 2;
+    const Tui::WindowView& newest = windows.back();
     float line_sum = 0.0f;
     int lines = 0;
     for (uint8_t i = 0; i < newest.count; ++i) {
@@ -954,35 +935,31 @@ Strip decoder_strip(const std::deque<Tui::PackageView>& packages, const std::deq
         line_sum += newest.slots[i].threshold_pct;
         ++lines;
     }
-    strip.title = "package " + std::to_string(newest.index) + "  " + std::to_string(newest.count) +
-                  (newest.count == 1 ? " bit" : " bits");
-    if (newest.slot_ms > 0.0f) strip.title += "  T " + fixed(newest.slot_ms, k_ms_decimals) + " ms";
+    strip.title = "window " + std::to_string(newest.index);
+    if (newest.complete) strip.title += "  byte " + byte_text(newest.value);
+    if (newest.dropped) strip.title += "  dropped";
     strip.title += "  START " + std::to_string(newest.start_pct) + "%  STOP " + std::to_string(newest.stop_pct) + "%";
     if (lines > 0) strip.title += "  line " + fixed(line_sum / lines, k_whole) + "% of ref";
     strip.title += flag_text(newest.flags & static_cast<uint8_t>(~event_flag_weak));
     return strip;
 }
 
-// Encoder: the slots sent so far in this transmission, and the rest of the package being sent (not sent yet: its
-// bits in the byte being sent are known, the others are dots), with the caret on the slot being sent.
+// Encoder: the slots sent so far in this transmission, and the rest of the window being sent (not sent yet: its bits
+// are known), with the caret on the slot being sent.
 Strip encoder_strip(const std::deque<Tui::SentSlot>& sent, uint32_t generation, const EncoderStatus& status,
-                    bool has_status, uint8_t bits_per_package) {
+                    bool has_status) {
     Strip strip;
     strip.current = k_no_cell;
     strip.caret_row = true;
-    const int package_cells = (bits_per_package > 0 ? bits_per_package : k_hf_bits_per_package) + 2;
-    strip.fit_cells = package_cells;
+    strip.fit_cells = k_window_slots;
     Groups groups(strip);
     const float beep = k_reference_pct;
-    int tune_slots = 0;
-    int sync_markers = 0;
-    int end_markers = 0;
+    int lead_slots = 0;
     for (size_t i = 0; i < sent.size(); ++i) {
         if (sent[i].generation != generation) continue;
         const EncoderStatus& s = sent[i].status;
-        const bool marker = s.segment == EncoderSegment::sync || s.segment == EncoderSegment::end ||
-                            (s.segment == EncoderSegment::package && s.slot > s.package_bits);
-        if (marker || strip.cells.empty()) strip.starts.push_back(static_cast<int>(strip.cells.size()));
+        const bool window_start = s.segment == EncoderSegment::window && s.slot == k_start_slot;
+        if (window_start || strip.cells.empty()) strip.starts.push_back(static_cast<int>(strip.cells.size()));
         switch (s.segment) {
         case EncoderSegment::idle:
             break;
@@ -991,67 +968,55 @@ Strip encoder_strip(const std::deque<Tui::SentSlot>& sent, uint32_t generation, 
                                              segment_group(groups, generation, SegmentKey::lead_in, "lead-in", "lead",
                                                            Color::dim)));
             break;
-        case EncoderSegment::tune: {
-            StripCell cell = strip_cell(CellKind::tone, beep, Color::green, k_glyph_tune, Color::green,
-                                        segment_group(groups, generation, SegmentKey::tune, "tune tone", "tune",
+        case EncoderSegment::vox_lead: {
+            StripCell cell = strip_cell(CellKind::tone, beep, Color::green, k_glyph_lead, Color::green,
+                                        segment_group(groups, generation, SegmentKey::vox_lead, "VOX lead", "VOX",
                                                       Color::green));
             cell.joined = true;
             strip.cells.push_back(cell);
-            ++tune_slots;
+            ++lead_slots;
             break;
         }
-        case EncoderSegment::sync:
-            strip.cells.push_back(strip_cell(CellKind::marker, beep, Color::cyan, k_glyph_marker, Color::cyan,
-                                             segment_group(groups, generation, SegmentKey::sync, "sync train", "sync",
-                                                           Color::cyan)));
-            ++sync_markers;
+        case EncoderSegment::gap:
+            strip.cells.push_back(strip_cell(
+                CellKind::silent, 0.0f, Color::plain, k_glyph_middle_dot, Color::dim,
+                segment_group(groups, generation, SegmentKey::gap, "gap", "g", Color::dim)));
             break;
-        case EncoderSegment::package:
-            if (s.slot >= 1 && s.slot <= s.package_bits) {
+        case EncoderSegment::window:
+            if (s.slot == k_start_slot || s.slot == k_stop_slot) {
+                groups.end();
+                strip.cells.push_back(
+                    strip_cell(CellKind::marker, beep, Color::cyan, k_glyph_marker, Color::cyan, k_no_group));
+            } else {
                 const bool one = s.kind == SlotKind::one;
                 const int group =
                     groups.of(group_key(generation, false, s.byte_index), byte_labels(s.byte), Color::plain);
                 strip.cells.push_back(strip_cell(CellKind::data, one ? beep : 0.0f, Color::green,
                                                  one ? k_glyph_one : k_glyph_zero, one ? Color::green : Color::plain,
                                                  group));
-            } else {  // the STOP: a byte whose bits span two packages keeps one bracket across it
-                strip.cells.push_back(strip_cell(CellKind::marker, beep, Color::cyan, k_glyph_marker, Color::cyan,
-                                                 k_no_group));
             }
             break;
-        case EncoderSegment::end:
-            strip.cells.push_back(strip_cell(CellKind::marker, beep, Color::cyan, k_glyph_marker, Color::cyan,
-                                             segment_group(groups, generation, SegmentKey::end, "END", "E",
-                                                           Color::cyan)));
-            ++end_markers;
-            break;
         case EncoderSegment::tail:
-            strip.cells.push_back(strip_cell(CellKind::silent, 0.0f, Color::plain, k_glyph_middle_dot, Color::dim,
-                                             segment_group(groups, generation, SegmentKey::tail, "tail", "t",
-                                                           Color::dim)));
+            strip.cells.push_back(strip_cell(
+                CellKind::silent, 0.0f, Color::plain, k_glyph_middle_dot, Color::dim,
+                segment_group(groups, generation, SegmentKey::tail, "tail", "t", Color::dim)));
             break;
         }
     }
     const bool sending = has_status && status.segment != EncoderSegment::idle && !strip.cells.empty();
     if (sending) strip.current = static_cast<int>(strip.cells.size()) - 1;
 
-    // The rest of the package being sent.
-    if (sending && status.segment == EncoderSegment::package && status.slot >= 1 &&
-        status.slot <= status.package_bits) {
-        const int group = strip.cells.back().group;
-        for (int slot = status.slot + 1; slot <= status.package_bits; ++slot) {
-            const int bit_index = status.bit_index + (slot - status.slot);
-            if (bit_index < static_cast<int>(k_bits_per_byte)) {
-                const bool one = ((status.byte >> (k_bits_per_byte - 1 - bit_index)) & 1u) != 0;
-                strip.cells.push_back(strip_cell(CellKind::pending, 0.0f, Color::dim, one ? k_glyph_one : k_glyph_zero,
-                                                 Color::dim, group));
-            } else {
-                strip.cells.push_back(strip_cell(CellKind::pending, 0.0f, Color::dim, k_glyph_middle_dot, Color::dim,
-                                                 k_no_group));
-            }
+    // The rest of the window being sent.
+    if (sending && status.segment == EncoderSegment::window && status.slot < k_stop_slot) {
+        const int group =
+            groups.of(group_key(generation, false, status.byte_index), byte_labels(status.byte), Color::plain);
+        for (int slot = status.slot + 1; slot < k_stop_slot; ++slot) {
+            const bool one = ((status.byte >> (k_stop_slot - 1 - slot)) & 1u) != 0;
+            strip.cells.push_back(
+                strip_cell(CellKind::pending, 0.0f, Color::dim, one ? k_glyph_one : k_glyph_zero, Color::dim, group));
         }
-        strip.cells.push_back(strip_cell(CellKind::pending, 0.0f, Color::dim, k_glyph_flywheel, Color::dim,
-                                         k_no_group));
+        strip.cells.push_back(
+            strip_cell(CellKind::pending, 0.0f, Color::dim, k_glyph_missing, Color::dim, k_no_group));
     }
 
     if (!has_status || status.segment == EncoderSegment::idle) {
@@ -1059,23 +1024,23 @@ Strip encoder_strip(const std::deque<Tui::SentSlot>& sent, uint32_t generation, 
         return strip;
     }
     switch (status.segment) {
-    case EncoderSegment::package:
-        strip.title = "package " + std::to_string(status.package_index) + "  slot " + std::to_string(status.slot) +
-                      "/" + std::to_string(status.package_bits + 1);
-        if (status.slot >= 1 && status.slot <= status.package_bits)
+    case EncoderSegment::window:
+        strip.title = "window " + std::to_string(status.byte_index) + "  slot " + std::to_string(status.slot) + "/" +
+                      std::to_string(k_stop_slot);
+        if (status.slot == k_start_slot) {
+            strip.title += "  START of byte " + byte_text(status.byte);
+        } else if (status.slot == k_stop_slot) {
+            strip.title += "  STOP of byte " + byte_text(status.byte);
+        } else {
             strip.title += "  bit " + std::to_string(status.bit_index) + " of byte " +
                            std::to_string(status.byte_index) + " = " + byte_text(status.byte);
-        else
-            strip.title += "  STOP (the next START)";
+        }
         break;
-    case EncoderSegment::tune:
-        strip.title = "tune tone  slot " + std::to_string(tune_slots);
+    case EncoderSegment::vox_lead:
+        strip.title = "VOX lead  slot " + std::to_string(lead_slots);
         break;
-    case EncoderSegment::sync:
-        strip.title = "sync train  marker " + std::to_string(sync_markers) + " (the last one is START)";
-        break;
-    case EncoderSegment::end:
-        strip.title = "END  marker " + std::to_string(end_markers) + "/" + std::to_string(k_end_markers);
+    case EncoderSegment::gap:
+        strip.title = "gap  silence before the first START";
         break;
     case EncoderSegment::lead_in:
         strip.title = "lead-in  silence";
@@ -1154,7 +1119,7 @@ void draw_strip(Canvas& canvas, int top, int bar_rows, const Strip& strip) {
         }
     }
 
-    // The lines of each package: the dashed reference from the START crest to the STOP crest, the decision line over
+    // The lines of each window: the dashed reference from the START crest to the STOP crest, the decision line over
     // the bits. Remembered per column so that a bar top below a line leaves the line visible.
     std::vector<float> reference(static_cast<size_t>(columns), -1.0f);
     std::vector<float> decision(static_cast<size_t>(columns), -1.0f);
@@ -1279,11 +1244,11 @@ size_t display_width(const std::string& line) {
 Tui::Tui(TuiMode mode)
     : mode_(mode),
       color_(true),
+      bytes_per_second_(0.0f),
       tone_hz_(0.0f),
       slot_ms_(0.0f),
       snr_db_(0.0f),
       has_snr_(false),
-      bits_per_package_(0),
       passband_(),
       has_passband_(false),
       search_(widest_search()),
@@ -1294,15 +1259,13 @@ Tui::Tui(TuiMode mode)
       generation_(0),
       status_(),
       has_status_(false),
-      sent_bits_(0),
-      sent_bit_count_(0),
       state_(DecoderState::search),
       last_flags_(0),
-      late_join_(false),
       bytes_(0),
       locks_(0),
       losses_(0),
       ends_(0),
+      dropped_(0),
       out_(nullptr),
       open_(false),
       drawn_columns_(0),
@@ -1316,8 +1279,12 @@ void Tui::set_color(bool enabled) {
     color_ = enabled;
 }
 
-void Tui::set_profile(const std::string& profile) {
-    profile_ = profile;
+void Tui::set_label(const std::string& label) {
+    label_ = label;
+}
+
+void Tui::set_speed(float bytes_per_second) {
+    bytes_per_second_ = bytes_per_second;
 }
 
 void Tui::set_tone_hz(float tone_hz) {
@@ -1326,10 +1293,6 @@ void Tui::set_tone_hz(float tone_hz) {
 
 void Tui::set_slot_ms(float slot_ms) {
     slot_ms_ = slot_ms;
-}
-
-void Tui::set_package(uint8_t bits_per_package) {
-    bits_per_package_ = std::min<uint8_t>(bits_per_package, k_max_bits_per_package);
 }
 
 void Tui::set_passband(const Passband& passband) {
@@ -1381,7 +1344,7 @@ void Tui::new_generation() {
     ++generation_;
 }
 
-// Every new slot is kept; its bit, when it carries one, goes into the byte being rebuilt (MSB first, spec 2.2).
+// Every new slot is kept; the byte of a window counts as sent at its STOP.
 void Tui::on_encoder_status(const EncoderStatus& status) {
     if (status.segment == EncoderSegment::idle) {
         status_ = status;
@@ -1392,8 +1355,6 @@ void Tui::on_encoder_status(const EncoderStatus& status) {
         !has_status_ || status_.segment == EncoderSegment::idle || status.slot_index < status_.slot_index;
     if (restarted) {
         new_generation();
-        sent_bits_ = 0;
-        sent_bit_count_ = 0;
     } else if (status.slot_index == status_.slot_index) {
         status_ = status;
         return;
@@ -1403,57 +1364,29 @@ void Tui::on_encoder_status(const EncoderStatus& status) {
     const SentSlot slot = {status, generation_};
     sent_.push_back(slot);
     while (sent_.size() > k_max_sent_slots) sent_.pop_front();
-    if (status.segment != EncoderSegment::package || status.slot < 1 || status.slot > status.package_bits) return;
-    sent_bits_ = static_cast<uint8_t>((sent_bits_ << 1) | (status.kind == SlotKind::one ? 1u : 0u));
-    if (++sent_bit_count_ < k_bits_per_byte) return;
-    append_text(sent_bits_);
-    sent_bits_ = 0;
-    sent_bit_count_ = 0;
+    if (status.segment == EncoderSegment::window && status.slot == k_stop_slot) append_text(status.byte);
 }
 
-Tui::PackageView& Tui::open_package(const Event& event) {
-    if (packages_.empty() || packages_.back().complete || packages_.back().generation != generation_ ||
-        packages_.back().index != event.package_index) {
-        PackageView view = PackageView();
+// The window of a slot or byte event (spec 3.5): the newest one when it is the same lock and byte_index.
+Tui::WindowView& Tui::open_window(const Event& event) {
+    if (windows_.empty() || windows_.back().generation != generation_ || windows_.back().index != event.byte_index) {
+        WindowView view = WindowView();
         view.generation = generation_;
-        view.index = event.package_index;
-        view.bits_per_package = event.bits_per_package;
-        packages_.push_back(view);
-        while (packages_.size() > k_max_packages) packages_.pop_front();
+        view.index = event.byte_index;
+        windows_.push_back(view);
+        while (windows_.size() > k_max_windows) windows_.pop_front();
     }
-    return packages_.back();
-}
-
-void Tui::add_slot(const Event& event) {
-    PackageView& view = open_package(event);
-    if (event.slot < 1 || event.slot > k_max_bits_per_package) return;
-    const SlotBar bar = {event.level_pct, event.threshold_pct, event.value, event.flags};
-    view.slots[event.slot - 1] = bar;
-    view.count = std::max(view.count, event.slot);
-    view.start_pct = event.start_pct;
-    view.stop_pct = event.stop_pct;
-    view.flags = event.flags;
-}
-
-void Tui::finish_package(const Event& event) {
-    PackageView& view = open_package(event);
-    view.count = std::min<uint8_t>(event.value, k_max_bits_per_package);
-    view.start_pct = event.start_pct;
-    view.stop_pct = event.stop_pct;
-    view.flags = event.flags;
-    view.slot_ms = event.slot_ms;
-    view.complete = true;
+    return windows_.back();
 }
 
 void Tui::on_event(const Event& event) {
     state_ = event.state;
-    const bool measured = event.type == EventType::locked || event.type == EventType::slot ||
-                          event.type == EventType::package || event.type == EventType::byte;
+    const bool measured =
+        event.type == EventType::locked || event.type == EventType::slot || event.type == EventType::byte;
     if (measured) {
         if (event.tone_hz > 0.0f) tone_hz_ = event.tone_hz;
-        if (event.slot_ms > 0.0f && event.type != EventType::package) slot_ms_ = event.slot_ms;
-        if (event.bits_per_package > 0) bits_per_package_ = event.bits_per_package;
-        if (std::isfinite(event.snr_db) && event.state != DecoderState::search) {
+        if (event.slot_ms > 0.0f) slot_ms_ = event.slot_ms;
+        if (std::isfinite(event.snr_db) && event.state == DecoderState::track) {
             snr_db_ = event.snr_db;
             has_snr_ = true;
         }
@@ -1464,19 +1397,30 @@ void Tui::on_event(const Event& event) {
         break;
     case EventType::locked:
         ++locks_;
-        late_join_ = (event.flags & event_flag_late_join) != 0;
-        last_event_ = late_join_ ? "locked (late join)" : "locked";
+        last_event_ = "locked";
         break;
-    case EventType::slot:
-        add_slot(event);
+    case EventType::slot: {
+        if (event.slot < k_first_data_slot || event.slot >= k_stop_slot) break;
+        WindowView& view = open_window(event);
+        const SlotBar bar = {event.level_pct, event.threshold_pct, event.value, event.flags};
+        view.slots[event.slot - k_first_data_slot] = bar;
+        view.count = std::max<uint8_t>(view.count, event.slot);
+        view.start_pct = event.start_pct;
+        view.stop_pct = event.stop_pct;
+        view.flags = event.flags;
+        if ((event.flags & event_flag_framing) != 0 && event.slot == k_stop_slot - 1 && !view.dropped) {
+            view.dropped = true;
+            ++dropped_;
+        }
         break;
-    case EventType::package:
-        finish_package(event);
-        break;
+    }
     case EventType::byte: {
-        const ByteView view = {generation_, event.byte_index, event.value};
-        byte_views_.push_back(view);
-        while (byte_views_.size() > k_max_byte_views) byte_views_.pop_front();
+        WindowView& view = open_window(event);
+        view.value = event.value;
+        view.complete = true;
+        view.flags = event.flags;
+        view.start_pct = event.start_pct;
+        view.stop_pct = event.stop_pct;
         last_flags_ = event.flags;
         append_text(event.value);
         break;
@@ -1509,21 +1453,21 @@ void Tui::recent_audio(size_t count, std::vector<float>& out) const {
 std::vector<std::string> Tui::status_items() const {
     const bool encoder = mode_ == TuiMode::encoder;
     std::vector<std::string> items;
-    items.push_back(std::string(encoder ? "TX" : "RX") + (profile_.empty() ? "" : " " + profile_));
+    items.push_back(std::string(encoder ? "TX" : "RX") + (label_.empty() ? "" : " " + label_));
     if (encoder) {
         items.push_back(upper(segment_name(has_status_ ? status_.segment : EncoderSegment::idle)));
     } else {
-        items.push_back(std::string(state_name(state_)) +
-                        (state_ == DecoderState::search ? ", DCD off" : ", DCD on"));
+        items.push_back(std::string(state_name(state_)) + (state_ == DecoderState::search ? ", DCD off" : ", DCD on"));
+    }
+    if (bytes_per_second_ > 0.0f) {
+        items.push_back(fixed(bytes_per_second_, k_speed_decimals) + " bytes/s, " +
+                        fixed(k_bits_per_second_per_byte * bytes_per_second_, k_rate_decimals) + " bit/s");
     }
     items.push_back(tone_hz_ > 0.0f ? fixed(tone_hz_, encoder ? k_whole : k_hz_decimals) + " Hz" : "pitch --");
     items.push_back(slot_ms_ > 0.0f ? "T " + fixed(slot_ms_, k_ms_decimals) + " ms" : "T --");
-    items.push_back(bits_per_package_ > 0 ? "N " + std::to_string(bits_per_package_) : "N --");
-    if (bits_per_package_ > 0 && slot_ms_ > 0.0f)
-        items.push_back(fixed(net_bit_rate(bits_per_package_, slot_ms_), k_rate_decimals) + " bit/s");
     if (encoder) {
-        if (has_status_ && status_.segment == EncoderSegment::package)
-            items.push_back("package " + std::to_string(status_.package_index));
+        if (has_status_ && status_.segment == EncoderSegment::window)
+            items.push_back("window " + std::to_string(status_.byte_index));
     } else {
         items.push_back(has_snr_ ? "SNR " + fixed(snr_db_, k_db_decimals) + " dB" : "SNR --");
     }
@@ -1533,7 +1477,7 @@ std::vector<std::string> Tui::status_items() const {
     items.push_back(std::string(encoder ? "sent " : "") + std::to_string(bytes_) + (bytes_ == 1 ? " byte" : " bytes"));
     if (!encoder) {
         items.push_back("locks " + std::to_string(locks_) + "  lost " + std::to_string(losses_) + "  ends " +
-                        std::to_string(ends_));
+                        std::to_string(ends_) + "  dropped " + std::to_string(dropped_));
         if (!last_event_.empty()) items.push_back("last: " + last_event_);
     }
     items.push_back("audio " + fixed(audio_seconds_, k_seconds_decimals) + " s");
@@ -1565,8 +1509,7 @@ std::string Tui::render(int columns, int rows) const {
     }
 
     if (layout.bars > 0) {
-        const Strip strip = encoder ? encoder_strip(sent_, generation_, status_, has_status_, bits_per_package_)
-                                    : decoder_strip(packages_, byte_views_);
+        const Strip strip = encoder ? encoder_strip(sent_, generation_, status_, has_status_) : decoder_strip(windows_);
         draw_strip(canvas, row, layout.bars, strip);
         row += k_title_rows + layout.bars + footer_rows;
     }

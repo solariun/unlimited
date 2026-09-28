@@ -9,6 +9,9 @@ const uint32_t k_width_scale = 1000;      // milli-cycles per slot to Hz at slot
 const uint32_t k_max_hz = 0xFFFF;
 const int32_t k_int16_min = -32768;
 const int32_t k_int16_max = 32767;
+const float k_centi_scale = 100.0f;
+const float k_max_centi = 65535.0f;
+const float k_us_per_byte = 100000.0f;    // 10 slots per byte: T_us = 100000 / B
 
 // ceil(numerator / denominator), clipped to 0..65535 Hz; a zero slot is infinitely wide.
 uint16_t ceil_hz(uint32_t numerator, uint32_t denominator) {
@@ -34,6 +37,29 @@ int16_t room(int16_t filter_margin, int32_t search_margin) {
 }
 
 }  // namespace
+
+uint16_t centi_bytes_per_second(float bytes_per_second) {
+    const float centi = bytes_per_second * k_centi_scale + 0.5f;
+    if (!(centi > 0.0f)) return 0;
+    return static_cast<uint16_t>(centi > k_max_centi ? k_max_centi : centi);
+}
+
+uint32_t slot_us_for_speed(float bytes_per_second) {
+    return slot_us_for_centi_speed(centi_bytes_per_second(bytes_per_second));
+}
+
+uint32_t slot_us_for_centi_speed(uint16_t centi) {
+    if (centi == 0) return 0;
+    return (k_centi_slot_numerator_us + centi / 2u) / centi;
+}
+
+float bytes_per_second(uint32_t slot_us) {
+    return slot_us == 0 ? 0.0f : k_us_per_byte / static_cast<float>(slot_us);
+}
+
+bool slot_valid(uint32_t slot_us) {
+    return slot_us >= k_min_slot_us && slot_us <= k_max_slot_us;
+}
 
 Band occupied_band(uint16_t tone_hz, uint32_t slot_us) {
     const uint32_t half = ceil_hz(k_band_99_milli * k_half_band_scale, slot_us);
@@ -66,11 +92,10 @@ PassbandFit passband_fit(const Band& band, const Passband& passband) {
     return fit;
 }
 
-Passband search_range(const Passband& passband, uint32_t min_slot_us) {
-    const int32_t half = ceil_hz(k_band_99_milli * k_half_band_scale, k_speed_span * min_slot_us);
+Passband search_range(const Passband& passband, uint32_t slot_us) {
+    const int32_t half = ceil_hz(k_band_99_milli * k_half_band_scale, slot_us);
     int32_t low = static_cast<int32_t>(passband.low_hz) + half;
     if (low < k_min_tone_hz) low = k_min_tone_hz;
-    if (min_slot_us < k_fast_slot_us && low < k_min_fast_tone_hz) low = k_min_fast_tone_hz;
     int32_t high = static_cast<int32_t>(passband.high_hz) - half;
     if (high > k_max_tone_hz) high = k_max_tone_hz;
     if (high < 0) high = 0;

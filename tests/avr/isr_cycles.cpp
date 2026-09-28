@@ -1,4 +1,4 @@
-// Host side of the AVR ISR gate (spec 8.6 B5). For every case of isr_cases.hpp it runs the image built from
+// Host side of the AVR ISR gate (spec 3.9, 8). For every case of isr_cases.hpp it runs the image built from
 // isr_harness.cpp (avr-objdump listing, flash image and symbol table) on a cycle-counting ATmega328P interpreter, one
 // ISR call per sample, and checks:
 //   - every sample equals the host encoder's (the interpreter and the AVR build agree with the reference);
@@ -615,7 +615,7 @@ bool load_program(const std::string& base, Program& program, std::string& error)
     return isr && sample;
 }
 
-const char* const k_segment_names[] = {"idle", "lead-in", "tune", "sync", "package", "end", "tail"};
+const char* const k_segment_names[] = {"idle", "lead-in", "vox-lead", "gap", "window", "tail"};
 
 // The host encoder's samples, and the segment each one belongs to.
 std::vector<int16_t> reference_samples(uint8_t index, std::vector<uint8_t>& segments) {
@@ -720,11 +720,13 @@ int main(int argc, char** argv) {
         const Ticks ticks = timer_ticks(isr_cycles);
         const bool pass = mismatches == 0 && ticks.lost == 0 && longest <= k_max_isr_cycles && load <= k_max_load;
         const EncoderConfig config = unlimited::avr_isr::case_config(c);
-        std::printf("isr_cycles case %u (T %u ms, N %u, %u Hz): %zu samples, %zu mismatches, ISR mean %.0f max %u "
-                    "cycles (sample %zu, %s), load %.1f %%, lost ticks %u, longest busy %.2f ms: %s\n",
-                    unsigned(c), unsigned(config.slot_us / k_us_per_ms), unsigned(config.bits_per_package),
-                    unsigned(config.tone_hz), samples.size(), mismatches, mean, longest, longest_at, longest_segment,
-                    100.0 * load, ticks.lost, ticks.longest_busy * k_ms_per_s / k_cpu_hz, pass ? "PASS" : "FAIL");
+        std::printf("isr_cycles case %u (%.2f bytes/s, T %.3f ms, %u Hz%s): %zu samples, %zu mismatches, ISR mean %.0f "
+                    "max %u cycles (sample %zu, %s), load %.1f %%, lost ticks %u, longest busy %.2f ms: %s\n",
+                    unsigned(c), static_cast<double>(unlimited::bytes_per_second(config.slot_us)),
+                    static_cast<double>(config.slot_us) / k_us_per_ms, unsigned(config.tone_hz),
+                    config.vox_lead_ms != 0 ? ", VOX lead" : "", samples.size(), mismatches, mean, longest, longest_at,
+                    longest_segment, 100.0 * load, ticks.lost, ticks.longest_busy * k_ms_per_s / k_cpu_hz,
+                    pass ? "PASS" : "FAIL");
         ok = ok && pass;
     }
     std::printf("isr_cycles: gate max %u cycles per sample, mean load <= %.0f %%, no lost tick: %s\n", k_max_isr_cycles,
