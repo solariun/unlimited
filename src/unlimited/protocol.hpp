@@ -51,14 +51,22 @@ static const uint16_t k_fm_passband_low_hz = 300;
 static const uint16_t k_fm_passband_high_hz = 3000;
 static const uint16_t k_max_passband_hz = 4000;  // half the decoder's 8 kHz input rate
 
-// Transmission (spec 2.1): the VOX lead (only when configured) is a steady tone of at least k_min_vox_lead_slots,
-// then k_vox_gap_slots of silence before the first START; the tail is max(tail_ms, k_min_tail_slots) of silence.
-// Three slots: the receiver tells a steady tone from beeps by its first two slot boundaries (no null at either).
+// Transmission (spec 2.1): the lead-in is silence (the radio's TX delay); the VOX lead (only when configured) is a
+// steady tone of at least k_min_vox_lead_slots, then k_vox_gap_slots of silence before the first START; the tail is
+// max(tail_ms, k_min_tail_slots) of silence. Three slots: the receiver tells a steady tone from beeps by its first two
+// slot boundaries (no null at either).
 static const uint8_t k_vox_gap_slots = 2;
 static const uint8_t k_min_vox_lead_slots = 3;
 static const uint8_t k_min_tail_slots = 2;
 static const uint16_t k_default_vox_lead_ms = 150;  // the programs' default with a VOX radio; the library's is 0
 static const uint16_t k_default_tail_ms = 100;
+// The first START of a transmission follows at least k_onset_silent_slots of silence (spec 2.1, 3.3). With the fade
+// bridge (optional, off by default: spec 3.7, V16) it follows at least k_min_onset_silence_ms of silence, or a VOX lead
+// and its gap, so a signal coming back after a shorter fade is never taken for a new transmission; a sender whose
+// receivers bridge fades gives every transmission a lead-in of at least k_min_onset_silence_ms (nothing is added
+// inside a transmission or after it).
+static const uint8_t k_onset_silent_slots = 2;
+static const uint16_t k_min_onset_silence_ms = 300;
 
 // Quarter-wave sine, 256 steps plus the end point, scaled to 65534 (twice the Q15 full scale): linear
 // interpolation with one 16 x 16 multiply stays within 1 LSB of 32767 sin; phase is a full turn over 2^32.

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #if defined(__AVR__)
+#include <avr/interrupt.h>
 #include <avr/pgmspace.h>
 #define UNLIMITED_ROM PROGMEM
 #else
@@ -40,6 +41,58 @@ inline void release_fence() {
 inline void acquire_fence() {
 #if defined(__GNUC__)
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
+#endif
+}
+
+template <typename T>
+struct Identity {
+    typedef T type;
+};
+
+// A value one context writes and others read (the KISS modem's contexts, spec 12.2), whole and in order:
+// store_release() makes it visible after everything its writer did before, load_acquire() reads it before everything
+// its reader does after. With GCC or Clang these are the compiler's atomic accesses (the fences above tied to the
+// value, which ThreadSanitizer follows). On an AVR, one core with an ISR as the other context, a value wider than a
+// byte is read or written with interrupts off: an interrupt between its instructions would see half of it.
+template <typename T>
+inline T load_acquire(const volatile T& from) {
+#if defined(__AVR__)
+    if (sizeof(T) == 1) {
+        const T value = from;
+        compiler_barrier();
+        return value;
+    }
+    const uint8_t sreg = SREG;
+    cli();
+    const T value = from;
+    SREG = sreg;
+    compiler_barrier();
+    return value;
+#elif defined(__GNUC__)
+    T value;
+    __atomic_load(&from, &value, __ATOMIC_ACQUIRE);
+    return value;
+#else
+    return from;
+#endif
+}
+
+template <typename T>
+inline void store_release(volatile T& to, typename Identity<T>::type value) {
+#if defined(__AVR__)
+    compiler_barrier();
+    if (sizeof(T) == 1) {
+        to = value;
+        return;
+    }
+    const uint8_t sreg = SREG;
+    cli();
+    to = value;
+    SREG = sreg;
+#elif defined(__GNUC__)
+    __atomic_store(&to, &value, __ATOMIC_RELEASE);
+#else
+    to = value;
 #endif
 }
 

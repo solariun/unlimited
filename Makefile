@@ -40,6 +40,7 @@ LIB         = $(BUILDDIR)/libunlimited.a
 LIB_DEP     = $(if $(CORE_SRC),$(LIB),)
 ENCODE_BIN  = $(BINDIR)/unlimited_encode
 DECODE_BIN  = $(BINDIR)/unlimited_decode
+MODEM_BIN   = $(BINDIR)/unlimited_modem
 TEST_BIN    = $(BINDIR)/unlimited_tests
 LONG_BIN    = $(BINDIR)/unlimited_regression
 
@@ -58,6 +59,11 @@ AVR_TOOLS = $(if $(AVR_GXX),$(dir $(AVR_GXX)),)
 AVR_FLOAT_SYMBOLS = '__(add|sub|mul|div)sf3|__fix(uns)?sfsi|__float(un)?sisf|__(eq|ne|lt|le|gt|ge)sf2'
 # Symbols the core must never reference (heap, exceptions, RTTI).
 FORBIDDEN_SYMBOLS = 'malloc|calloc|realloc|_Znwm|_Znam|_Znwj|_Znaj|__cxa_throw|__cxa_allocate_exception|typeinfo|__gxx_personality'
+# The KISS modem's send side (spec 12.2): the KISS codec and the transmitter with the encoder, and no receiver: its
+# probe links from these sources alone. A Nano build takes a small send queue.
+MODEM_PROBES = tests/embedded/modem
+MODEM_SEND_SRC = src/unlimited/kiss.cpp src/unlimited/transmitter.cpp $(AVR_ENCODER_SRC)
+NANO_MODEM_QUEUE = 512
 
 # Cross compilers: PATH first, then the toolchains bundled with arduino-cli (macOS and Linux locations).
 ARDUINO15   = $(wildcard $(HOME)/Library/Arduino15 $(HOME)/.arduino15)
@@ -69,12 +75,12 @@ FQBN_UNO   = arduino:avr:uno
 FQBN_ESP32 = esp32:esp32:esp32
 ARDUINO_BUILD = $(BUILDDIR)/arduino
 
-.PHONY: all lib demo test test_long check_embedded arduino_check demo_run tables docs clean help
+.PHONY: all lib demo modem test test_long check_embedded arduino_check demo_run tables docs clean help
 
-all: lib demo
+all: lib demo modem
 
 help:
-	@echo "make [all|lib|demo|test|test_long|check_embedded|arduino_check|demo_run|tables|docs|clean]"
+	@echo "make [all|lib|demo|modem|test|test_long|check_embedded|arduino_check|demo_run|tables|docs|clean]"
 
 lib: $(LIB)
 
@@ -94,6 +100,13 @@ $(ENCODE_BIN): $(BUILDDIR)/demo/unlimited_encode.o $(PC_OBJ) $(LIB_DEP)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(PC_LIBS)
 
 $(DECODE_BIN): $(BUILDDIR)/demo/unlimited_decode.o $(PC_OBJ) $(LIB_DEP)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(PC_LIBS)
+
+# The KISS modem (spec 12.3): the core, the live devices, PTT and the pseudo-terminal of pc/.
+modem: $(MODEM_BIN)
+
+$(MODEM_BIN): $(BUILDDIR)/demo/unlimited_modem.o $(PC_OBJ) $(LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(PC_LIBS)
 
@@ -154,6 +167,25 @@ check_embedded:
 		done; \
 		./$(BUILDDIR)/embedded/isr_cycles $(BUILDDIR)/embedded/avr_isr || exit 1; \
 	else echo "check_embedded: avr-g++ not found, skipped"; fi
+	@echo "  embedded modem send side, linked without the decoder"
+	@$(CXX) $(EMBED_FLAGS) $(MODEM_PROBES)/send_only.cpp $(MODEM_SEND_SRC) -o $(BUILDDIR)/embedded/send_only && \
+		./$(BUILDDIR)/embedded/send_only || exit 1
+	@if [ -n "$(XTENSA_GXX)" ]; then \
+		$(XTENSA_GXX) $(EMBED_FLAGS) -mlongcalls -c $(MODEM_PROBES)/sizes.cpp -o $(BUILDDIR)/embedded/modem_sizes_esp32.o \
+			|| exit 1; \
+		echo "check_embedded: sizes on the ESP32 (xtensa), the MCU send queue:"; \
+		$(dir $(XTENSA_GXX))xtensa-esp32-elf-nm -S $(BUILDDIR)/embedded/modem_sizes_esp32.o | \
+			while read address size kind name; do echo "    $${name#unlimited_size_}: $$((0x$$size)) bytes"; done; \
+	fi
+	@if [ -n "$(AVR_GXX)" ]; then \
+		elf=$(BUILDDIR)/embedded/send_only_nano.elf; \
+		$(AVR_GXX) $(AVR_SKETCH_FLAGS) -DUNLIMITED_MODEM_QUEUE=$(NANO_MODEM_QUEUE) $(MODEM_PROBES)/send_only.cpp \
+			$(MODEM_SEND_SRC) -o $$elf || exit 1; \
+		if $(AVR_TOOLS)avr-nm -u $$elf | grep -E $(AVR_FLOAT_SYMBOLS); then \
+			echo "check_embedded: FAILED (float routine in the Nano send side, above)"; exit 1; fi; \
+		echo "check_embedded: the send side for an Arduino Nano (ATmega328P, send queue $(NANO_MODEM_QUEUE) bytes), no float:"; \
+		$(AVR_TOOLS)avr-size --format=avr --mcu=atmega328p $$elf | grep -E "Program|Data"; \
+	fi
 
 # Compiles the Arduino examples against this library (needs arduino-cli and the cores): tx_uno for the Uno
 # (it drives ATmega328P timers), every *_esp32 example for the ESP32. Fails on any warning from the library
@@ -181,14 +213,15 @@ arduino_check:
 # Encode → channel → decode round trips (spec 7): the text must come back exactly. Both sides are told the same speed
 # (--bps); the receiver finds the pitch. Each run: name, channel, speed (bytes/s), SNR (dB; am/fm: carrier), TX sample
 # rate, frequency offset (Hz; lsb: the shift after the inversion), then the extra encoder and decoder options ('+'
-# separates words, '-' = none). Then a configuration the sender must refuse.
+# separates words, '-' = none). The decoder's default decision line is auto; usb_6_fixed runs the fixed 70 % line.
+# Then a configuration the sender must refuse.
 DEMO_TEXT = CQ CQ DE UNLIMITED TEST 0123456789
 DEMO_DIR  = $(BUILDDIR)/demo_run
 DEMO_RUNS = "usb_6 usb 6 10 8000 80 - -" \
             "lsb_12_48k lsb 12 13 48000 -150 - -" \
             "usb_1_narrow usb 1 0 8000 40 --tone+1200+--passband+300:2100 --passband+300:2100" \
             "usb_3_vox usb 3 6 8000 -35 --vox-lead-ms+150 -" \
-            "usb_6_auto usb 6 8 22050 25 - --threshold+auto" \
+            "usb_6_fixed usb 6 8 22050 25 - --threshold+70" \
             "am_12 am 12 12 8000 60 --passband+100:3000 --passband+100:3000" \
             "fm_25 fm 25 22 8000 60 --passband+300:3000 --passband+300:3000"
 # 25 bytes/s occupies 1100 Hz (950-2050 Hz): it cannot fit a 500 Hz passband.

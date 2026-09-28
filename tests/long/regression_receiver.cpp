@@ -51,7 +51,7 @@ void test_l5_clock() {
             job.channel = usb_channel(k_l5_snr_db);
             job.channel.clock_ppm = sign == 0 ? k_l5_ppm : -k_l5_ppm;
             job.channel.seed = seed_of(k_test_l5, static_cast<std::uint32_t>(v), static_cast<std::uint32_t>(sign));
-            job.decoders.push_back(receiver_for(config, false));
+            job.decoders.push_back(receiver_for(config));
             job.transmissions.push_back(random_tx(config, bytes, job.channel.seed));
             jobs.push_back(job);
             points.push_back(v * 2 + sign);
@@ -66,7 +66,7 @@ void test_l5_clock() {
                        speed_text(k_l5_speeds[v]).c_str(), k_l5_minutes, o.score.bytes_sent,
                        sign == 0 ? k_l5_ppm : -k_l5_ppm, k_l5_snr_db);
             ledger("L5 " + condition, o);
-            const bool pass = o.score.locks == 1 && o.score.lost_bytes == 0 && o.score.wrong_bytes == 0 && integrity(o);
+            const bool pass = o.score.locks == 1 && o.score.lost_bytes == 0 && o.score.wrong_bytes == 0;
             result("L5", condition,
                    ber_text(o) + format("; T error mean %.4f%%, worst %.4f%%", k_percent * o.mean_slot_error(),
                                         k_percent * o.worst_slot_error),
@@ -129,8 +129,9 @@ void test_l19_passband() {
                        speed_text(k_speeds[v]).c_str(), k_l19_pitches, k_filters[f].name, k_filters[f].low_hz,
                        k_filters[f].high_hz);
             ledger("L19 " + condition, total);
-            result("L19", condition, ber_text(total) + "; " + worst, "BER <= 1e-4, 0 extra, 0 shifted (provisional)",
-                   near_zero_errors(total));
+            result("L19", condition, ber_text(total) + "; " + worst,
+                   "BER <= 1e-4 (provisional); extra and shifted bytes reported (V22)",
+                   total.score.ber() <= k_near_zero_ber);
         }
     }
 }

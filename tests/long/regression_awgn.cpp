@@ -5,8 +5,8 @@
 #include <cmath>
 #include <random>
 
-// A1/A2 (AWGN per speed; the fixed 70 % line against the adaptive one), A3 (acquisition from byte 0) and S1 (short
-// transmissions), spec 4.
+// A1/A2 (AWGN per speed; the default adaptive line, and the fixed 70 % line against it), A3 (acquisition from byte 0)
+// and S1 (short transmissions), spec 4.
 namespace unlimited {
 namespace regression {
 
@@ -55,8 +55,8 @@ void test_a1_awgn() {
         for (std::size_t o = 0; o < k_a1_points; ++o) {
             JobPlan shape;
             shape.channel = usb_channel(gate_db(k_speeds[v]) + k_a1_offsets_db[o]);
-            shape.decoders.push_back(receiver_for(config, false));
-            shape.decoders.push_back(receiver_for(config, true));
+            shape.decoders.push_back(receiver_for(config));
+            shape.decoders.push_back(fixed_receiver_for(config));
             const std::size_t first = jobs.size();
             add_jobs(jobs, points, v * k_a1_points + o, shape, config, transmissions_for(k_a1_bits, k_a1_bytes),
                      k_a1_bytes, k_test_a1);
@@ -66,23 +66,24 @@ void test_a1_awgn() {
     const std::vector<std::vector<Outcome> > outcomes = run_points(jobs, points, k_speed_count * k_a1_points);
     for (std::size_t v = 0; v < k_speed_count; ++v) {
         for (std::size_t o = 0; o < k_a1_points; ++o) {
-            const Outcome& fixed = outcomes[v * k_a1_points + o][0];
-            const Outcome& adaptive = outcomes[v * k_a1_points + o][1];
+            const Outcome& adaptive = outcomes[v * k_a1_points + o][0];
+            const Outcome& fixed = outcomes[v * k_a1_points + o][1];
             const double snr = gate_db(k_speeds[v]) + k_a1_offsets_db[o];
             const std::string condition = format("%s, AWGN %.1f dB (gate %+.1f), mistuned +-50 Hz",
                                                  speed_text(k_speeds[v]).c_str(), snr, k_a1_offsets_db[o]);
-            ledger("A1 " + condition, fixed);
-            ledger("A2 " + condition, adaptive);
+            ledger("A1 " + condition, adaptive);
+            ledger("A2 " + condition, fixed);
             if (o == 0) {
-                result("A1", condition + ", fixed 70 % line", ber_text(fixed),
-                       "BER <= 1e-3, loss <= 1 % (provisional)",
-                       fixed.score.ber() <= k_a1_max_ber && fixed.score.loss() <= k_a1_max_loss && integrity(fixed));
+                result("A1", condition + ", adaptive line (the default)", ber_text(adaptive),
+                       "BER <= 1e-3, loss <= 1 % (provisional); extra bytes reported (V22)",
+                       adaptive.score.ber() <= k_a1_max_ber && adaptive.score.loss() <= k_a1_max_loss);
             } else {
-                result("A1", condition + ", fixed 70 % line", ber_text(fixed), "report", true, Kind::report);
+                result("A1", condition + ", adaptive line (the default)", ber_text(adaptive), "report", true,
+                       Kind::report);
             }
-            result("A2", condition + ", adaptive line against the fixed 70 %",
-                   format("adaptive BER %.2e, loss %.2f%%; fixed BER %.2e, loss %.2f%%", adaptive.score.ber(),
-                          k_percent * adaptive.score.loss(), fixed.score.ber(), k_percent * fixed.score.loss()),
+            result("A2", condition + ", fixed 70 % line against the default adaptive line",
+                   format("fixed BER %.2e, loss %.2f%%; adaptive BER %.2e, loss %.2f%%", fixed.score.ber(),
+                          k_percent * fixed.score.loss(), adaptive.score.ber(), k_percent * adaptive.score.loss()),
                    "report", true, Kind::report);
         }
     }
@@ -95,7 +96,7 @@ void test_a3_acquisition() {
         const EncoderConfig config = speed_config(k_speeds[v]);
         JobPlan shape;
         shape.channel = usb_channel(gate_db(k_speeds[v]) + k_a3_margin_db);
-        shape.decoders.push_back(receiver_for(config, false));
+        shape.decoders.push_back(receiver_for(config));
         const std::size_t first = jobs.size();
         add_jobs(jobs, points, v, shape, config, k_a3_transmissions, k_a3_bytes, k_test_a3);
         for (std::size_t j = first; j < jobs.size(); ++j) jobs[j].channel.freq_offset_hz = mistune(jobs[j].channel.seed);
@@ -109,7 +110,7 @@ void test_a3_acquisition() {
                    speed_text(k_speeds[v]).c_str(), o.transmissions, k_a3_bytes, gate_db(k_speeds[v]) + k_a3_margin_db);
         ledger("A3 " + condition, o);
         result("A3", condition, format("decoded from byte 0 %.2f%%; ", k_percent * locked) + ber_text(o),
-               ">= 99 % from byte 0 (provisional)", locked >= k_a3_min_locked && integrity(o));
+               ">= 99 % from byte 0 (provisional)", locked >= k_a3_min_locked);
     }
 }
 
@@ -123,7 +124,7 @@ void test_s1_short() {
                 JobPlan shape;
                 const double snr = n == 0 ? gate_db(k_speeds[v]) + k_s1_snrs[0] : k_s1_snrs[1];
                 shape.channel = usb_channel(snr);
-                shape.decoders.push_back(receiver_for(config, false));
+                shape.decoders.push_back(receiver_for(config));
                 const std::size_t point = (v * k_s1_size_count + s) * 2 + n;
                 const std::size_t first = jobs.size();
                 add_jobs(jobs, points, point, shape, config, k_s1_transmissions, k_s1_sizes[s], k_test_s1);

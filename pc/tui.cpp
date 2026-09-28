@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <thread>
 
 namespace unlimited {
@@ -266,6 +267,19 @@ std::string fixed(double value, int decimals) {
     char buffer[k_format_buffer];
     std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
     return buffer;
+}
+
+// A level in dB to one decimal; a value that rounds to zero reads "0.0", never "-0.0".
+std::string db_text(double db) {
+    const std::string text = fixed(db, k_db_decimals);
+    const std::string zero = fixed(0.0, k_db_decimals);
+    return text == "-" + zero ? zero : text;
+}
+
+// 20 log10(amplitude / full scale); -infinity for 0.
+double amplitude_dbfs(double amplitude) {
+    if (!(amplitude > 0.0)) return -std::numeric_limits<double>::infinity();
+    return k_amplitude_to_db * std::log10(amplitude / k_full_scale);
 }
 
 std::string hex_byte(uint8_t value) {
@@ -1241,9 +1255,107 @@ size_t display_width(const std::string& line) {
     return width;
 }
 
+std::string level_text(const Level& level, bool with_clips) {
+    if (level.samples == 0) return "no audio";
+    if (!std::isfinite(level.peak_dbfs)) return "digital silence";
+    std::string text = "peak " + db_text(level.peak_dbfs) + " dBFS, RMS " + db_text(level.rms_dbfs) + " dBFS";
+    if (with_clips) text += ", " + std::to_string(level.clips) + (level.clips == 1 ? " clip" : " clips");
+    return text;
+}
+
+LevelMeter::LevelMeter(double window_ms)
+    : window_ms_(window_ms), sample_rate_hz_(0), window_samples_(1), block_(), last_(), total_(), zero_run_(0) {}
+
+void LevelMeter::add(Sums& sums, int16_t sample) {
+    const int32_t value = sample;
+    ++sums.samples;
+    sums.peak = std::max(sums.peak, static_cast<uint32_t>(value < 0 ? -value : value));
+    sums.squares += static_cast<double>(value) * value;
+    if (sample == std::numeric_limits<int16_t>::max() || sample == std::numeric_limits<int16_t>::min()) ++sums.clips;
+}
+
+Level LevelMeter::level_of(const Sums& sums) {
+    Level level;
+    level.samples = sums.samples;
+    level.peak_dbfs = amplitude_dbfs(sums.peak);
+    level.rms_dbfs = sums.samples > 0 ? amplitude_dbfs(std::sqrt(sums.squares / static_cast<double>(sums.samples)))
+                                      : amplitude_dbfs(0.0);
+    level.clips = sums.clips;
+    return level;
+}
+
+void LevelMeter::push(const int16_t* samples, size_t count, uint32_t sample_rate_hz) {
+    if (sample_rate_hz == 0) return;
+    if (sample_rate_hz != sample_rate_hz_) {  // another stream: the recent level and the silence start over
+        sample_rate_hz_ = sample_rate_hz;
+        window_samples_ = static_cast<uint64_t>(std::max(1L, std::lround(window_ms_ * sample_rate_hz / k_ms_per_s)));
+        block_ = Sums();
+        last_ = Sums();
+        zero_run_ = 0;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        add(block_, samples[i]);
+        add(total_, samples[i]);
+        zero_run_ = samples[i] == 0 ? zero_run_ + 1 : 0;
+        if (block_.samples < window_samples_) continue;
+        last_ = block_;
+        block_ = Sums();
+    }
+}
+
+Level LevelMeter::recent() const {
+    return level_of(last_.samples > 0 ? last_ : block_);
+}
+
+Level LevelMeter::total() const {
+    return level_of(total_);
+}
+
+double LevelMeter::silent_seconds() const {
+    return sample_rate_hz_ > 0 ? static_cast<double>(zero_run_) / sample_rate_hz_ : 0.0;
+}
+
+StatusRing::StatusRing(size_t min_capacity) : mask_(0), written_(0), read_(0), dropped_(0) {
+    size_t capacity = 1;
+    while (capacity < min_capacity) capacity <<= 1;
+    slots_.assign(capacity, EncoderStatus());
+    mask_ = capacity - 1;
+}
+
+bool StatusRing::push(const EncoderStatus& status) {
+    const size_t written = written_.load(std::memory_order_relaxed);
+    const size_t read = read_.load(std::memory_order_acquire);
+    if (written - read >= slots_.size()) {
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    slots_[written & mask_] = status;
+    written_.store(written + 1, std::memory_order_release);
+    return true;
+}
+
+bool StatusRing::pop(EncoderStatus& status) {
+    const size_t read = read_.load(std::memory_order_relaxed);
+    const size_t written = written_.load(std::memory_order_acquire);
+    if (read == written) return false;
+    status = slots_[read & mask_];
+    read_.store(read + 1, std::memory_order_release);
+    return true;
+}
+
+size_t StatusRing::capacity() const {
+    return slots_.size();
+}
+
+uint32_t StatusRing::dropped() const {
+    return dropped_.load(std::memory_order_relaxed);
+}
+
 Tui::Tui(TuiMode mode)
     : mode_(mode),
       color_(true),
+      level_(),
+      has_level_(false),
       bytes_per_second_(0.0f),
       tone_hz_(0.0f),
       slot_ms_(0.0f),
@@ -1260,6 +1372,7 @@ Tui::Tui(TuiMode mode)
       status_(),
       has_status_(false),
       state_(DecoderState::search),
+      dcd_(false),
       last_flags_(0),
       bytes_(0),
       locks_(0),
@@ -1304,16 +1417,43 @@ void Tui::set_search_range(const Passband& search) {
     search_ = search;
 }
 
-void Tui::set_field(const std::string& key, const std::string& value) {
-    for (size_t i = 0; i < fields_.size(); ++i) {
-        if (fields_[i].first != key) continue;
+namespace {
+
+// Sets, replaces or (an empty value) removes one keyed item, keeping the order of first setting.
+void set_keyed(std::vector<std::pair<std::string, std::string> >& fields, const std::string& key,
+               const std::string& value) {
+    for (size_t i = 0; i < fields.size(); ++i) {
+        if (fields[i].first != key) continue;
         if (value.empty())
-            fields_.erase(fields_.begin() + static_cast<std::ptrdiff_t>(i));
+            fields.erase(fields.begin() + static_cast<std::ptrdiff_t>(i));
         else
-            fields_[i].second = value;
+            fields[i].second = value;
         return;
     }
-    if (!value.empty()) fields_.push_back(std::make_pair(key, value));
+    if (!value.empty()) fields.push_back(std::make_pair(key, value));
+}
+
+}  // namespace
+
+void Tui::set_field(const std::string& key, const std::string& value) {
+    set_keyed(fields_, key, value);
+}
+
+void Tui::set_front_field(const std::string& key, const std::string& value) {
+    set_keyed(front_fields_, key, value);
+}
+
+void Tui::set_level(const Level& level) {
+    level_ = level;
+    has_level_ = true;
+}
+
+void Tui::set_warning(const std::string& warning) {
+    warning_ = warning;
+}
+
+void Tui::set_dcd(bool on) {
+    dcd_ = on;
 }
 
 void Tui::push_audio(const int16_t* samples, size_t count, uint32_t sample_rate_hz) {
@@ -1457,8 +1597,12 @@ std::vector<std::string> Tui::status_items() const {
     if (encoder) {
         items.push_back(upper(segment_name(has_status_ ? status_.segment : EncoderSegment::idle)));
     } else {
-        items.push_back(std::string(state_name(state_)) + (state_ == DecoderState::search ? ", DCD off" : ", DCD on"));
+        items.push_back(std::string(state_name(state_)) + (dcd_ ? ", DCD on" : ", DCD off"));
     }
+    for (size_t i = 0; i < front_fields_.size(); ++i)
+        items.push_back(front_fields_[i].first + " " + front_fields_[i].second);
+    if (has_level_) items.push_back(std::string(encoder ? "out " : "in ") + level_text(level_, !encoder));
+    if (!warning_.empty()) items.push_back(warning_);
     if (bytes_per_second_ > 0.0f) {
         items.push_back(fixed(bytes_per_second_, k_speed_decimals) + " bytes/s, " +
                         fixed(k_bits_per_second_per_byte * bytes_per_second_, k_rate_decimals) + " bit/s");
@@ -1554,6 +1698,13 @@ std::string Tui::frame(int columns, int rows, bool clear) const {
     return out;
 }
 
+std::string Tui::next_frame(int columns, int rows) {
+    const bool clear = columns != drawn_columns_ || rows != drawn_rows_;
+    drawn_columns_ = columns;
+    drawn_rows_ = rows;
+    return frame(columns, rows, clear);
+}
+
 bool Tui::open(std::FILE* out) {
     if (open_) return true;
     if (!is_tty(out) || !enable_vt(out)) return false;
@@ -1572,10 +1723,7 @@ void Tui::draw() {
     int columns = 0;
     int rows = 0;
     terminal_size(columns, rows, out_);
-    const bool clear = columns != drawn_columns_ || rows != drawn_rows_;
-    drawn_columns_ = columns;
-    drawn_rows_ = rows;
-    const std::string bytes = frame(columns, rows, clear);
+    const std::string bytes = next_frame(columns, rows);
     std::fwrite(bytes.data(), 1, bytes.size(), out_);
     std::fflush(out_);
 }
@@ -1604,6 +1752,10 @@ bool RefreshPacer::due() {
 void RefreshPacer::wait() {
     std::this_thread::sleep_until(next_);
     consume(Clock::now());
+}
+
+RefreshPacer::Clock::time_point RefreshPacer::next() const {
+    return next_;
 }
 
 void RefreshPacer::consume(Clock::time_point now) {

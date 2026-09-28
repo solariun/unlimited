@@ -17,7 +17,7 @@ const double k_full_scale = 32768.0;
 const double k_int16_max = 32767.0;
 const double k_int16_min = -32768.0;
 const std::size_t k_render_chunk = 32;        // shorter than any slot, so the queue never runs dry
-const double k_trailing_windows = 2.0;        // single(): silence after a transmission, at least 2 windows
+const double k_trailing_windows = 3.0;        // single(): silence after a transmission: the end's 2 windows and more
 const double k_leading_slots = 15.0;          // a whole silent window, the search's warm-up and a margin
 const double k_reference_bandwidth_hz = 2500.0;
 const double k_receiver_bandwidth_hz = 2400.0;
@@ -26,11 +26,11 @@ const double k_headroom = 0.9;
 const int k_byte_bits = 8;
 const double k_pi = 3.14159265358979323846;
 const unsigned k_byte_mask = 0xFFu;
-// A lock comes once the history holds its check windows: at least 2 windows and half a slot after the anchor (spec
-// 3.3); after a silent START (back to back, spec 3.7) up to about 7 windows after it, when the old grid's next
-// windows are weighed too.
-const double k_lock_min_slots = 19.5;
-const double k_lock_max_slots = 75.0;
+// A lock comes once the history holds the first window and half a slot (spec 3.3, V20: the first window is decided
+// alone); after a silent START (back to back, spec 3.7) the old grid's next windows may be weighed too. A window less
+// half a slot, and 10 windows, bound it.
+const double k_lock_min_slots = 9.5;
+const double k_lock_max_slots = 100.0;
 
 struct Sink {
     Capture* capture;
@@ -55,13 +55,13 @@ double lead_in_samples(const EncoderConfig& config) {
 
 // The transmission a lock at `sample` belongs to: the latest whose first START lies between k_lock_max_slots and
 // k_lock_min_slots before the lock (look-ahead and channel delay removed); -1 when none does.
-long transmission_of_lock(const Recording& recording, double sample, std::size_t lookahead, double delay) {
+long transmission_of_lock(const Recording& recording, double sample, const Capture& capture, double delay) {
     long found = -1;
     double latest = 0.0;
     for (std::size_t t = 0; t < recording.transmissions.size(); ++t) {
         const Transmission& tx = recording.transmissions[t];
         const double slot = slot_samples(tx.config) * k_decoder_rate_hz / tx.config.sample_rate_hz;
-        const double heard = sample - static_cast<double>(lookahead) - delay;
+        const double heard = sample - static_cast<double>(capture.lookahead) - delay;
         const double start = first_start_sample(tx) * k_decoder_rate_hz / tx.config.sample_rate_hz;
         if (start > heard - k_lock_min_slots * slot || start < heard - k_lock_max_slots * slot) continue;
         if (found < 0 || start > latest) {
@@ -289,8 +289,8 @@ Mapping map_events(const Recording& recording, const Capture& capture, double de
             case EventType::locked:
                 ++s.locks;
                 open = true;
-                current = transmission_of_lock(recording, static_cast<double>(capture.event_sample[i]),
-                                               capture.lookahead, delay_samples);
+                current = transmission_of_lock(recording, static_cast<double>(capture.event_sample[i]), capture,
+                                               delay_samples);
                 break;
             case EventType::byte: {
                 ++s.bytes_released;

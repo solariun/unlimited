@@ -1,15 +1,18 @@
 #pragma once
 
+#include "audio.hpp"
 #include "unlimited/decoder.hpp"
 #include "unlimited/encoder.hpp"
 
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -149,6 +152,43 @@ inline uint32_t to_slot_us(const std::string& option, const std::string& text) {
     const double speed = to_number(option, text);
     if (!(speed > 0.0)) throw UsageError(option + ": the speed must be above 0 bytes/s");
     return slot_us_for_centi_speed(to_clamped<uint16_t>(speed * k_percent));
+}
+
+// A device spec given to a program's own option (--in, --out), checked as the shared options check --input and
+// --output (pc::RadioOptions): a sound card, wav:<path>, <path>.wav or null.
+inline std::string to_device_spec(const std::string& option, const std::string& text) {
+    if (pc::parse_device_spec(text).kind == pc::DeviceKind::unknown)
+        throw UsageError(option + ": '" + text +
+                         "' is not a device (coreaudio:<#|name part|UID> on macOS, alsa:<name> on Linux, default, "
+                         "wav:<path>, <path>.wav or null; --list-devices shows the devices)");
+    return text;
+}
+
+inline bool is_live(const std::string& spec) {
+    return pc::parse_device_spec(spec).kind == pc::DeviceKind::live;
+}
+
+// The receiver as the programs run it (Gustavo, 2026-09-28): the library's defaults with the adaptive decision line
+// (--threshold auto) as the default, set here whatever the library's own default is; --threshold PCT selects the
+// fixed line.
+inline DecoderConfig receiver_config() {
+    DecoderConfig config;
+    config.decision_mode = DecisionMode::adaptive;
+    return config;
+}
+
+// --fade-bridge (spec 3.7, Gustavo 2026-09-28): the receiver's rule for HF fades, off by default in both programs. With
+// it on, a transmission ends after 2 silent windows instead of 1, and a new START needs at least
+// k_fade_bridge_silence_ms of silence before it (or a VOX lead and its gap), so the sender leaves that much silence
+// before its first START. Both sides must use the same setting, like the speed.
+const uint16_t k_fade_bridge_silence_ms = k_min_onset_silence_ms;  // protocol.hpp: 300 ms
+
+inline bool fade_bridge_of(const DecoderConfig& config) {
+    return config.fade_bridge;
+}
+
+inline void to_fade_bridge(DecoderConfig& config) {
+    config.fade_bridge = true;
 }
 
 // --threshold PCT|auto: the fixed line at PCT % of the reference, or the adaptive line.
@@ -320,6 +360,17 @@ inline std::string threshold_text(const DecoderConfig& config) {
     return "decision line at " + std::to_string(config.threshold_percent) + " % of the reference";
 }
 
+// The signal that stopped a live device (pc::StopOnSignals): "Ctrl-C (SIGINT)", "SIGTERM", "SIGHUP (the terminal
+// closed)".
+inline std::string signal_name(int signal_number) {
+    if (signal_number == SIGINT) return "Ctrl-C (SIGINT)";
+    if (signal_number == SIGTERM) return "SIGTERM";
+#ifdef SIGHUP
+    if (signal_number == SIGHUP) return "SIGHUP (the terminal closed)";
+#endif
+    return "signal " + std::to_string(signal_number);
+}
+
 inline bool read_file(const std::string& path, std::vector<std::uint8_t>& data) {
     std::ifstream file(path.c_str(), std::ios::binary);
     if (!file) return false;
@@ -327,26 +378,28 @@ inline bool read_file(const std::string& path, std::vector<std::uint8_t>& data) 
     return !file.bad();
 }
 
-// Lines go to stdout at once, or wait while the TUI owns the screen.
+// Lines go to stdout (warnings to stderr) at once, each flushed (a live program's output is read while it runs), or
+// wait while the TUI owns the screen. A live program may hold lines for hours: the newest k_max_held_lines are kept,
+// and how many were left out is said when they are released.
 class Console {
 public:
-    Console() : held_(false) {}
+    static const std::size_t k_max_held_lines = 100000;
+
+    Console() : held_(false), dropped_(0) {}
 
     void hold(bool held) {
         held_ = held;
         if (held_) return;
-        for (std::size_t i = 0; i < lines_.size(); ++i) std::printf("%s\n", lines_[i].c_str());
+        if (dropped_ > 0)
+            std::printf("(%zu earlier line%s not kept while the view was open)\n", dropped_, dropped_ == 1 ? "" : "s");
+        for (std::size_t i = 0; i < lines_.size(); ++i) std::fprintf(lines_[i].stream, "%s\n", lines_[i].text.c_str());
         lines_.clear();
+        dropped_ = 0;
         std::fflush(stdout);
     }
 
-    void line(const std::string& text) {
-        if (held_) {
-            lines_.push_back(text);
-        } else {
-            std::printf("%s\n", text.c_str());
-        }
-    }
+    void line(const std::string& text) { emit(stdout, text); }
+    void warning(const std::string& text) { emit(stderr, text); }
 
     // "label      text": the first column is k_label_width wide.
     void item(const std::string& label, const std::string& text) {
@@ -358,8 +411,27 @@ public:
 private:
     static const std::size_t k_label_width = 11;
 
+    struct Line {
+        std::FILE* stream;
+        std::string text;
+    };
+
+    void emit(std::FILE* stream, const std::string& text) {
+        if (!held_) {
+            std::fprintf(stream, "%s\n", text.c_str());
+            std::fflush(stream);
+            return;
+        }
+        const Line line = {stream, text};
+        lines_.push_back(line);
+        if (lines_.size() <= k_max_held_lines) return;
+        lines_.pop_front();
+        ++dropped_;
+    }
+
     bool held_;
-    std::vector<std::string> lines_;
+    std::deque<Line> lines_;
+    std::size_t dropped_;
 };
 
 }  // namespace cli

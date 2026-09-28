@@ -13,8 +13,8 @@
 //
 // loop() blocks in adc_continuous_read() until the next 10 ms DMA frame arrives; the decoder runs there,
 // in task context, as the core requires. Prints "locked" with the pitch, T, the SNR and the received band, every
-// byte as soon as its window's STOP is heard, "end" and "lost". The DCD pin is high while the receiver holds a
-// signal (Decoder::dcd(): a modem waits for it to drop before it transmits).
+// byte as soon as its window's STOP is heard, "end" and "lost". The DCD pin is high while a transmission is
+// being decoded (Decoder::dcd(), spec 3.10: a modem waits for it to drop before it transmits).
 //
 // Wiring:
 //   radio speaker / data out --||--+-- GPIO36 (VP, ADC1 channel 0, classic ESP32; fine with Wi-Fi on)

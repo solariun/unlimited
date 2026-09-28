@@ -4,14 +4,16 @@
 
 namespace unlimited {
 
-// Decision line (spec 3.5, V14): the fixed line sits at threshold_percent of the window's reference line.
+// Decision line (spec 3.5, V14): the adaptive line by default; the fixed line (selectable) sits at threshold_percent
+// of the window's reference line.
 static const uint8_t k_default_threshold_percent = 70;
 static const uint8_t k_min_threshold_percent = 50;
 static const uint8_t k_max_threshold_percent = 90;
 
 enum class DecisionMode : uint8_t {
-    fixed,    // threshold_percent of the reference line (70 %: Gustavo's rule, the default)
-    adaptive  // v0.3's smart line: 50..75 % of the reference line (about 70 % on weak signals), never below the noise
+    fixed,    // threshold_percent of the reference line (70 %: Gustavo's original rule, selectable)
+    adaptive  // the default: v0.3's smart line, 50..75 % of the reference line (about 70 % on weak signals), never
+              // below the noise (spec 3.5, V14)
 };
 
 enum class DecoderState : uint8_t { search, acquire, track };
@@ -55,10 +57,16 @@ struct DecoderConfig {
     uint32_t slot_us;            // T = 1 / (10 B), k_min_slot_us..k_max_slot_us: slot_us_for_speed(B)
     Passband passband;           // the radio's audio passband; the pitch search stays inside it (spec 3.2)
     uint8_t threshold_percent;   // DecisionMode::fixed: k_min_threshold_percent..k_max_threshold_percent (70)
-    DecisionMode decision_mode;  // fixed (the default) or adaptive
+    DecisionMode decision_mode;  // adaptive (the default) or fixed
     bool impulse_blanker;
+    // The fade bridge (spec 3.7, V16), off by default: a transmission ends only after 2 silent windows (a fade of up to
+    // about a window costs framing errors, not the rest of the transmission), and a START needs k_min_onset_silence_ms
+    // of silence before it, or a VOX lead and its gap (a signal coming back after a shorter fade is not a new
+    // transmission). Off: the end comes after one silent window and a START needs 2 silent slots. The senders give each
+    // transmission a lead-in of at least k_min_onset_silence_ms.
+    bool fade_bridge;
 
-    DecoderConfig();  // 6 bytes/s, 300..2700 Hz, the fixed 70 % line, blanker on
+    DecoderConfig();  // 6 bytes/s, 300..2700 Hz, the adaptive line (70 % when fixed), blanker on, no fade bridge
     ConfigError check() const;
     bool valid() const;  // check() == ConfigError::none
     // Pitches the search looks at: search_range(passband, slot_us) (spec 3.2).
@@ -74,13 +82,14 @@ public:
     void process_sample(int16_t sample);
 
     DecoderState state() const;
-    bool dcd() const;                   // carrier detect: state() != DecoderState::search
+    // A transmission is being decoded (spec 3.10, V19, V20): from its lock (the first window read and released) to `end`
+    // or `lost`: the TRACK state. A tone alone (a carrier, CW, speech, FM noise) does not turn it on.
+    bool dcd() const;
     float tone_hz() const;              // the pitch held; 0 in SEARCH
     float slot_ms() const;              // T as measured while tracking, else the configured T
     float snr_db() const;               // while tracking, else 0
     uint32_t framing_errors() const;    // windows dropped since the last lock
     uint16_t lookahead_samples() const; // the look-ahead delay: events come this much after the audio (spec 3.1)
-    uint8_t acquire_windows() const;    // windows checked before `locked` (spec 3.3): 2, and 4 at 25 bytes/s
     const DecoderConfig& config() const;
 
 private:
@@ -94,8 +103,9 @@ private:
     };
 
     // How a candidate START checked out (spec 3.3): a steady tone (loud slot edges: a VOX lead, a carrier, CW) is no
-    // data, so the scan may take the next onset after it; missing markers mean data on a wrong grid.
-    enum class Check : uint8_t { ok, steady, markers };
+    // data, so the scan may take the next onset after it; nor is a START that is no tone above the noise (a click, a
+    // receiver AGC's hiss pumped up in the silence: V24); missing markers mean data on a wrong grid.
+    enum class Check : uint8_t { ok, steady, markers, noise };
 
     // A decided window: bits MSB first, soft values, the lines in % and flags.
     struct Decision {
@@ -123,6 +133,7 @@ private:
         bool found;             // `anchor` holds a candidate START to verify
         float anchor;           // its position, history blocks from origin_block_
         float excess;           // watching: the candidate's slot energy over the noise
+        float credit;           // silence known before the origin (a fresh tone's quiet), history blocks
     };
 
     void initialize();
@@ -135,11 +146,12 @@ private:
     void enter_search();
     void enter_acquire();
     void retune(float tone_hz, uint8_t mixed_samples, uint32_t keep_from);
-    void forget_history(bool trusted);
+    void forget_history(bool fresh);
+    float fresh_credit(bool fresh) const;
 
     // Acquisition (spec 3.2, 3.3).
     void steer(bool holding);
-    void restart_scan(uint32_t origin, bool trusted);
+    void restart_scan(uint32_t origin, bool trusted, float credit = 0.0f);
     void scan_step_all();
     bool scan_step(Scan& scan, uint32_t limit);
     void watch(Scan& scan, uint32_t position, float excess) const;
@@ -149,6 +161,7 @@ private:
     bool loud_slot(float start, float& excess) const;
     bool loud_before(float position) const;
     bool quiet_before(float start, float excess) const;
+    bool steady_before(float end) const;
     float refine_anchor(float anchor) const;
     void run_acquire();
     void reject(Check check);
@@ -156,22 +169,24 @@ private:
     float refine_timing(float anchor, uint8_t windows) const;
     bool steady_start(float anchor) const;
     float energy_density(float from, float blocks) const;
-    Check windows_check(float anchor, float& reference) const;
+    Check window_check(float anchor, float& reference) const;
 
     // Tracking (spec 3.4-3.7).
     void run_track();
     bool track_step();
     bool window_ready(float start) const;
     Window measure(float start) const;
-    Decision decide(const Window& window) const;
+    Decision decide(const Window& window) const;  // against the running reference
+    Decision decide(const Window& window, float running) const;
+    Decision decide_settling(const Window& window) const;
     void emit_window(const Decision& decision, float start);
     void update_loops(const Window& window, const Decision& decision, float start);
     float timing_error(float start, const Decision& decision) const;
     bool quiet_window(const Window& window, float reference) const;
-    bool silent_window(const Window& window) const;
     bool tone_in(const Window& window, uint8_t slot, float reference) const;
     bool markers_present(const Window& window, float reference) const;
     bool resolve_pending();
+    void release_held();
     void continue_after_pending(float next);
     void finish_end(float next_start);
     void lose(LostReason reason, float from);
@@ -201,11 +216,11 @@ private:
     uint8_t block_fill_;
     uint8_t settle_blocks_;
     bool settle_trusted_;    // the scan restarts trusted after the settle (the tone came up fresh)
+    float onset_silence_;    // history blocks of silence a START needs before it (spec 3.3, V16), less the tolerance
     uint16_t fresh_blocks_;  // search blocks since a tone came up within which its START is still in the history
     uint16_t protect_blocks_;  // ... within which the scan may not have reached it yet
     float band_reach_hz_;      // half the occupied band and a search bin: a candidate's own sidebands lie within
     float refine_reach_hz_;    // the largest pitch correction of a candidate (a quarter of the band, the re-mix reach)
-    uint8_t acquire_windows_;  // windows of the check before lock (spec 3.3)
     uint32_t block_energy_;
 
     dsp::Lookahead lookahead_;
@@ -226,7 +241,7 @@ private:
     Scan pending_scan_;             // TRACK: the new transmission a silent START may begin (spec 3.7)
     uint32_t acquire_block_;        // history block when ACQUIRE began (timeout)
     bool start_checked_;            // the candidate's first slots passed the early steady test
-    bool pitch_refined_;            // the anchor's pitch was refined at the last block; its windows are checked next
+    bool pitch_refined_;            // the first window's pitch was refined at the last block; the window is decided next
     float verify_hz_;               // the pitch before that refinement (restored when the candidate fails)
     bool locked_tone_;              // the tone search locked (ACQUIRE by the search, not by an anchor)
     float locked_hz_;
@@ -236,6 +251,8 @@ private:
     uint32_t byte_index_;           // of the next window
     float drift_;                   // timing loop integral: blocks per window beyond 10 T
     float reference_;               // running START/STOP level (crest units)
+    float settle_sum_;              // while it settles (the first k_settle_windows windows, V24): the markers read
+    uint8_t settle_markers_;        // so far and their count
     dsp::Complex last_stop_;        // the previous window's STOP sum (pitch loop)
     bool has_last_stop_;
     uint8_t framing_run_;
@@ -249,6 +266,11 @@ private:
     float pending_anchor_;          // the new START
     float pending_reference_;       // its reference
     Window pending_window_;         // the window with the silent START
+    // The fade bridge (spec 3.7, V16): a whole silent window is held, not an end: the transmission ends only when the
+    // next window is silent too; a tone on the old grid after it was a fade, and the held window is dropped.
+    bool held_;
+    float held_start_;
+    Window held_window_;
 };
 
 }  // namespace unlimited

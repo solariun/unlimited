@@ -89,8 +89,8 @@
 <text x="24" y="187" font-size="10" fill="#5F5E5A">USB, the gate (1.3 dB)</text>
 <rect x="251" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="261" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">C</text>
-<rect x="273" y="164" width="20" height="22" fill="#D85A30" stroke="#888780" stroke-width="0.5" rx="3"/>
-<text x="283" y="179" font-size="11" fill="#FFFFFF" text-anchor="middle" font-weight="bold">A</text>
+<rect x="273" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
+<text x="283" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">Q</text>
 <rect x="295" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="305" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold"> </text>
 <rect x="317" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
@@ -107,23 +107,23 @@
 <text x="437" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold"> </text>
 <rect x="449" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="459" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">U</text>
-<rect x="471" y="164" width="20" height="22" fill="#D85A30" stroke="#888780" stroke-width="0.5" rx="3"/>
-<text x="481" y="179" font-size="11" fill="#FFFFFF" text-anchor="middle" font-weight="bold">L</text>
+<rect x="471" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
+<text x="481" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">N</text>
 <rect x="493" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="503" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">L</text>
 <rect x="515" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="525" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">I</text>
 <rect x="537" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="547" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">M</text>
-<rect x="559" y="164" width="20" height="22" fill="#D85A30" stroke="#888780" stroke-width="0.5" rx="3"/>
-<text x="569" y="179" font-size="11" fill="#FFFFFF" text-anchor="middle" font-weight="bold">H</text>
+<rect x="559" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
+<text x="569" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">I</text>
 <rect x="581" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="591" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">T</text>
 <rect x="603" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="613" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">E</text>
 <rect x="625" y="164" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="635" y="179" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">D</text>
-<text x="658" y="179" font-size="11" fill="#D85A30">15/18 right, 1 lock</text>
+<text x="658" y="179" font-size="11" fill="#0F6E56">18/18 right, 1 lock</text>
 <text x="24" y="209" font-size="12" fill="#2C2C2A" font-weight="bold">CCIR good</text>
 <text x="24" y="221" font-size="10" fill="#5F5E5A">USB 10 dB, 0.1 Hz Doppler</text>
 <rect x="251" y="198" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
@@ -233,15 +233,15 @@
 <text x="525" y="281" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">I</text>
 <rect x="537" y="266" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="547" y="281" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">M</text>
-<rect x="559" y="266" width="20" height="22" fill="#D85A30" stroke="#888780" stroke-width="0.5" rx="3"/>
-<text x="569" y="281" font-size="11" fill="#FFFFFF" text-anchor="middle" font-weight="bold">A</text>
+<rect x="559" y="266" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
+<text x="569" y="281" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">I</text>
 <rect x="581" y="266" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="591" y="281" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">T</text>
 <rect x="603" y="266" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="613" y="281" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">E</text>
 <rect x="625" y="266" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="635" y="281" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">D</text>
-<text x="658" y="281" font-size="11" fill="#D85A30">17/18 right, 1 lock</text>
+<text x="658" y="281" font-size="11" fill="#0F6E56">18/18 right, 1 lock</text>
 <rect x="12" y="296" width="796" height="32" fill="#F8F7F3"/>
 <text x="24" y="311" font-size="12" fill="#2C2C2A" font-weight="bold">QRN</text>
 <text x="24" y="323" font-size="10" fill="#5F5E5A">USB 10 dB, 5 crashes/s, blanker on</text>
@@ -400,6 +400,6 @@
 <rect x="625" y="402" width="20" height="22" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" rx="3"/>
 <text x="635" y="417" font-size="11" fill="#2C2C2A" text-anchor="middle" font-weight="bold">D</text>
 <text x="658" y="417" font-size="11" fill="#0F6E56">18/18 right, 1 lock</text>
-<text x="24" y="474" font-size="11" fill="#5F5E5A">One run each, fixed seeds: a picture of the conditions, not a measurement; the long suite (make test_long) measures them over many transmissions.</text>
+<text x="24" y="474" font-size="11" fill="#5F5E5A">One run each, fixed seeds: a picture of the conditions; the long suite (make test_long) measures them.</text>
 <text x="24" y="490" font-size="11" fill="#5F5E5A">A window whose START or STOP faded is dropped, never delivered wrong; a deep fade across a START ends the transmission.</text>
 </svg>

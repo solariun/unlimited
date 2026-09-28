@@ -15,9 +15,10 @@ static const uint8_t k_blocks_per_slot = 8;
 static const uint8_t k_min_block_samples = 4;
 static const uint8_t k_max_block_samples = 32;
 // The history holds what acquisition needs at every speed (spec 3.3, 3.9): the 2 silent slots before the first START
-// and the windows of the check after it (2, and 4 at 25 bytes/s), plus a scan catching up (after an end it starts one
-// window behind): 22 slots are 550 blocks at 1 byte/s (25 per slot) and 42 slots 336 blocks at 25 bytes/s. 1024 cells
-// (a power of two: a cell is found with a mask) hold 4.1 s at 1 byte/s and 0.51 s at 25 bytes/s.
+// and its window (V20: the first window is decided alone), plus a scan catching up (after an end it starts one window
+// behind): 22 slots are 550 blocks at 1 byte/s (25 per slot) and 176 at 25 bytes/s. 1024 cells (a power of two: a
+// cell is found with a mask) hold 4.1 s at 1 byte/s and 0.51 s at 25 bytes/s. A new START weighed against the old grid
+// after a silent START (spec 3.7) is given up when it leaves the history (at 1 byte/s, after 3 of its 4 windows).
 static const uint16_t k_history_cells = 1024;
 static_assert((k_history_cells & (k_history_cells - 1)) == 0, "the history is a power of two");
 static const uint8_t k_mix_shift = 10;
@@ -175,14 +176,15 @@ public:
     static const uint8_t k_max_bins = k_max_lock_bins + 2;  // and a guard bin on each side, never locked on
     static const uint16_t k_block_samples = 160;
     static const uint8_t k_long_run_blocks = 8;  // 160 ms
-    // A bin quiet for a whole window (10 slots: longer than any silence inside a transmission, 8 slots) holds no
-    // transmission; fresh() tells how recently a tone came up after such a quiet (spec 3.3, V6).
+    // A bin quiet for a whole window (10 slots: longer than any silence inside a transmission, 8 slots), and at least
+    // the configured quiet time (the fade bridge's 300 ms), holds no transmission; fresh() tells how recently a tone came
+    // up after such a quiet (spec 3.3, V6, V16).
     static const uint8_t k_quiet_slots = 10;
 
     ToneSearch();
-    // Bins on the multiples of 50 Hz inside min_hz..max_hz; slot_us sets the leading bin's average (spec 3.2). Also
-    // clears the bans.
-    void configure(uint16_t min_hz, uint16_t max_hz, uint32_t slot_us);
+    // Bins on the multiples of 50 Hz inside min_hz..max_hz; slot_us sets the leading bin's average (spec 3.2); a quiet
+    // run is max(k_quiet_slots, min_quiet_ms). Also clears the bans.
+    void configure(uint16_t min_hz, uint16_t max_hz, uint32_t slot_us, uint16_t min_quiet_ms = 0);
     void reset();                                       // statistics only; bans and strikes stay
     bool push(int16_t sample);                          // true when a search block ended
     bool candidate(float& tone_hz) const;               // a lock: a tone that stayed on its bin long enough

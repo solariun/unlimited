@@ -384,6 +384,7 @@
 <text x="664.79" y="108" font-size="11" fill="#5F5E5A" text-anchor="middle">140</text>
 <line x1="751.19" y1="94" x2="751.19" y2="98" stroke="#888780" stroke-width="1"/>
 <text x="751.19" y="108" font-size="11" fill="#5F5E5A" text-anchor="middle">160</text>
-<text x="24" y="368" font-size="11" fill="#5F5E5A">Like a serial port's 8N1 frame: a start bit, 8 data bits, a stop bit. START and STOP are always tones: they tell the receiver how loud a 1 is.</text>
-<text x="24" y="384" font-size="11" fill="#5F5E5A">The receiver decides each data slot against 70 % of the line from the START's level to the STOP's; a window without its START or STOP is dropped.</text>
+<text x="24" y="352" font-size="11" fill="#5F5E5A">Like a serial port's 8N1 frame: a start bit, 8 data bits, a stop bit; START and STOP, always tones, give the level of a 1.</text>
+<text x="24" y="368" font-size="11" fill="#5F5E5A">Each data slot is decided against a share of the START-to-STOP line: the adaptive line (50–75 %, the default) or</text>
+<text x="24" y="384" font-size="11" fill="#5F5E5A">a fixed 70 %. A window without its START or STOP is dropped.</text>
 </svg>

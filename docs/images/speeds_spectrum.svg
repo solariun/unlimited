@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="820" height="520" viewBox="0 0 820 520" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="820" height="566" viewBox="0 0 820 566" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img">
 <title>Unlimited spectrum per speed</title>
 <desc>The power spectrum of random data at 1, 3, 6, 12 and 25 bytes per second with their occupied bands, against the 2.4 kHz and 1.8 kHz SSB filters.</desc>
-<rect x="0.5" y="0.5" width="819" height="519" rx="12" fill="#FFFFFF" stroke="#D3D1C7"/>
+<rect x="0.5" y="0.5" width="819" height="565" rx="12" fill="#FFFFFF" stroke="#D3D1C7"/>
 <text x="24" y="32" font-size="16" fill="#2C2C2A" font-weight="bold">Spectrum per speed against SSB filters (spec 1.3)</text>
-<text x="24" y="52" font-size="12" fill="#5F5E5A">Welch power spectrum of 64 random bytes from the Encoder at 8000 Hz, 1500 Hz pitch; each curve to its own peak. Bars: the occupied band (99 % of the power).</text>
+<text x="24" y="52" font-size="12" fill="#5F5E5A">Welch power spectrum of 64 random bytes from the Encoder at 8000 Hz, 1500 Hz pitch; each curve to its own peak.</text>
+<text x="24" y="68" font-size="12" fill="#5F5E5A">Bars: the occupied band (99 % of the power).</text>
 <rect x="96.92" y="124" width="646.15" height="280" fill="#F8F7F3"/>
 <line x1="581.54" y1="124" x2="581.54" y2="404" stroke="#888780" stroke-width="1" stroke-dasharray="5 3"/>
 <text x="585.54" y="138" font-size="10" fill="#5F5E5A">1.8 kHz filter ends (2100 Hz)</text>

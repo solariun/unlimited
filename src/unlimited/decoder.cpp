@@ -61,9 +61,14 @@ const uint8_t k_margin_blocks = 2;   // a CIC-2 block holds samples up to one bl
 const float k_margin_slots = 0.5f;   // history held past a window before it is read: the early/late windows
 const float k_keep_slots = 4.0f;     // a re-mix keeps 4 slots behind the scan or the anchor (what they read)
 
-// Acquisition (spec 3.3).
-const uint8_t k_onset_silent_slots = 2;
-const float k_onset_tolerance = 0.25f;     // slots: the 2 silent slots may start this much late (block rounding)
+// Acquisition (spec 3.3). A START follows k_onset_silent_slots of silence; with the fade bridge (V16),
+// max(k_min_onset_silence_ms, k_onset_silent_slots), or a VOX lead's gap: k_onset_silent_slots up to k_vox_gap_slots +
+// k_vox_gap_reach slots of silence after a steady tone, which shows no null over the k_lead_test_slots before its last
+// quarter slot (its ramp): no sub-window of 2 k_edge_half, k_edge_step apart, under k_start_edge_max of their mean.
+const float k_onset_tolerance = 0.25f;     // slots: the silence may start this much late (block rounding)
+const float k_vox_gap_reach = 1.0f;        // slots: a VOX gap reads 2.1-2.6 slots after the lead's last loud position
+const float k_lead_test_slots = 2.0f;
+const uint8_t k_lead_test_windows = 19;    // (k_lead_test_slots - 2 k_edge_half) / k_edge_step + 1
 const uint8_t k_proven_silent_slots = 10;  // a whole window: longer than any silent run inside a transmission (8)
 // Silence before the START is relative to the START (spec 3.3): a candidate stays tentative for 3 slots, and a tone
 // 16 times its energy there (a quarter of the level, k_silence_ratio) whose 2 slots before it are quiet next to it
@@ -77,13 +82,9 @@ const float k_scan_coherent_ms = 10.0f;
 const float k_loud_z = 4.75f;
 const float k_wilson_third = 1.0f / 9.0f;
 const uint8_t k_acquire_blocks_per_block = 8;
-// The check before lock covers k_min_acquire_windows windows, and at least k_acquire_min_ms of signal (4 windows at 25
-// bytes/s): a short burst of noise, CW or speech seldom shows START and STOP where 4 windows need them.
-const uint8_t k_min_acquire_windows = 2;
-const uint8_t k_max_acquire_windows = 4;
-const float k_acquire_min_ms = 160.0f;
 const uint8_t k_refine_iterations = 4;      // the early/late balance moves at most 0.19 slot per step
 const float k_refine_settled = 0.01f;       // slots: a step this small ends the refinement
+const uint8_t k_first_windows = 1;          // the anchor is refined on the first window alone (V20)
 const uint8_t k_pitch_gap_blocks = 2;      // CIC-2 blocks two apart carry independent noise
 // |sum of products| over the blocks' energies: a tone (0.7 and more on the tone slots at the gates), not noise (about
 // 1 / sqrt(products)).
@@ -119,6 +120,11 @@ const float k_soft_scale = 64.0f;
 const float k_soft_limit = 127.0f;
 const float k_weak_margin = 0.125f;
 const float k_reference_alpha = 0.25f;
+// The running reference settles over the first windows (spec 3.5, V24): window 0's level is two markers' worth, so the
+// first k_settle_windows windows are each judged against the mean of every marker read so far, their own included (a
+// fade of up to about 9.5 dB between windows 0 and 1 then reads as a fade, not as missing markers); the exponential
+// running reference takes over from that mean.
+const uint8_t k_settle_windows = 2;
 const uint8_t k_noise_zero_pct = 35;       // a zero feeds the noise estimate when under 35 % of the reference line
 
 // Framing and end (spec 3.6, 3.7).
@@ -131,9 +137,6 @@ const float k_silence_ratio = 0.25f;       // a slot below a quarter of the tone
 // Before a START (spec 3.3): a slot holds something when |S|^2 >= 8 times its noise (noise alone: 3e-4) and it is as
 // loud as a quarter of the START: a weak carrier or keyed tone under it is no silence.
 const float k_before_snr = 8.0f;
-// A window with nothing in it: its 10 slots' |S|^2 average under twice their noise (noise alone: over it with
-// probability 0.005, the Gamma(10) tail).
-const float k_silent_mean_snr = 2.0f;
 
 float clamp(float value, float low, float high) {
     return value < low ? low : (value > high ? high : value);
@@ -180,8 +183,9 @@ DecoderConfig::DecoderConfig()
     : slot_us(slot_us_for_centi_speed(k_default_centi_bytes_per_second)),
       passband(),
       threshold_percent(k_default_threshold_percent),
-      decision_mode(DecisionMode::fixed),
-      impulse_blanker(true) {
+      decision_mode(DecisionMode::adaptive),
+      impulse_blanker(true),
+      fade_bridge(false) {
     passband.low_hz = k_ssb_passband_low_hz;
     passband.high_hz = k_ssb_passband_high_hz;
 }
@@ -229,6 +233,9 @@ void Decoder::initialize() {
     const uint8_t samples = block_samples_ > 0 ? block_samples_ : k_min_block_samples;
     slot_blocks_ = slot_samples / static_cast<float>(samples);
     scan_group_ = max_of(1.0f, k_scan_coherent_ms * k_samples_per_ms / static_cast<float>(samples));
+    const float onset_slots = static_cast<float>(k_onset_silent_slots) * slot_blocks_;
+    const float onset_ms = static_cast<float>(k_min_onset_silence_ms) * k_samples_per_ms / static_cast<float>(samples);
+    onset_silence_ = (config_.fade_bridge ? max_of(onset_ms, onset_slots) : onset_slots) - k_onset_tolerance * slot_blocks_;
     const float lead = 2.0f * slot_samples + static_cast<float>(k_lead_latency_samples);
     lookahead_.configure(static_cast<uint16_t>(min_of(lead, static_cast<float>(k_lookahead_max_samples))));
     // A tone that came up at most fresh_blocks_ search blocks ago began at most a search block before (the leading
@@ -245,10 +252,6 @@ void Decoder::initialize() {
     const float half_band = k_half * static_cast<float>(occupied_band(k_default_tone_hz, config_.slot_us).width_hz);
     band_reach_hz_ = half_band + k_search_step_hz;
     refine_reach_hz_ = max_of(k_refine_band_part * 2.0f * half_band, k_remix_reach_hz);
-    const float window_ms = static_cast<float>(k_window_slots) * slot_samples / k_samples_per_ms;
-    acquire_windows_ = static_cast<uint8_t>(
-        min_of(max_of(ceilf(k_acquire_min_ms / window_ms), static_cast<float>(k_min_acquire_windows)),
-               static_cast<float>(k_max_acquire_windows)));
     block_fill_ = 0;
     settle_blocks_ = 0;
     settle_trusted_ = false;
@@ -269,7 +272,7 @@ void Decoder::initialize() {
     memset(blank_delay_re_, 0, sizeof(blank_delay_re_));
     memset(blank_delay_im_, 0, sizeof(blank_delay_im_));
     history_.reset();
-    search_.configure(range.low_hz, high, config_.slot_us);
+    search_.configure(range.low_hz, high, config_.slot_us, config_.fade_bridge ? k_min_onset_silence_ms : 0u);
     noise_.reset(0.0f);
     search_noise_ = k_min_noise_variance;
 
@@ -288,6 +291,8 @@ void Decoder::initialize() {
     byte_index_ = 0;
     drift_ = 0.0f;
     reference_ = 0.0f;
+    settle_sum_ = 0.0f;
+    settle_markers_ = 0;
     last_stop_.re = 0.0f;
     last_stop_.im = 0.0f;
     has_last_stop_ = false;
@@ -300,6 +305,9 @@ void Decoder::initialize() {
     pending_anchor_ = 0.0f;
     pending_reference_ = 0.0f;
     memset(&pending_window_, 0, sizeof(pending_window_));
+    held_ = false;
+    held_start_ = 0.0f;
+    memset(&held_window_, 0, sizeof(held_window_));
     pitch_refined_ = false;
     start_checked_ = false;
     verify_hz_ = 0.0f;
@@ -346,8 +354,9 @@ DecoderState Decoder::state() const {
     return state_;
 }
 
+// Spec 3.10: a transmission is being decoded from its lock (its first window read) to `end` or `lost`: TRACK.
 bool Decoder::dcd() const {
-    return state_ != DecoderState::search;
+    return state_ == DecoderState::track;
 }
 
 float Decoder::tone_hz() const {
@@ -377,10 +386,6 @@ uint32_t Decoder::framing_errors() const {
 
 uint16_t Decoder::lookahead_samples() const {
     return lookahead_.delay();
-}
-
-uint8_t Decoder::acquire_windows() const {
-    return acquire_windows_;
 }
 
 const DecoderConfig& Decoder::config() const {
@@ -445,7 +450,7 @@ void Decoder::on_block(int32_t re, int32_t im, uint32_t energy) {
     history_.push(out_re, out_im, blanked);
     if (settle_blocks_ > 0) {
         history_.reset();
-        if (--settle_blocks_ == 0) restart_scan(history_.end_block(), settle_trusted_);
+        if (--settle_blocks_ == 0) restart_scan(history_.end_block(), settle_trusted_, fresh_credit(settle_trusted_));
     }
     rebase();
 
@@ -472,6 +477,7 @@ void Decoder::rebase() {
     pending_anchor_ -= delta;
     scan_.anchor -= delta;
     pending_scan_.anchor -= delta;
+    held_start_ -= delta;
 }
 
 // Moves the NCO to tone_hz and re-mixes what was mixed already (the history from keep_from on and the blanker's delay
@@ -497,12 +503,20 @@ void Decoder::retune(float tone_hz, uint8_t mixed_samples, uint32_t keep_from) {
     history_.rotate(keep_from, newest + per_block * static_cast<float>(latency), per_block);
 }
 
-void Decoder::forget_history(bool trusted) {
+// A tone that came up fresh (spec 3.2) was quiet before: the scan restarts trusted (the look-ahead holds the silence
+// before its START).
+void Decoder::forget_history(bool fresh) {
     history_.reset();
     origin_block_ = history_.end_block();
     settle_blocks_ = k_settle_blocks;
-    settle_trusted_ = trusted;
-    restart_scan(history_.end_block(), trusted);
+    settle_trusted_ = fresh;
+    restart_scan(history_.end_block(), fresh, fresh_credit(fresh));
+}
+
+// With the fade bridge a fresh tone's quiet run is at least k_min_onset_silence_ms (the tone search's rule): that
+// silence, longer than the look-ahead holds before the START, is credited to the first onset of the scan (spec 3.3).
+float Decoder::fresh_credit(bool fresh) const {
+    return fresh && config_.fade_bridge ? onset_silence_ : 0.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -586,8 +600,9 @@ void Decoder::steer(bool holding) {
     acquire_block_ = history_.end_block();
 }
 
-void Decoder::restart_scan(uint32_t origin, bool trusted) {
+void Decoder::restart_scan(uint32_t origin, bool trusted, float credit) {
     start_checked_ = false;
+    pitch_refined_ = false;
     scan_.next = origin;
     scan_.loud_until = origin;
     scan_.origin = origin;
@@ -599,6 +614,7 @@ void Decoder::restart_scan(uint32_t origin, bool trusted) {
     scan_.found = false;
     scan_.anchor = 0.0f;
     scan_.excess = 0.0f;
+    scan_.credit = credit;
 }
 
 // Energy of [from, from + blocks) (history blocks): the coherent sums of sub-windows of about scan_group_ blocks, their
@@ -695,6 +711,22 @@ bool Decoder::quiet_before(float start, float excess) const {
     return true;
 }
 
+// A VOX lead before a START (spec 3.3, V16): the k_lead_test_slots before `end` (the loud run's end as the scan saw it),
+// less a quarter slot for the lead's ramp, hold a steady tone: no short sub-window falls silent, as beeps do at every
+// slot edge.
+bool Decoder::steady_before(float end) const {
+    const float edge = 2.0f * k_edge_half * slot_blocks_;
+    const float to = end - k_tukey_ramp * slot_blocks_;
+    const float from = to - k_lead_test_slots * slot_blocks_;
+    const float mean = energy_density(from, k_lead_test_slots * slot_blocks_);
+    if (mean <= 0.0f) return false;
+    for (uint8_t i = 0; i < k_lead_test_windows; ++i) {
+        const float at = from + static_cast<float>(i) * k_edge_step * slot_blocks_;
+        if (energy_density(at, edge) < k_start_edge_max * mean) return false;
+    }
+    return true;
+}
+
 // A watched candidate (spec 3.3): a loud window at `position` k_precursor_rise times its energy is located; when its 2
 // slots before are quiet next to it, it is the START and the candidate was a precursor.
 void Decoder::watch(Scan& scan, uint32_t position, float excess) const {
@@ -733,6 +765,7 @@ bool Decoder::scan_step(Scan& scan, uint32_t limit) {
         scan.loud = false;
         scan.trusted = false;
         scan.watching = false;
+        scan.credit = 0.0f;
         return true;
     }
     const uint32_t p = scan.next;
@@ -767,8 +800,15 @@ bool Decoder::scan_step(Scan& scan, uint32_t limit) {
         if (!scan.trusted && quiet_from == scan.origin && unproven) scan.in_data = true;
         return true;
     }
-    const float silence = start - relative(quiet_from);
-    const bool silent = silence >= (static_cast<float>(k_onset_silent_slots) - k_onset_tolerance) * slot_blocks_;
+    // At least 2 silent slots since the last tone; with the fade bridge (V16), at least k_min_onset_silence_ms (a fresh
+    // tone's quiet before the origin counts), or a VOX lead's gap: about 2 silent slots after a steady tone.
+    const float silence = start - relative(quiet_from) + (quiet_from == scan.origin ? scan.credit : 0.0f);
+    const bool silent =
+        silence >= onset_silence_ ||
+        (quiet_from != scan.origin &&
+         silence >= (static_cast<float>(k_onset_silent_slots) - k_onset_tolerance) * slot_blocks_ &&
+         silence <= (static_cast<float>(k_vox_gap_slots) + k_vox_gap_reach) * slot_blocks_ &&
+         steady_before(relative(quiet_from)));
     const bool proven = scan.trusted || quiet_from != scan.origin ||
                         silence >= static_cast<float>(k_proven_silent_slots) * slot_blocks_;
     if (!silent || !proven || scan.in_data) {
@@ -808,9 +848,10 @@ void Decoder::run_acquire() {
             }
             return;
         }
-        const float last = anchor + static_cast<float>((acquire_windows_ - 1u) * k_window_slots) * slot_blocks_;
-        if (!window_ready(last)) return;
-        // The check before lock, one step per block (spec 3.9): the pitch first, the windows at the next block.
+        // One byte, one decision (spec 3.3, V20): the first window alone, once the history holds it, one step per block
+        // (spec 3.9): its pitch first, then the anchor and whether the window is readable. Readable: `locked`, and TRACK
+        // releases its byte in this same block; unreadable: suppressed, no transmission starts here.
+        if (!window_ready(anchor)) return;
         if (!pitch_refined_) {
             verify_hz_ = nco_.frequency();
             if (refine_pitch(anchor)) {
@@ -823,7 +864,7 @@ void Decoder::run_acquire() {
         pitch_refined_ = false;
         anchor = refine_anchor(anchor);
         float reference = 0.0f;
-        const Check check = windows_check(anchor, reference);
+        const Check check = window_check(anchor, reference);
         if (check == Check::ok) {
             lock(anchor, reference);
         } else {
@@ -833,8 +874,8 @@ void Decoder::run_acquire() {
     }
     if (state_ != DecoderState::acquire) return;
     // Beeps are there that no anchor explains (a transmission already running), or the tone held has just come up
-    // from quiet (a transmission starting; the scan hears it a look-ahead later): DCD stays on. A steady tone does not
-    // hold ACQUIRE: it times out and is banned below.
+    // from quiet (a transmission starting; the scan hears it a look-ahead later): ACQUIRE goes on. A steady tone does
+    // not hold ACQUIRE: it times out and is banned below.
     if (scan_.in_data || search_.fresh(nco_.frequency(), fresh_blocks_)) acquire_block_ = history_.end_block();
     const float window_ms = blocks_to_ms(static_cast<float>(k_window_slots) * slot_blocks_);
     const float timeout_ms = max_of(k_acquire_timeout_ms, static_cast<float>(k_acquire_timeout_windows) * window_ms);
@@ -854,6 +895,7 @@ void Decoder::reject(Check check) {
     if (nco_.frequency() != verify_hz_) retune(verify_hz_, block_fill_, history_.first_block());
     scan_.found = false;
     start_checked_ = false;
+    pitch_refined_ = false;
     if (check == Check::markers) scan_.in_data = true;
     if (!locked_tone_) enter_search();
     acquire_block_ = history_.end_block();
@@ -865,20 +907,16 @@ void Decoder::reject(Check check) {
 // the provisional tune may be off by more than the 62.5 Hz that 2 blocks of 32 samples leave. The history is then
 // re-mixed from k_keep_slots before the anchor.
 bool Decoder::refine_pitch(float anchor) {
-    // The slots that hold the tone: the markers, and the data slots with at least a quarter of their energy (a 1),
-    // on sub-windows (the pitch is not refined yet). An interferer the CIC-2 lets through then biases nothing in the
-    // silent slots between them.
-    const uint8_t slots = static_cast<uint8_t>(acquire_windows_ * k_window_slots);
+    // The slots of the first window that hold the tone: its START and STOP, and the data slots with at least a quarter
+    // of their energy (a 1), on sub-windows (the pitch is not refined yet). An interferer the CIC-2 lets through then
+    // biases nothing in the silent slots between them.
     const float window = k_slot_window * slot_blocks_;
     const float lead = k_half * (1.0f - k_slot_window) * slot_blocks_;
-    float density[k_max_acquire_windows * k_window_slots];
-    float markers = 0.0f;
-    for (uint8_t slot = 0; slot < slots; ++slot) {
+    float density[k_window_slots];
+    for (uint8_t slot = 0; slot < k_window_slots; ++slot) {
         density[slot] = energy_density(anchor + static_cast<float>(slot) * slot_blocks_ + lead, window);
-        const uint8_t in_window = static_cast<uint8_t>(slot % k_window_slots);
-        if (in_window == k_start_slot || in_window == k_stop_slot) markers += density[slot];
     }
-    const float tone = k_marker_ratio * k_marker_ratio * markers / static_cast<float>(2u * acquire_windows_);
+    const float tone = k_marker_ratio * k_marker_ratio * k_half * (density[k_start_slot] + density[k_stop_slot]);
     Complex sum;
     sum.re = 0.0f;
     sum.im = 0.0f;
@@ -887,9 +925,8 @@ bool Decoder::refine_pitch(float anchor) {
     near.im = 0.0f;
     float older_energy = 0.0f;
     float newer_energy = 0.0f;
-    for (uint8_t slot = 0; slot < slots; ++slot) {
-        const uint8_t in_window = static_cast<uint8_t>(slot % k_window_slots);
-        const bool marker = in_window == k_start_slot || in_window == k_stop_slot;
+    for (uint8_t slot = 0; slot < k_window_slots; ++slot) {
+        const bool marker = slot == k_start_slot || slot == k_stop_slot;
         if (!marker && density[slot] < tone) continue;
         const float from = anchor + static_cast<float>(slot) * slot_blocks_ + lead;
         const uint32_t first = absolute(ceilf(from));        // the first and last blocks wholly inside
@@ -936,7 +973,7 @@ bool Decoder::refine_pitch(float anchor) {
 float Decoder::refine_anchor(float anchor) const {
     for (uint8_t walk = 0; walk <= k_onset_walk_slots; ++walk) {
         for (uint8_t i = 0; i < k_refine_iterations; ++i) {
-            const float step = refine_timing(anchor, acquire_windows_);
+            const float step = refine_timing(anchor, k_first_windows);
             anchor += step * slot_blocks_;
             if (fabsf(step) < k_refine_settled) break;
         }
@@ -971,9 +1008,6 @@ float Decoder::refine_timing(float anchor, uint8_t windows) const {
     return clamp(balance / total / k_timing_slope, -k_half, k_half);
 }
 
-// Windows 0 .. acquire_windows_ - 1 from `anchor` (fewer when the last ones are silent: a shorter transmission): the
-// first START a beep (its trailing edge quiet: a steady tone's is not), every START and STOP present against their
-// mean level, and the slot edges quiet. `reference` gets that mean.
 // The early test of a candidate (spec 3.3): a steady tone goes on through the first two slot boundaries after the
 // START, where beeps leave a null. Neither the pitch nor the anchor is refined yet, so the energies are those of short
 // sub-windows and each boundary's edge is the quietest near it.
@@ -1008,48 +1042,41 @@ float Decoder::energy_density(float from, float blocks) const {
     return max_of(energy - noise, 0.0f) / (size * blocks);
 }
 
-Decoder::Check Decoder::windows_check(float anchor, float& reference) const {
-    Window windows[k_max_acquire_windows];
-    for (uint8_t w = 0; w < acquire_windows_; ++w) {
-        windows[w] = measure(anchor + static_cast<float>(w * k_window_slots) * slot_blocks_);
-        if (!windows[w].valid) {
-            return Check::markers;
-        }
+// The first window from `anchor`, decided alone (spec 3.3, V20): readable when it is not a steady tone, the 2 slots
+// before its START are silent (the anchor is the first tone after silence), its START and STOP are present against their
+// mean level (which `reference` gets: the thresholds, as in TRACK) and its slot edges are quiet (beeps, not a tone on a
+// wrong grid).
+Decoder::Check Decoder::window_check(float anchor, float& reference) const {
+    const Window window = measure(anchor);
+    if (!window.valid) return Check::markers;
+    // A START that is no tone above the noise (V24): noise (a click, a receiver AGC's hiss pumped up in the silence
+    // before a transmission), not a transmission on a wrong grid: let go without putting the scan in data, so a START
+    // that comes a little later is still taken.
+    if (window.snr[k_start_slot] < k_marker_snr) return Check::noise;
+    // A steady tone (the VOX lead is at least 3 slots) goes on through the slot boundaries after the START; beeps leave
+    // a null at each of them. First: on a steady tone the anchor's refinement means nothing. The slots as loud as half
+    // the START from it on (at least k_steady_slots after it) and the mean edge density of their boundaries over
+    // k_start_edge_max of the START's: the mean of all of them, since one edge alone is noisy near the gate (a lead
+    // taken for data is rejected for its markers and puts the scan in data: its transmission is lost).
+    const float start_density = slot_density(window.sum[k_start_slot]);
+    uint8_t loud = k_first_data_slot;
+    while (loud < k_window_slots && window.level[loud] >= k_marker_ratio * window.level[k_start_slot]) ++loud;
+    if (loud > k_steady_slots) {
+        float edges = 0.0f;
+        for (uint8_t b = k_first_data_slot; b < loud; ++b) edges += edge_density(anchor + static_cast<float>(b) * slot_blocks_);
+        if (edges > k_start_edge_max * start_density * static_cast<float>(loud - k_first_data_slot)) return Check::steady;
     }
-    // A steady tone (the VOX lead is at least 3 slots) goes on through the first two slot boundaries after the START;
-    // beeps leave a null at each of them. First: on a steady tone the anchor's refinement means nothing.
-    const float start_density = slot_density(windows[0].sum[k_start_slot]);
-    bool steady = true;
-    for (uint8_t slot = k_first_data_slot; slot <= k_steady_slots; ++slot) {
-        steady = steady && windows[0].level[slot] >= k_marker_ratio * windows[0].level[k_start_slot] &&
-                 edge_density(anchor + static_cast<float>(slot) * slot_blocks_) > k_start_edge_max * start_density;
-    }
-    if (steady) return Check::steady;
     // The START is the first tone after at least 2 silent slots (spec 3.3): a tone just before it means another grid.
     const Window before = measure(anchor - static_cast<float>(k_onset_silent_slots) * slot_blocks_);
-    if (!before.valid) {
-        return Check::markers;
-    }
+    if (!before.valid) return Check::markers;
     for (uint8_t slot = 0; slot < k_onset_silent_slots; ++slot) {
-        if (before.snr[slot] >= k_before_snr && before.level[slot] >= k_silence_ratio * windows[0].level[k_start_slot]) {
+        if (before.snr[slot] >= k_before_snr && before.level[slot] >= k_silence_ratio * window.level[k_start_slot]) {
             return Check::markers;
         }
     }
-    // A transmission shorter than the check: the windows after its last byte are silent (a key pressed alone), with
-    // nothing in them at all: their mean slot energy is that of noise (a weak carrier or noise burst is not silence).
-    uint8_t count = acquire_windows_;
-    while (count > 1 && silent_window(windows[count - 1])) --count;
-    float levels = 0.0f;
-    for (uint8_t w = 0; w < count; ++w) levels += windows[w].level[k_start_slot] + windows[w].level[k_stop_slot];
-    reference = levels / static_cast<float>(2u * count);
-    if (reference <= 0.0f) return Check::markers;
-    for (uint8_t w = 0; w < count; ++w) {
-        if (!marker_present(windows[w].level[k_start_slot], windows[w].snr[k_start_slot], reference) ||
-            !marker_present(windows[w].level[k_stop_slot], windows[w].snr[k_stop_slot], reference)) {
-            return Check::markers;
-        }
-    }
-    return edge_ratio(anchor, count) <= k_edge_ratio_max ? Check::ok : Check::steady;
+    reference = k_half * (window.level[k_start_slot] + window.level[k_stop_slot]);
+    if (reference <= 0.0f || !markers_present(window, reference)) return Check::markers;
+    return edge_ratio(anchor, k_first_windows) <= k_edge_ratio_max ? Check::ok : Check::steady;
 }
 
 // Energy density (per sample squared, noise removed) of a slot's central 0.75 T sum and of the +-0.1 T edge window at
@@ -1098,11 +1125,14 @@ void Decoder::lock(float anchor, float reference) {
     byte_index_ = 0;
     drift_ = 0.0f;
     reference_ = reference;
+    settle_sum_ = 0.0f;
+    settle_markers_ = 0;
     noise_.reset(noise_variance());
     has_last_stop_ = false;
     framing_run_ = 0;
     framing_errors_ = 0;
     pending_ = false;
+    held_ = false;
     pitch_refined_ = false;
     start_checked_ = false;
     scan_.found = false;
@@ -1124,8 +1154,9 @@ bool Decoder::window_ready(float start) const {
     return end + static_cast<float>(k_margin_blocks) <= live_end();
 }
 
-// One window when the history holds it: a silent START may end the transmission or begin a new one (resolved over the
-// next windows); otherwise its byte is decided, released (or dropped as a framing error) and the loops follow it.
+// One window when the history holds it: a silent window is held (the end, when the next is silent too: spec 3.7), a
+// silent START may end the transmission or begin a new one (resolved over the next windows); otherwise its byte is
+// decided, released (or dropped as a framing error) and the loops follow it.
 bool Decoder::track_step() {
     if (pending_) return resolve_pending();
     const float start = window_start_;
@@ -1138,8 +1169,16 @@ bool Decoder::track_step() {
     const Decision decision = decide(window);
     if (!decision.start_present && !tone_in(window, k_start_slot, reference_)) {
         if (quiet_window(window, reference_)) {
-            finish_end(start);
-            return false;
+            // Without the fade bridge a silent window is the end; with it (V16), the second in a row, at the first.
+            if (!config_.fade_bridge || held_) {
+                finish_end(held_ ? held_start_ : start);
+                return false;
+            }
+            held_ = true;
+            held_start_ = start;
+            held_window_ = window;
+            window_start_ = start + static_cast<float>(k_window_slots) * slot_blocks_ + drift_;
+            return true;
         }
         pending_ = true;
         pending_new_ = false;
@@ -1147,20 +1186,23 @@ bool Decoder::track_step() {
         pending_start_ = start;
         pending_window_ = window;
         // The scan starts half a slot into the window (clear of the old STOP's tail), its silence from the STOP's end
-        // (the last loud position).
+        // (the last loud position; a held silent window's start when there is one).
         pending_scan_ = scan_;
         pending_scan_.next = absolute(start + k_half * slot_blocks_);
-        pending_scan_.loud_until = absolute(start);
+        pending_scan_.loud_until = absolute(held_ ? held_start_ : start);
         pending_scan_.origin = pending_scan_.next;
         pending_scan_.loud = true;
         pending_scan_.in_data = false;
         pending_scan_.trusted = true;
         pending_scan_.watching = false;
         pending_scan_.found = false;
+        pending_scan_.credit = 0.0f;
         return true;
     }
-    emit_window(decision, start);
-    if (!decision.start_present || !decision.stop_present) {
+    release_held();
+    const Decision read = byte_index_ < k_settle_windows ? decide_settling(window) : decision;
+    emit_window(read, start);
+    if (!read.start_present || !read.stop_present) {
         ++framing_errors_;
         if (++framing_run_ >= k_max_framing_errors) {
             lose(LostReason::framing, start + static_cast<float>(k_window_slots) * slot_blocks_);
@@ -1169,14 +1211,14 @@ bool Decoder::track_step() {
     } else {
         framing_run_ = 0;
     }
-    update_loops(window, decision, start);
+    update_loops(window, read, start);
     ++byte_index_;
     return true;
 }
 
 // A silent START at pending_start_ (spec 3.7): either the transmission ended and a new one begins inside that window
 // (back to back), or its START faded and the old one goes on. The new hypothesis: the first onset after 2 silent slots
-// in the window whose windows check out. The old one: the window's STOP and the next window's START and STOP are
+// in the window whose first window is readable (spec 3.3). The old one: the window's STOP and the next window's START and STOP are
 // there, and its slot edges are quiet (a grid not on the slots of what is heard reads loud edges). Exactly one must
 // hold; while both do, one more window of each is weighed per step, up to k_pending_windows; when neither does, or
 // both still do, the signal is lost: nothing is released on a grid that might be wrong.
@@ -1187,11 +1229,11 @@ bool Decoder::resolve_pending() {
         const uint32_t limit = absolute(start + window + k_half * slot_blocks_);
         if (pending_scan_.found) {
             // One candidate checked per block (spec 3.9), once the history holds the windows of the check.
-            if (!window_ready(pending_scan_.anchor + static_cast<float>(acquire_windows_ - 1u) * window)) return false;
+            if (!window_ready(pending_scan_.anchor)) return false;
             const float anchor = refine_anchor(pending_scan_.anchor);
             float reference = 0.0f;
             pending_scan_.found = false;  // not a start: look on
-            if (windows_check(anchor, reference) == Check::ok) {
+            if (window_check(anchor, reference) == Check::ok) {
                 pending_new_ = true;
                 pending_anchor_ = anchor;
                 pending_reference_ = reference;
@@ -1233,14 +1275,29 @@ bool Decoder::resolve_pending() {
     }
     pending_ = false;
     if (new_holds && !old_holds) {
-        finish_end(start);
+        finish_end(held_ ? held_start_ : start);
         lock(pending_anchor_, pending_reference_);
     } else if (old_holds && !new_holds) {
+        release_held();
         continue_after_pending(next);
+    } else if (held_ && !old_holds) {
+        // After a silent window, neither the old grid nor a new START (a noise rise, an AGC pumping up): the
+        // transmission ended at the silent window (V16).
+        finish_end(held_start_);
     } else {
         lose(LostReason::framing, start);
     }
     return true;
+}
+
+// A held silent window followed by a tone on the old grid (spec 3.7): the signal faded for a window. The window is
+// dropped as a framing error (no signal in it, so it does not count towards `lost`) and the counting goes on.
+void Decoder::release_held() {
+    if (!held_) return;
+    held_ = false;
+    emit_window(decide(held_window_), held_start_);
+    ++framing_errors_;
+    ++byte_index_;
 }
 
 // The START faded: the pending window is a framing error and the old grid goes on at `next`.
@@ -1254,11 +1311,13 @@ void Decoder::continue_after_pending(float next) {
     ++byte_index_;
 }
 
-// `end` (spec 3.7); the scan looks for the next transmission from the silent window on.
+// `end` (spec 3.7); the scan looks for the next transmission from the first silent window on (its silence counts from
+// there: the old transmission's last STOP).
 void Decoder::finish_end(float next_start) {
     search_.forget();
     emit(make_event(EventType::end));
     pending_ = false;
+    held_ = false;
     enter_search();
     restart_scan(absolute(next_start), true);
 }
@@ -1269,6 +1328,7 @@ void Decoder::lose(LostReason reason, float from) {
     event.reason = reason;
     emit(event);
     pending_ = false;
+    held_ = false;
     enter_search();
     restart_scan(absolute(from), false);
     scan_.in_data = true;
@@ -1297,12 +1357,23 @@ Decoder::Window Decoder::measure(float start) const {
 
 // Spec 3.5: the reference line from the START level to the STOP level; each data slot against the decision line.
 Decoder::Decision Decoder::decide(const Window& window) const {
+    return decide(window, reference_);
+}
+
+// Spec 3.5 (V24): while the reference settles, a window is judged against the mean of every marker read so far (the
+// markers present), its own two included.
+Decoder::Decision Decoder::decide_settling(const Window& window) const {
+    const float sum = settle_sum_ + window.level[k_start_slot] + window.level[k_stop_slot];
+    return decide(window, sum / static_cast<float>(settle_markers_ + 2u));
+}
+
+Decoder::Decision Decoder::decide(const Window& window, float running) const {
     Decision d;
     memset(&d, 0, sizeof(d));
-    d.start_present = marker_present(window.level[k_start_slot], window.snr[k_start_slot], reference_);
-    d.stop_present = marker_present(window.level[k_stop_slot], window.snr[k_stop_slot], reference_);
-    d.start_pct = percent_of(window.level[k_start_slot], reference_);
-    d.stop_pct = percent_of(window.level[k_stop_slot], reference_);
+    d.start_present = marker_present(window.level[k_start_slot], window.snr[k_start_slot], running);
+    d.stop_present = marker_present(window.level[k_stop_slot], window.snr[k_stop_slot], running);
+    d.start_pct = percent_of(window.level[k_start_slot], running);
+    d.stop_pct = percent_of(window.level[k_stop_slot], running);
     const float slot_noise = k_noise_amplitude * window_noise(k_slot_window) /
                              ((k_slot_window * slot_blocks_ * static_cast<float>(block_samples_) * k_g_slot) *
                               (k_slot_window * slot_blocks_ * static_cast<float>(block_samples_) * k_g_slot));
@@ -1392,8 +1463,21 @@ void Decoder::update_loops(const Window& window, const Decision& decision, float
     } else {
         has_last_stop_ = false;
     }
-    if (decision.start_present) reference_ += k_reference_alpha * (window.level[k_start_slot] - reference_);
-    if (decision.stop_present) reference_ += k_reference_alpha * (window.level[k_stop_slot] - reference_);
+    if (byte_index_ < k_settle_windows) {
+        // Settling (V24): the mean of the markers present so far.
+        if (decision.start_present) {
+            settle_sum_ += window.level[k_start_slot];
+            ++settle_markers_;
+        }
+        if (decision.stop_present) {
+            settle_sum_ += window.level[k_stop_slot];
+            ++settle_markers_;
+        }
+        if (settle_markers_ > 0) reference_ = settle_sum_ / static_cast<float>(settle_markers_);
+    } else {
+        if (decision.start_present) reference_ += k_reference_alpha * (window.level[k_start_slot] - reference_);
+        if (decision.stop_present) reference_ += k_reference_alpha * (window.level[k_stop_slot] - reference_);
+    }
 
     const float half = k_half * k_noise_window * slot_blocks_;
     const float samples = dsp::noise_samples(k_noise_window * slot_blocks_, block_samples_);
@@ -1447,12 +1531,6 @@ bool Decoder::quiet_window(const Window& window, float reference) const {
     return true;
 }
 
-bool Decoder::silent_window(const Window& window) const {
-    float snr = 0.0f;
-    for (uint8_t j = 0; j < k_window_slots; ++j) snr += window.snr[j];
-    return snr < k_silent_mean_snr * static_cast<float>(k_window_slots);
-}
-
 bool Decoder::markers_present(const Window& window, float reference) const {
     return marker_present(window.level[k_start_slot], window.snr[k_start_slot], reference) &&
            marker_present(window.level[k_stop_slot], window.snr[k_stop_slot], reference);
@@ -1479,7 +1557,10 @@ float Decoder::window_noise(float slots) const {
 }
 
 float Decoder::noise_variance() const {
-    const float estimate = state_ == DecoderState::track ? noise_.mean_estimate() : search_noise_;
+    float estimate = state_ == DecoderState::track ? noise_.mean_estimate() : search_noise_;
+    // A silent window held (the fade bridge, spec 3.7): the noise may have risen since the last clear zero (a receiver
+    // AGC opening up after the transmission): the tone search's floor, when higher, is the noise.
+    if (held_) estimate = max_of(estimate, search_noise_);
     return max_of(estimate, k_min_noise_variance);
 }
 

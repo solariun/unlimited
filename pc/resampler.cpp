@@ -72,7 +72,7 @@ float dot(const float* a, const float* b, size_t count) {
 
 }  // namespace
 
-Resampler::Resampler(double from_hz, double to_hz)
+ResamplerKernel::ResamplerKernel(double from_hz, double to_hz)
     : exact_(false),
       step_(from_hz / to_hz),
       step_whole_(0),
@@ -80,10 +80,7 @@ Resampler::Resampler(double from_hz, double to_hz)
       phase_count_(0),
       row_length_(0),
       taps_before_(0),
-      taps_after_(0),
-      history_start_(0),
-      input_count_(0),
-      output_count_(0) {
+      taps_after_(0) {
     if (!(std::isfinite(from_hz) && from_hz > 0.0 && std::isfinite(to_hz) && to_hz > 0.0))
         throw std::invalid_argument("Resampler: rates must be finite and > 0");
 
@@ -117,35 +114,10 @@ Resampler::Resampler(double from_hz, double to_hz)
             rows_[r * row_length_ + i] = static_cast<float>(kernel(offset / stretch) / stretch);
         }
     }
-    restart();
-}
-
-void Resampler::process(const float* in, size_t count, std::vector<float>& out) {
-    history_.insert(history_.end(), in, in + count);
-    input_count_ += static_cast<int64_t>(count);
-    emit(out, false);
-
-    const int64_t keep_from = position(output_count_).index - taps_before_;
-    if (keep_from - history_start_ < static_cast<int64_t>(k_compact_samples)) return;
-    history_.erase(history_.begin(), history_.begin() + static_cast<std::ptrdiff_t>(keep_from - history_start_));
-    history_start_ = keep_from;
-}
-
-void Resampler::flush(std::vector<float>& out) {
-    history_.resize(history_.size() + static_cast<size_t>(taps_after_), 0.0f);
-    emit(out, true);
-    restart();
-}
-
-void Resampler::restart() {
-    history_.assign(static_cast<size_t>(taps_before_), 0.0f);
-    history_start_ = -taps_before_;
-    input_count_ = 0;
-    output_count_ = 0;
 }
 
 // Exact rows split m * step into whole samples and a phase in integers, so the time never drifts.
-Resampler::Position Resampler::position(uint64_t output) const {
+ResamplerKernel::Position ResamplerKernel::position(uint64_t output) const {
     Position p;
     if (exact_) {
         const uint64_t phase = output * step_phase_;
@@ -163,17 +135,61 @@ Resampler::Position Resampler::position(uint64_t output) const {
     return p;
 }
 
+float ResamplerKernel::apply(const Position& p, const float* inputs) const {
+    const float* row = &rows_[p.row * row_length_];
+    float y = dot(row, inputs, row_length_);
+    if (p.weight != 0.0f) y += p.weight * (dot(row + row_length_, inputs, row_length_) - y);
+    return y;
+}
+
+size_t ResamplerKernel::row_length() const {
+    return row_length_;
+}
+
+int64_t ResamplerKernel::taps_before() const {
+    return taps_before_;
+}
+
+int64_t ResamplerKernel::taps_after() const {
+    return taps_after_;
+}
+
+Resampler::Resampler(double from_hz, double to_hz)
+    : kernel_(from_hz, to_hz), history_start_(0), input_count_(0), output_count_(0) {
+    restart();
+}
+
+void Resampler::process(const float* in, size_t count, std::vector<float>& out) {
+    history_.insert(history_.end(), in, in + count);
+    input_count_ += static_cast<int64_t>(count);
+    emit(out, false);
+
+    const int64_t keep_from = kernel_.position(output_count_).index - kernel_.taps_before();
+    if (keep_from - history_start_ < static_cast<int64_t>(k_compact_samples)) return;
+    history_.erase(history_.begin(), history_.begin() + static_cast<std::ptrdiff_t>(keep_from - history_start_));
+    history_start_ = keep_from;
+}
+
+void Resampler::flush(std::vector<float>& out) {
+    history_.resize(history_.size() + static_cast<size_t>(kernel_.taps_after()), 0.0f);
+    emit(out, true);
+    restart();
+}
+
+void Resampler::restart() {
+    history_.assign(static_cast<size_t>(kernel_.taps_before()), 0.0f);
+    history_start_ = -kernel_.taps_before();
+    input_count_ = 0;
+    output_count_ = 0;
+}
+
 // Before the end, an output waits for its last tap; at the end, zeros stand in for the input past the last
 // sample and outputs continue up to the end of the input.
 void Resampler::emit(std::vector<float>& out, bool at_end) {
     for (;; ++output_count_) {
-        const Position p = position(output_count_);
-        if (p.index + (at_end ? 0 : taps_after_) >= input_count_) return;
-        const float* x = &history_[static_cast<size_t>(p.index - taps_before_ - history_start_)];
-        const float* row = &rows_[p.row * row_length_];
-        float y = dot(row, x, row_length_);
-        if (p.weight != 0.0f) y += p.weight * (dot(row + row_length_, x, row_length_) - y);
-        out.push_back(y);
+        const ResamplerKernel::Position p = kernel_.position(output_count_);
+        if (p.index + (at_end ? 0 : kernel_.taps_after()) >= input_count_) return;
+        out.push_back(kernel_.apply(p, &history_[static_cast<size_t>(p.index - kernel_.taps_before() - history_start_)]));
     }
 }
 

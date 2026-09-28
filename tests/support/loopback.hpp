@@ -42,7 +42,8 @@ void append_transmission(Recording& recording, const std::vector<std::uint8_t>& 
 // The silence a recording starts with before its first transmission: at least `ms` and 15 slots. The decoder takes
 // nothing before its first sample for silence (V6): it needs a whole silent window before its first START.
 double leading_silence_ms(const EncoderConfig& config, double ms = 500.0);
-// Silence around one transmission: leading_silence_ms() before it, at least 2 windows after it.
+// Silence around one transmission: leading_silence_ms() before it, at least 3 windows after it (the end comes 2 silent
+// windows after the last STOP, plus the look-ahead).
 Recording single(const std::vector<std::uint8_t>& data, const EncoderConfig& config, double silence_ms = 500.0);
 
 // Slot layout of a transmission, in samples from the recording's start.
@@ -91,9 +92,9 @@ struct Score {
     double loss() const;
 };
 
-// Maps every byte event to a sent byte: the byte events between a locked and its end or lost belong to the
-// transmission whose first START lies 2 to 7.5 windows before the lock (the look-ahead and the channel delay
-// removed; the lock comes once the check windows are in), at their byte_index.
+// Maps every byte event to a sent byte: the byte events between a locked and its end or lost belong to the latest
+// transmission whose first START lies between 9.5 slots and 10 windows before the lock (the look-ahead and the channel
+// delay removed; the lock comes once the first window is in: spec 3.3, V20), at their byte_index.
 struct Mapping {
     Score score;
     std::vector<std::vector<int> > received;        // per transmission, per byte: value or -1

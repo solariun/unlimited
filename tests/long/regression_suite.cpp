@@ -2,7 +2,8 @@
 
 #include "test_harness.hpp"
 
-// Registration order is the run order: the integrity row checks what the tests before it recorded.
+// Registration order is the run order: the integrity rows add up what the tests before them recorded (a report since
+// V22).
 using namespace unlimited::regression;
 
 TEST(A1_A2_awgn_per_speed) {
@@ -29,23 +30,23 @@ TEST(C_channels) {
     test_c_channels();
 }
 
-TEST(F1_noise_false_lock) {
+TEST(F1_noise_stray_bytes) {
     test_f1_noise();
 }
 
-TEST(F2_carrier_false_lock) {
+TEST(F2_carrier_stray_bytes) {
     test_f2_carrier();
 }
 
-TEST(F3_cw_false_lock) {
+TEST(F3_cw_stray_bytes) {
     test_f3_cw();
 }
 
-TEST(F4_speech_false_lock) {
+TEST(F4_speech_stray_bytes) {
     test_f4_speech();
 }
 
-TEST(Integrity_no_extra_no_shifted_bytes) {
+TEST(Integrity_extra_and_shifted_bytes) {
     test_integrity();
 }
 

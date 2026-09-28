@@ -1251,10 +1251,11 @@ void figure_byte_window(const std::string& directory) {
     bracket_below(svg, x(9.0 * slot_ms), x(window_ms), k_bracket_y, "STOP", "a beep: the level again");
     x_axis(svg, x, plot.top - 6.0, 0.0, window_ms - std::fmod(window_ms, k_tick_ms), k_tick_ms, 0);
     std::vector<std::string> lines;
-    lines.push_back("Like a serial port's 8N1 frame: a start bit, 8 data bits, a stop bit. START and STOP are always "
-                    "tones: they tell the receiver how loud a 1 is.");
-    lines.push_back("The receiver decides each data slot against 70 % of the line from the START's level to the "
-                    "STOP's; a window without its START or STOP is dropped.");
+    lines.push_back("Like a serial port's 8N1 frame: a start bit, 8 data bits, a stop bit; START and STOP, always tones, "
+                    "give the level of a 1.");
+    lines.push_back("Each data slot is decided against a share of the START-to-STOP line: the adaptive line (50–75 %, the "
+                    "default) or");
+    lines.push_back("a fixed 70 %. A window without its START or STOP is dropped.");
     notes(svg, k_height, lines);
     svg.save(path_of(directory, "byte_window.svg"), "Unlimited byte window",
              "The window of the byte 0x48 'H': a START beep, the 8 data slots 01001000 and a STOP beep, rendered by "
@@ -1298,9 +1299,9 @@ void figure_hi_transmission(const std::string& directory) {
     const double k_tick_ms = 50.0;
     Svg svg(k_width, k_height);
     heading(svg, "A transmission: \"Hi\" = 0x48 0x69 (spec 2.2)",
-            format("Encoder audio at %u Hz, 6 bytes/s (T %.3f ms, 1500 Hz), no lead-in, the 100 ms tail. Purple: "
-                   "START and STOP; teal: 1; gray: 0.",
-                   static_cast<unsigned>(rate), slot_ms));
+            format("Encoder audio at %u Hz, 6 bytes/s (T %.3f ms, 1500 Hz), no lead-in, the 100 ms tail.",
+                   static_cast<unsigned>(rate), slot_ms),
+            "Purple: START and STOP; teal: 1; gray: 0.");
     const Scale x = {0.0, longest_ms, k_left, k_right};
     for (size_t i = 0; i < rows.size(); ++i) {
         const Rendered& r = rows[i].r;
@@ -1346,8 +1347,8 @@ void figure_hi_transmission(const std::string& directory) {
         x_axis(svg, x, top - 4.0, 0.0, longest_ms - std::fmod(longest_ms, k_tick_ms), k_tick_ms, 0, 2);
     }
     std::vector<std::string> lines;
-    lines.push_back("No tune, no sync train, no END: the first tone after silence is the START of byte 0, and a "
-                    "silent window after the last STOP is the end.");
+    lines.push_back("No tune, no sync train, no END: the first tone after silence is the START of byte 0;");
+    lines.push_back("a silent window after the last STOP is the end (two with the optional fade bridge).");
     lines.push_back(format("20 slots = %.0f ms of signal for 2 bytes; the tail is max(100 ms, 2 slots) of silence. "
                            "The VOX lead only keys a VOX radio.",
                            20.0 * slot_ms));
@@ -1431,9 +1432,9 @@ void figure_receiver_windows(const std::string& directory) {
     const double k_byte_drop = 32.0;
     Svg svg(k_width, k_height);
     heading(svg, "What the receiver sees: each window's reference and decision lines (spec 3.5)",
-            "\"Hi!~\" at 6 bytes/s through a USB channel: the decoder's own slot events. Bars in % of the running "
-            "reference: purple START/STOP, teal a 1, gray a 0.",
-            "Dashed: the reference line from the START's level to the STOP's; amber: the decision line, 70 % of it.");
+            "\"Hi!~\" at 6 bytes/s through a USB channel: the decoder's own slot events, in % of the running reference.",
+            "Purple: START/STOP; teal: a 1; gray: a 0; dashed: the reference line; amber: the decision line (adaptive, the "
+            "default).");
     for (size_t r = 0; r < sizeof(rows) / sizeof(rows[0]); ++r) {
         sim::ChannelConfig channel;
         channel.mode = sim::Mode::usb;
@@ -1498,14 +1499,14 @@ void figure_receiver_windows(const std::string& directory) {
         }
     }
     std::vector<std::string> lines;
-    lines.push_back("Each window carries its own reference: the START and STOP levels, so a fade across the window "
-                    "tilts the line and the 70 % line tilts with it.");
+    lines.push_back("Each window carries its own reference, its START and STOP levels: a fade across the window tilts "
+                    "both lines alike.");
     lines.push_back("Near the gate a 0 may reach up towards the line and a 1 dip towards it: the decoder flags a bit "
                     "within 12.5 % of its line as weak.");
     notes(svg, k_height, lines);
     svg.save(path_of(directory, "receiver_windows.svg"), "Unlimited receiver windows",
              "The decoder's slot events for \"Hi!~\" at 6 bytes/s at 20 dB and at the gate: START and STOP bars, the "
-             "reference line between them, the 70 % decision line and the data bars.");
+             "reference line between them, the decision line (the adaptive line, the default) and the data bars.");
     std::printf("receiver_windows.svg: \"Hi!~\" at 6 bytes/s, 20 dB and %.1f dB\n", k_gate_db[2]);
 }
 
@@ -1521,15 +1522,20 @@ void figure_speeds_spectrum(const std::string& directory) {
     const double k_high_hz = 2800.0;
     const double k_floor_db = -70.0;
     const double k_width = 820.0;
-    const double k_height = 520.0;
     const Box plot = {70.0, 124.0, 700.0, 280.0};
     const double k_band_row = 14.0;
     const double k_band_gap = 6.0;
+    const double k_bands_drop = 44.0;  // the plot's bottom to the first band bar, below the axis title
+    const size_t k_speed_count = sizeof(k_speeds) / sizeof(k_speeds[0]);
+    // The canvas ends a margin below the last band bar (a fixed 520 px cut the 12 and 25 bytes/s bars off).
+    const double k_height =
+        plot.bottom() + k_bands_drop + k_speed_count * (k_band_row + k_band_gap) - k_band_gap + k_margin;
     Svg svg(k_width, k_height);
     heading(svg, "Spectrum per speed against SSB filters (spec 1.3)",
             format("Welch power spectrum of %u random bytes from the Encoder at 8000 Hz, 1500 Hz pitch; each curve to "
-                   "its own peak. Bars: the occupied band (99 %% of the power).",
-                   static_cast<unsigned>(k_bytes)));
+                   "its own peak.",
+                   static_cast<unsigned>(k_bytes)),
+            "Bars: the occupied band (99 % of the power).");
     const Scale x = {k_low_hz, k_high_hz, plot.left, plot.right()};
     const Scale y = {k_floor_db, 0.0, plot.bottom(), plot.top};
     // The 2.4 kHz SSB filter (300-2700 Hz) shaded; the 1.8 kHz filter's top edge (2100 Hz) dashed.
@@ -1545,7 +1551,7 @@ void figure_speeds_spectrum(const std::string& directory) {
     svg.text(plot.left + plot.width / 2.0, plot.bottom() + k_axis_title_gap, "frequency (Hz)",
              font(k_small_size, k_muted, "middle"));
     svg.text(plot.left - 44.0, plot.top + plot.height / 2.0, "dB", font(k_small_size, k_muted, "middle"), -90.0);
-    for (size_t v = 0; v < sizeof(k_speeds) / sizeof(k_speeds[0]); ++v) {
+    for (size_t v = 0; v < k_speed_count; ++v) {
         const EncoderConfig config = speed_config(k_speeds[v]);
         const Rendered r = render(lb::random_bytes(k_bytes, k_seed + static_cast<uint32_t>(v)), config);
         std::vector<double> x_samples = to_double(r.audio, config.amplitude);
@@ -1564,7 +1570,7 @@ void figure_speeds_spectrum(const std::string& directory) {
         }
         svg.polyline(points, colors[v], k_spectrum_trace);
         const Band band = unlimited::occupied_band(config);
-        const double bar_y = plot.bottom() + 44.0 + v * (k_band_row + k_band_gap);
+        const double bar_y = plot.bottom() + k_bands_drop + v * (k_band_row + k_band_gap);
         svg.rect(x(band.low_hz), bar_y, x(band.high_hz) - x(band.low_hz), k_band_row, colors[v], "none", 0.0,
                  k_bar_radius, 0.8);
         svg.text(x(band.high_hz) + k_text_rise * 2.0, bar_y + k_band_row - 3.0,
@@ -1699,8 +1705,8 @@ void figure_channels(const std::string& directory) {
                  font(k_note_size, right == data.size() ? k_teal_dark : k_coral));
     }
     std::vector<std::string> lines;
-    lines.push_back("One run each, fixed seeds: a picture of the conditions, not a measurement; the long suite "
-                    "(make test_long) measures them over many transmissions.");
+    lines.push_back("One run each, fixed seeds: a picture of the conditions; the long suite (make test_long) measures "
+                    "them.");
     lines.push_back("A window whose START or STOP faded is dropped, never delivered wrong; a deep fade across a "
                     "START ends the transmission.");
     notes(svg, height, lines);
@@ -1743,9 +1749,9 @@ void figure_spectrogram(const std::string& directory) {
     const Box plot = {70.0, 100.0, 700.0, 240.0};
     Svg svg(k_width, k_height);
     heading(svg, format("\"%s\" at 6 bytes/s in noise: time against frequency", k_channel_text),
-            format("USB channel at %s dB (key-down tone in 2500 Hz), mistuned %s Hz; 16 ms Hann windows every 4 ms. "
-                   "Brackets: the windows, one per byte.",
-                   number(k_spectrogram_snr_db, 0).c_str(), signed_number(k_figure_offset_hz, 0).c_str()));
+            format("USB channel at %s dB (key-down tone in 2500 Hz), mistuned %s Hz; 16 ms Hann windows every 4 ms.",
+                   number(k_spectrogram_snr_db, 0).c_str(), signed_number(k_figure_offset_hz, 0).c_str()),
+            "Brackets: the windows, one per byte.");
     const double span_s = part.size() / rate;
     const Scale t = {0.0, span_s, plot.left, plot.right()};
     const Scale f = {k_low_hz, k_high_hz, plot.bottom(), plot.top};
@@ -1767,7 +1773,8 @@ void figure_spectrogram(const std::string& directory) {
              font(k_small_size, k_muted, "middle"));
     std::vector<std::string> lines;
     lines.push_back("One pitch, beeps and silences: the receiver finds the pitch by itself (USB or LSB mistuning only "
-                    "moves the line up or down) and reads the windows by counting.");
+                    "moves the line");
+    lines.push_back("up or down) and reads the windows by counting.");
     notes(svg, k_height, lines);
     svg.save(path_of(directory, "spectrogram.svg"), "Unlimited spectrogram",
              "The text CQ CQ DE UNLIMITED at 6 bytes per second through a USB channel with noise, as a spectrogram "
@@ -1812,7 +1819,7 @@ void figure_ber(const std::string& directory) {
     const size_t k_speed_count = sizeof(k_speeds) / sizeof(k_speeds[0]);
     const size_t k_transmissions = 16;
     const size_t k_bytes = 16;
-    const size_t k_modes = 2;  // fixed 70 %, adaptive
+    const size_t k_modes = 2;  // the adaptive line (the default, solid), the fixed 70 % line (dashed)
     std::vector<BerJob> jobs;
     for (size_t v = 0; v < k_speed_count; ++v)
         for (size_t o = 0; o < k_offsets; ++o)
@@ -1829,7 +1836,7 @@ void figure_ber(const std::string& directory) {
         Scores out;
         for (size_t m = 0; m < k_modes; ++m) {
             DecoderConfig receiver = receiver_of(config);
-            receiver.decision_mode = m == 0 ? unlimited::DecisionMode::fixed : unlimited::DecisionMode::adaptive;
+            receiver.decision_mode = m == 0 ? unlimited::DecisionMode::adaptive : unlimited::DecisionMode::fixed;
             const lb::Capture capture = lb::run_decoder(samples, receiver, k_decoder_chunk);
             out.push_back(lb::score(recording, capture, lb::channel_delay_samples()));
         }
@@ -1841,23 +1848,27 @@ void figure_ber(const std::string& directory) {
             add(totals[(jobs[i].speed * k_offsets + jobs[i].offset) * k_modes + m], scores[i][m]);
 
     const char* const colors[] = {k_blue, k_teal, k_amber, k_pink, k_purple};
-    const double k_width = 820.0;
-    const double k_height = 560.0;
-    const Box plot = {80.0, 110.0, 520.0, 330.0};
+    const double k_width = 900.0;
+    const double k_height = 590.0;
+    const Box plot = {80.0, 130.0, 520.0, 330.0};
     const double k_low_db = -10.0;
     const double k_high_db = 16.0;
     const double k_ber_top = 0.5;
     const double k_ber_floor = 1e-5;
     const double k_marker = 3.0;
-    const double k_legend_x = 630.0;
+    const double k_legend_x = 640.0;
     Svg svg(k_width, k_height);
     heading(svg, "Bit error rate in white noise, per speed (spec 4 A1)",
-            format("%u transmissions of %u random bytes per point through the USB channel simulator, mistuned %s Hz; "
-                   "solid: fixed 70 %% line, dashed: adaptive (auto).",
+            format("%u transmissions of %u random bytes per point through the USB channel simulator, mistuned %s Hz. "
+                   "Solid: the adaptive line (auto),",
                    static_cast<unsigned>(k_transmissions), static_cast<unsigned>(k_bytes),
                    signed_number(k_figure_offset_hz, 0).c_str()),
-            "SNR: the key-down tone over the noise in 2500 Hz. Triangles: the provisional gate of each speed (v0.3's "
-            "at the same T). Open circles: no error (plotted at 1 / 2n).");
+            "the decoder's default since 2026-09-28; dashed: the fixed 70 % line (selectable). SNR: the key-down tone "
+            "over the noise in 2500 Hz.");
+    svg.text(k_margin, k_subtitle_y + 2.0 * k_line_gap,
+             "Triangles: the provisional gate of each speed (v0.3's at the same T). Open circles: no error (plotted at "
+             "1 / 2n).",
+             font(k_subtitle_size, k_muted));
     const Scale x = {k_low_db, k_high_db, plot.left, plot.right()};
     const LogScale y = {k_ber_floor, k_ber_top, plot.bottom(), plot.top};
     x_axis(svg, x, plot.bottom(), k_low_db, k_high_db, 2.0, 0, 1, plot.top);
@@ -1906,13 +1917,13 @@ void figure_ber(const std::string& directory) {
     size_t extra = 0;
     for (size_t i = 0; i < totals.size(); ++i) extra += totals[i].extra;
     std::vector<std::string> lines;
-    lines.push_back(format("The fixed 70 %% line needs about 3 dB more than the adaptive line for the same bit error "
-                           "rate near the gate. Bytes released that were not sent: %u.",
-                           static_cast<unsigned>(extra)));
+    lines.push_back("The adaptive line, the default, needs about 3 dB less signal than the fixed 70 % line for the same bit "
+                    "error rate near the gate.");
+    lines.push_back(format("Bytes released that were not sent: %u.", static_cast<unsigned>(extra)));
     notes(svg, k_height, lines);
     svg.save(path_of(directory, "ber_awgn.svg"), "Unlimited bit error rate",
-             "Measured bit error rate against SNR for 1, 3, 6, 12 and 25 bytes per second, with the fixed 70 % "
-             "decision line and the adaptive line, through the USB channel simulator.");
+             "Measured bit error rate against SNR for 1, 3, 6, 12 and 25 bytes per second, with the adaptive decision "
+             "line (the default, solid) and the fixed 70 % line (dashed), through the USB channel simulator.");
     std::printf("ber_awgn.svg: %u transmissions\n", static_cast<unsigned>(jobs.size()));
 }
 

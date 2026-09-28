@@ -102,6 +102,7 @@ const float k_half_bin = 0.5f;
 const float k_min_phase_coherence = 0.9f;  // |sum of products| / sum of |products|: a steady tone
 const float k_no_score = -1e30f;
 const float k_us_per_s = 1e6f;
+const float k_ms_per_s = 1e3f;
 const float k_lead_z = 4.75f;              // leading bin: noise alone above the threshold with probability 1e-6
 const float k_wilson_third = 1.0f / 9.0f;
 
@@ -545,7 +546,7 @@ ToneSearch::ToneSearch() {
 
 // Bins on the multiples of 50 Hz inside min_hz..max_hz (at least one), and a guard bin on each side: a tone just outside
 // the range peaks in a guard, where no lock is taken, instead of in the edge bin at a wrong 50 Hz alias.
-void ToneSearch::configure(uint16_t min_hz, uint16_t max_hz, uint32_t slot_us) {
+void ToneSearch::configure(uint16_t min_hz, uint16_t max_hz, uint32_t slot_us, uint16_t min_quiet_ms) {
     min_hz_ = min_hz;
     max_hz_ = max_hz;
     // The leading bin's average spans about one slot (a START alone lifts it at slow speeds), never fewer than the
@@ -554,7 +555,11 @@ void ToneSearch::configure(uint16_t min_hz, uint16_t max_hz, uint32_t slot_us) {
     const float slot_blocks = static_cast<float>(slot_us) * static_cast<float>(k_decoder_rate_hz) /
                               (k_us_per_s * static_cast<float>(k_block_samples));
     lead_alpha_ = slot_blocks > 1.0f ? max_of(k_fast_alpha, 1.0f / slot_blocks) : k_fast_alpha;
-    quiet_blocks_ = static_cast<uint16_t>(ceilf(static_cast<float>(k_quiet_slots) * slot_blocks));
+    // With the fade bridge a quiet run is also the silence a START needs before it (spec 3.3, V16): a tone that comes up
+    // fresh then follows that much silence, whatever the speed.
+    const float quiet_ms_blocks = static_cast<float>(min_quiet_ms) * static_cast<float>(k_decoder_rate_hz) /
+                                  (k_ms_per_s * static_cast<float>(k_block_samples));
+    quiet_blocks_ = static_cast<uint16_t>(ceilf(max_of(static_cast<float>(k_quiet_slots) * slot_blocks, quiet_ms_blocks)));
     const float shape = (2.0f - lead_alpha_) / lead_alpha_;
     const float root = 1.0f - k_wilson_third / shape + k_lead_z * sqrtf(k_wilson_third / shape);
     lead_ratio_ = root * root * root;

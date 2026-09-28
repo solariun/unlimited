@@ -22,5 +22,23 @@ bool enable_vt(std::FILE* stream = stdout);
 // before the process ends, so an interrupted TUI never leaves the terminal without a cursor.
 void restore_terminal_on_exit(bool enabled);
 
+// While it exists, Ctrl-C (SIGINT), SIGTERM and SIGHUP call stop(context) instead of ending the program (spec 12.6).
+// A live device's stop() is async-signal-safe (an atomic store and a byte on a pipe, spec 12.5), so the program then
+// ends on its own path: the device stopped, the final frame drawn, the cursor and colours back, the PTT released, the
+// summary printed. Every signal calls stop() again (it must be idempotent); the handlers in place before come back
+// when it is destroyed, so it may be created before or after Tui::open(). One at a time.
+class StopOnSignals {
+public:
+    typedef void (*StopFunction)(void* context);
+
+    StopOnSignals(StopFunction stop, void* context);
+    ~StopOnSignals();
+    StopOnSignals(const StopOnSignals&) = delete;
+    StopOnSignals& operator=(const StopOnSignals&) = delete;
+
+    int count() const;        // signals received
+    int last_signal() const;  // the number of the last one; 0 before any
+};
+
 }  // namespace pc
 }  // namespace unlimited

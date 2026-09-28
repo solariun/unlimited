@@ -5,6 +5,7 @@
 #include "unlimited/encoder.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -12,7 +13,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 using unlimited::DecoderConfig;
@@ -25,9 +28,13 @@ using unlimited::Event;
 using unlimited::EventType;
 using unlimited::LostReason;
 using unlimited::Passband;
+using unlimited::pc::Level;
+using unlimited::pc::LevelMeter;
+using unlimited::pc::StatusRing;
 using unlimited::pc::Tui;
 using unlimited::pc::TuiMode;
 using unlimited::pc::display_width;
+using unlimited::pc::level_text;
 
 namespace {
 
@@ -690,6 +697,8 @@ TEST(tui_decoder_marks_a_dropped_window) {
     CHECK(colored.find("dropped", red) != std::string::npos);
 }
 
+// The decoder view's status: the state and DCD as the receiver has it (set_dcd(): Decoder::dcd() or Modem::dcd(), on
+// while tracking, spec 3.10), the counts and the received text.
 TEST(tui_decoder_status_counts_and_text) {
     Tui tui(TuiMode::decoder);
     tui.set_color(false);
@@ -705,7 +714,9 @@ TEST(tui_decoder_status_counts_and_text) {
     CHECK(find_line(lines, "windows  waiting for a lock") > 0);
 
     tui.on_event(make_event(EventType::state, DecoderState::acquire));
+    CHECK(contains(render_lines(tui, k_wide_columns, k_tall_rows)[0], "ACQUIRE, DCD off"));  // a candidate: no DCD
     tui.on_event(lock_event(EventType::locked));
+    tui.set_dcd(true);  // as the programs do after each event: Decoder::dcd(), on while tracking (spec 3.10)
     const uint8_t bytes[] = {'H', 'i', '\n', 0x07};
     const uint8_t last_flags = unlimited::event_flag_weak | unlimited::event_flag_blanked;
     for (size_t i = 0; i < count_of(bytes); ++i)
@@ -731,13 +742,14 @@ TEST(tui_decoder_status_counts_and_text) {
 
     tui.on_event(make_event(EventType::end, DecoderState::search));
     tui.on_event(make_event(EventType::state, DecoderState::search));
+    tui.set_dcd(false);
     Event lost = make_event(EventType::lost, DecoderState::acquire);
     lost.reason = LostReason::framing;
     tui.on_event(lost);
     tui.set_field("channel", "");
     lines = render_lines(tui, k_wide_columns, k_tall_rows);
     const std::string after = lines[0] + lines[1] + lines[2];
-    CHECK(contains(after, "ACQUIRE, DCD on"));
+    CHECK(contains(after, "ACQUIRE, DCD off"));
     CHECK(contains(after, "locks 1  lost 1  ends 1"));
     CHECK(contains(after, "last: lost (framing errors)"));
     CHECK(!contains(after, "channel"));
@@ -1142,4 +1154,271 @@ TEST(tui_refresh_pacer_limits_the_rate) {
     CHECK(elapsed_ms >= k_refresh_period_ms);
     CHECK(elapsed_ms < k_refresh_period_ms + k_timing_slack_ms);
     CHECK(!pacer.due());
+    CHECK(pacer.next() > Clock::now());  // what a caller waiting on its own events waits until
+}
+
+// ---------------------------------------------------------------------------
+// Spec 12.6: the level meter, the status hand-off, the live status items, resizes and Ctrl-C
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const size_t k_level_window = 2400;          // 300 ms at 8 kHz
+const double k_half_scale_rms_dbfs = -9.03;  // a sine's RMS is its crest / sqrt(2): 3.01 dB under it
+const double k_quiet_scale = 2048.0;         // 1/16 of full scale
+const double k_quiet_dbfs = -24.08;
+const double k_db_tolerance = 0.02;
+const size_t k_ring_statuses = 100000;
+
+std::string status_rows(const std::vector<std::string>& lines) {
+    return lines[0] + lines[1] + lines[2];
+}
+
+void stop_counter(void* context) {
+    static_cast<std::atomic<int>*>(context)->fetch_add(1);
+}
+
+}  // namespace
+
+// Peak and RMS in dBFS against full scale 32768, and the clips (samples at -32768 or +32767).
+TEST(tui_level_meter_peak_rms_and_clips) {
+    LevelMeter sine;
+    const std::vector<int16_t> half = tone(k_tone_hz, k_rate, k_rate, k_half_scale);  // 1 s
+    sine.push(half.data(), half.size(), k_rate);
+    const Level recent = sine.recent();
+    CHECK_EQ(recent.samples, static_cast<uint64_t>(k_level_window));  // the last whole window
+    CHECK_NEAR(recent.peak_dbfs, k_half_scale_dbfs, k_db_tolerance);
+    CHECK_NEAR(recent.rms_dbfs, k_half_scale_rms_dbfs, k_db_tolerance);
+    CHECK_EQ(recent.clips, 0u);
+    const Level total = sine.total();
+    CHECK_EQ(total.samples, static_cast<uint64_t>(k_rate));
+    CHECK_NEAR(total.rms_dbfs, k_half_scale_rms_dbfs, k_db_tolerance);
+    CHECK_EQ(level_text(recent, true), std::string("peak -6.0 dBFS, RMS -9.0 dBFS, 0 clips"));
+    CHECK_EQ(level_text(recent, false), std::string("peak -6.0 dBFS, RMS -9.0 dBFS"));
+
+    // A square wave between the limits of int16: every sample clips; 0.0 dBFS, never "-0.0".
+    std::vector<int16_t> square(k_rate / 10);
+    for (size_t i = 0; i < square.size(); ++i)
+        square[i] = (i / k_eighths) % 2 ? std::numeric_limits<int16_t>::max() : std::numeric_limits<int16_t>::min();
+    LevelMeter loud;
+    loud.push(square.data(), square.size(), k_rate);
+    const Level clipped = loud.total();
+    CHECK_EQ(clipped.clips, static_cast<uint64_t>(square.size()));
+    CHECK_NEAR(clipped.peak_dbfs, 0.0, 1e-9);
+    CHECK_EQ(level_text(clipped, true), std::string("peak 0.0 dBFS, RMS 0.0 dBFS, 800 clips"));
+    LevelMeter single;
+    single.push(&square[0], 1, k_rate);
+    CHECK_EQ(level_text(single.total(), true), std::string("peak 0.0 dBFS, RMS 0.0 dBFS, 1 clip"));
+
+    LevelMeter quiet;
+    const std::vector<int16_t> zeros(k_rate, 0);
+    quiet.push(zeros.data(), zeros.size(), k_rate);
+    CHECK(std::isinf(quiet.total().peak_dbfs) && quiet.total().peak_dbfs < 0.0);
+    CHECK(std::isinf(quiet.total().rms_dbfs));
+    CHECK_EQ(level_text(quiet.recent(), true), std::string("digital silence"));
+    CHECK_EQ(level_text(LevelMeter().recent(), true), std::string("no audio"));
+}
+
+// The recent level is the last whole window (the window being filled until the first one is whole), whatever the
+// chunks; the silence counts the zeros since the last other sample; another rate starts both over.
+TEST(tui_level_meter_windows_and_silence) {
+    const std::vector<int16_t> loud = tone(k_tone_hz, k_rate, 2 * k_level_window, k_half_scale);
+    const std::vector<int16_t> quiet = tone(k_tone_hz, k_rate, k_level_window, k_quiet_scale);
+    LevelMeter meter;
+    meter.push(loud.data(), k_level_window - 1, k_rate);
+    CHECK_EQ(meter.recent().samples, static_cast<uint64_t>(k_level_window - 1));
+    meter.push(&loud[k_level_window - 1], 1, k_rate);
+    CHECK_EQ(meter.recent().samples, static_cast<uint64_t>(k_level_window));
+    CHECK_NEAR(meter.recent().peak_dbfs, k_half_scale_dbfs, k_db_tolerance);
+    meter.push(quiet.data(), k_level_window / 2, k_rate);
+    CHECK_NEAR(meter.recent().peak_dbfs, k_half_scale_dbfs, k_db_tolerance);  // still the loud window
+    for (size_t i = k_level_window / 2; i < k_level_window; ++i) meter.push(&quiet[i], 1, k_rate);
+    CHECK_NEAR(meter.recent().peak_dbfs, k_quiet_dbfs, k_db_tolerance);
+    CHECK_EQ(meter.total().samples, static_cast<uint64_t>(2 * k_level_window));
+
+    const std::vector<int16_t> zeros(3 * k_rate, 0);
+    CHECK_EQ(meter.silent_seconds(), 0.0);
+    meter.push(zeros.data(), zeros.size(), k_rate);
+    CHECK_NEAR(meter.silent_seconds(), 3.0, 1e-9);
+    const int16_t one = 1;
+    meter.push(&one, 1, k_rate);
+    CHECK_EQ(meter.silent_seconds(), 0.0);
+    meter.push(zeros.data(), k_rate, k_rate);
+    CHECK_NEAR(meter.silent_seconds(), 1.0, 1e-9);
+
+    meter.push(zeros.data(), 1, k_high_rate);  // another stream
+    CHECK_NEAR(meter.silent_seconds(), 1.0 / k_high_rate, 1e-12);
+    CHECK_EQ(meter.recent().samples, 1u);
+    CHECK_EQ(meter.total().samples, static_cast<uint64_t>(2 * k_level_window + 4 * k_rate + 2));
+}
+
+// The hand-off from the thread that renders the encoder to the view's thread: in order, never blocking, a full ring
+// drops (counted).
+TEST(tui_status_ring_hands_over_in_order) {
+    StatusRing ring(100);
+    CHECK_EQ(ring.capacity(), 128u);  // a power of two
+    EncoderStatus status = EncoderStatus();
+    for (uint32_t i = 0; i < ring.capacity(); ++i) {
+        status.slot_index = i;
+        CHECK(ring.push(status));
+    }
+    status.slot_index = 999;
+    CHECK(!ring.push(status));
+    CHECK_EQ(ring.dropped(), 1u);
+    for (uint32_t i = 0; i < ring.capacity(); ++i) CHECK(ring.pop(status) && status.slot_index == i);
+    CHECK(!ring.pop(status));
+
+    // Across threads: every status arrives, in order, whole (a producer that meets a full ring tries again here, to
+    // hand over all of them; the program's never waits).
+    StatusRing shared(64);
+    std::atomic<bool> done(false);
+    std::thread producer([&] {
+        EncoderStatus produced = EncoderStatus();
+        for (uint32_t i = 0; i < k_ring_statuses; ++i) {
+            produced.slot_index = i;
+            produced.byte_index = i / k_window_cells;
+            while (!shared.push(produced)) std::this_thread::yield();
+        }
+        done.store(true);
+    });
+    size_t received = 0;
+    bool ordered = true;
+    uint32_t previous = 0;
+    for (;;) {
+        const bool finished = done.load();  // read first: every push before it is then visible
+        EncoderStatus taken = EncoderStatus();
+        bool any = false;
+        while (shared.pop(taken)) {
+            ordered = ordered && (received == 0 || taken.slot_index > previous) &&
+                      taken.byte_index == taken.slot_index / k_window_cells;
+            previous = taken.slot_index;
+            ++received;
+            any = true;
+        }
+        if (finished) break;
+        if (!any) std::this_thread::yield();
+    }
+    producer.join();
+    NOTE("%zu statuses handed over in order; the producer met a full ring %u times", received,
+         static_cast<unsigned>(shared.dropped()));
+    CHECK(ordered);
+    CHECK_EQ(received, k_ring_statuses);
+}
+
+// The level meter item follows the state (spec 12.6): the decoder's input with its clips, the encoder's output; the
+// warning item follows it and goes away.
+TEST(tui_status_shows_the_level_and_the_warning) {
+    Tui decoder(TuiMode::decoder);
+    decoder.set_color(false);
+    decoder.set_label("coreaudio:5");
+    decoder.set_speed(k_speed);
+    LevelMeter meter;
+    const std::vector<int16_t> half = tone(k_tone_hz, k_rate, k_rate, k_half_scale);
+    meter.push(half.data(), half.size(), k_rate);
+    decoder.set_level(meter.recent());
+    std::vector<std::string> lines = render_lines(decoder, k_wide_columns, k_tall_rows);
+    CHECK(contains(lines[0], "RX coreaudio:5 \xe2\x94\x82 SEARCH, DCD off \xe2\x94\x82 in peak -6.0 dBFS, RMS -9.0 dBFS, "
+                             "0 clips \xe2\x94\x82 6.00 bytes/s"));
+    decoder.set_warning("digital silence 5 s: microphone permission?");
+    lines = render_lines(decoder, k_wide_columns, k_tall_rows);
+    const Cells items = cells_of(status_rows(lines));
+    const int level_at = find_in(items, "0 clips");
+    const int warning_at = find_in(items, "digital silence 5 s: microphone permission?");
+    CHECK(level_at > 0 && warning_at > level_at);  // right after the level (here on the next row)
+    CHECK(warning_at < find_in(items, "6.00 bytes/s"));
+    decoder.set_warning("");
+    lines = render_lines(decoder, k_wide_columns, k_tall_rows);
+    CHECK(!contains(status_rows(lines), "digital silence"));
+    Level clipping = meter.recent();
+    clipping.clips = 7;
+    decoder.set_level(clipping);
+    CHECK(contains(status_rows(render_lines(decoder, k_wide_columns, k_tall_rows)), ", 7 clips"));
+    decoder.set_level(LevelMeter().recent());
+    CHECK(contains(status_rows(render_lines(decoder, k_wide_columns, k_tall_rows)), "in no audio"));
+
+    const EncoderConfig config = six_config();
+    Tui encoder(TuiMode::encoder);
+    encoder_view(encoder, config);
+    LevelMeter out;
+    Encoder sender(config);
+    const std::vector<uint8_t> data = bytes_of("Hi");
+    REQUIRE(sender.write(data.data(), data.size()) == data.size());
+    REQUIRE(sender.start());
+    std::vector<int16_t> audio(sender.duration_samples(data.size()));
+    CHECK_EQ(sender.render(audio.data(), audio.size()), audio.size());
+    out.push(audio.data(), audio.size(), config.sample_rate_hz);
+    encoder.set_level(out.total());
+    const std::string status = status_rows(render_lines(encoder, k_wide_columns, k_tall_rows));
+    CHECK(contains(status, "TX test \xe2\x94\x82 IDLE \xe2\x94\x82 out peak -3.0 dBFS, RMS -"));
+    CHECK(!contains(status, "clip"));
+}
+
+// A resize is followed at the next frame: the screen is cleared and the frame has the new size.
+TEST(tui_next_frame_follows_a_resize) {
+    Tui tui(TuiMode::decoder);
+    feed_decoder(tui);
+    const std::string clear_home = "\x1b[2J\x1b[H";
+    CHECK_EQ(tui.next_frame(k_columns, k_rows).find(clear_home), 0u);  // the first frame clears
+    const std::string same = tui.next_frame(k_columns, k_rows);
+    CHECK_EQ(same.find("\x1b[H"), 0u);
+    CHECK(same.find("\x1b[2J") == std::string::npos);
+    const std::string resized = tui.next_frame(k_wide_columns, k_tall_rows);
+    CHECK_EQ(resized.find(clear_home), 0u);
+    CHECK_EQ(static_cast<int>(std::count(resized.begin(), resized.end(), '\n')), k_tall_rows - 1);  // rows, "\r\n" between
+    CHECK(tui.next_frame(k_wide_columns, k_tall_rows).find("\x1b[2J") == std::string::npos);
+}
+
+// Ctrl-C, SIGTERM and SIGHUP call the stop function instead of ending the program; the handlers before come back; an
+// ignored signal stays ignored; the TUI's restore hook comes back after it (spec 12.6).
+TEST(tui_stop_on_signals_calls_the_stop_and_restores) {
+    typedef void (*Handler)(int);
+    std::atomic<int> stops(0);
+    const Handler original_int = std::signal(SIGINT, tui_test_signal_handler);
+    const Handler original_term = std::signal(SIGTERM, SIG_DFL);
+#ifdef SIGHUP
+    const Handler original_hup = std::signal(SIGHUP, SIG_DFL);
+#endif
+    {
+        unlimited::pc::StopOnSignals stop(&stop_counter, &stops);
+        std::raise(SIGINT);
+        CHECK_EQ(stops.load(), 1);
+        CHECK_EQ(stop.count(), 1);
+        CHECK_EQ(stop.last_signal(), SIGINT);
+        std::raise(SIGINT);  // again: stop() once more, never the end of the program
+        std::raise(SIGTERM);
+        CHECK_EQ(stops.load(), 3);
+        CHECK_EQ(stop.last_signal(), SIGTERM);
+#ifdef SIGHUP
+        std::raise(SIGHUP);
+        CHECK_EQ(stops.load(), 4);
+        CHECK_EQ(stop.last_signal(), SIGHUP);
+#endif
+    }
+    CHECK(std::signal(SIGINT, SIG_IGN) == tui_test_signal_handler);  // the handler before is back
+    CHECK(std::signal(SIGTERM, SIG_DFL) == SIG_DFL);
+    const int before = stops.load();
+    {
+        unlimited::pc::StopOnSignals stop(&stop_counter, &stops);
+        std::raise(SIGINT);  // ignored before: still ignored (nohup, a background job)
+        CHECK_EQ(stop.count(), 0);
+    }
+    CHECK_EQ(stops.load(), before);
+    CHECK(std::signal(SIGINT, SIG_DFL) == SIG_IGN);
+
+    unlimited::pc::restore_terminal_on_exit(true);
+    const Handler restore_hook = std::signal(SIGINT, SIG_DFL);
+    std::signal(SIGINT, restore_hook);
+    CHECK(restore_hook != SIG_DFL);
+    {
+        unlimited::pc::StopOnSignals stop(&stop_counter, &stops);
+        std::raise(SIGINT);  // stops, and the process lives on
+        CHECK_EQ(stops.load(), before + 1);
+    }
+    CHECK(std::signal(SIGINT, restore_hook) == restore_hook);  // the TUI's hook is back
+    unlimited::pc::restore_terminal_on_exit(false);
+    CHECK(std::signal(SIGINT, original_int) == SIG_DFL);
+    std::signal(SIGTERM, original_term);
+#ifdef SIGHUP
+    std::signal(SIGHUP, original_hup);
+#endif
 }

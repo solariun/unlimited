@@ -14,9 +14,10 @@
 #include <thread>
 #include <vector>
 
-// The long regression suite of v1.0 (spec 4, 8): the essential families A1/A2 (AWGN per speed, the 70 % line against
-// the adaptive one), A3 (acquisition from byte 0), S1 (short transmissions), L5 (clock error), L19 (passband and
-// shift), C (channels) and F (false locks), and the integrity row over all of them. One byte per window of 10 slots.
+// The long regression suite of v1.0 (spec 4, 8): the essential families A1/A2 (AWGN per speed, the default adaptive
+// line against the fixed 70 % one), A3 (acquisition from byte 0), S1 (short transmissions), L5 (clock error), L19
+// (passband and shift), C (channels, also with the fade bridge) and F (stray bytes per hour, DCD), and the integrity rows over
+// all of them. One byte per window of 10 slots.
 // Its gates are provisional (spec 4): they are measured and reported, and changed only by Gustavo's decision.
 namespace unlimited {
 namespace regression {
@@ -63,8 +64,11 @@ extern const float k_speeds[k_speed_count];  // 1, 3, 6, 12, 25 bytes/s (spec 1.
 double gate_db(float speed);
 // 8000 Hz at `speed` bytes/s on tone_hz; the passband widened to 100..3000 Hz when the band needs it.
 EncoderConfig speed_config(float speed, std::uint16_t tone_hz = k_default_tone_hz);
-// The receiver of that sender: its speed and passband, the fixed 70 % line unless adaptive.
-DecoderConfig receiver_for(const EncoderConfig& config, bool adaptive = false);
+// The receiver of that sender: its speed and passband with the library's defaults (the adaptive line, no fade bridge);
+// fixed_receiver_for(): the fixed 70 % line instead; fade_receiver_for(): the defaults with the fade bridge (spec 3.7).
+DecoderConfig receiver_for(const EncoderConfig& config);
+DecoderConfig fixed_receiver_for(const EncoderConfig& config);
+DecoderConfig fade_receiver_for(const EncoderConfig& config);
 std::string speed_text(float speed);  // "6 bytes/s"
 double slot_ms_of(const EncoderConfig& config);
 
@@ -108,10 +112,9 @@ void merge(Outcome& into, const Outcome& from);
 // A BER gate needs released bits: at least half of the bytes delivered.
 const double k_min_delivered = 0.5;
 bool delivered(const Outcome& outcome);
-// Spec 0.8 G5, kept: "0 bit errors" is BER <= 1e-4 with 0 extra and 0 shifted bytes.
+// Spec 0.8 G5: "0 bit errors" is BER <= 1e-4 (L19). Extra and shifted bytes are reported, not gated (V22: the
+// upper protocol rejects them); the ledger adds them up for the Integrity rows.
 const double k_near_zero_ber = 1e-4;
-bool near_zero_errors(const Outcome& outcome);
-bool integrity(const Outcome& outcome);  // 0 extra and 0 shifted bytes
 
 TxPlan random_tx(const EncoderConfig& config, std::size_t bytes, std::uint32_t seed);
 
@@ -156,8 +159,9 @@ std::string ber_text(const Outcome& outcome);   // "BER 1.2e-05 (204800 bits), d
 std::string lock_text(const Outcome& outcome);  // "locked 20/20 tx from byte 0, 0 lost"
 double upper_95(std::size_t errors, double trials);  // upper 95 % bound of a rate (Poisson; 3/n with none)
 
-// The integrity ledger: every A, S, L and C row adds its extra and shifted bytes; the integrity test checks them.
-void ledger(const std::string& where, const Outcome& outcome);
+// The integrity ledger: every A, S, L and C row adds its extra and shifted bytes, the fade bridge's apart; the integrity
+// test checks both.
+void ledger(const std::string& where, const Outcome& outcome, bool fade_bridge = false);
 void print_summary();
 
 // Suite entry points (one TEST each, registered in order in regression_suite.cpp).

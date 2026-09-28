@@ -85,7 +85,9 @@ Pitch 1500 Hz. Each cell is the shift tolerance `passband_fit(config)` with the 
 
 ## 6. The receiver's settings (spec 3, 5)
 
-`DecoderConfig()`: 6.00 bytes/s, passband 300–2700 Hz, the fixed decision line at 70 % of each window's START–STOP reference line (`--threshold auto`: the adaptive line), impulse blanker on. The receiver searches the pitch in `search_range()`: the passband less half the occupied band at its speed, within 300..2700 Hz.
+`DecoderConfig()`: 6.00 bytes/s, passband 300–2700 Hz, the adaptive decision line (`--threshold auto`, the default since 2026-09-28); the fixed line sits at `threshold_percent` (70 % by default) of each window's START–STOP reference line; impulse blanker on; fade bridge off (V16). The receiver searches the pitch in `search_range()`: the passband less half the occupied band at its speed, within 300..2700 Hz.
+
+One byte, one decision (V20): the first window after the anchor is decided alone, like every other, and its byte comes out with `locked`; `dcd()` is on while the receiver tracks (spec 3.10).
 
 | Speed | 1.8 kHz SSB | 2.4 kHz SSB (default) | 2.7 kHz SSB | AM | NBFM |
 |---|---|---|---|---|---|

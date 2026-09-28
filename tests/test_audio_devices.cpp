@@ -108,7 +108,8 @@ size_t display_width(const std::string& text) {
 // ---------------------------------------------------------------------------
 
 // Delivers `samples` in blocks from a thread of its own, like a device callback, with `channels` interleaved
-// channels (the first carries the samples); optionally fails at the end, or runs until stopped.
+// channels (the first carries the samples); optionally fails at the end, or runs until stopped, or (resume) waits after
+// its first block until the test lets it run on.
 class FakeCapture final : public CaptureBackend {
 public:
     FakeCapture(const std::vector<int16_t>& samples, size_t block, size_t channels)
@@ -139,6 +140,7 @@ public:
     std::string fail_at_end;
     std::thread::id producer_id;
     std::promise<void> produced;
+    std::future<void> resume;  // valid: after the first block, wait for it (at most k_patience) before the rest
 
 private:
     void produce() {
@@ -148,6 +150,7 @@ private:
             const size_t count = std::min(block_, samples_.size() - at);
             for (size_t i = 0; i < count; ++i) frames[i * channels_] = samples_[at + i];
             feed_->deliver(&frames[0], count, channels_);
+            if (at == 0 && resume.valid()) resume.wait_for(k_patience);
         }
         if (!fail_at_end.empty()) feed_->fail(fail_at_end);
         produced.set_value();
@@ -234,7 +237,11 @@ public:
             samples.insert(samples.end(), in, in + count);
             threads.insert(std::this_thread::get_id());
             ++writes;
-            if (hold) gate_.wait(lock, [this] { return !hold; });
+            if (hold) {
+                stalled_ = true;
+                changed_.notify_all();
+                gate_.wait(lock, [this] { return !hold; });
+            }
         }
         changed_.notify_all();
         if (device != nullptr && writes == stop_at_write) device->stop();
@@ -243,6 +250,12 @@ public:
     bool wait_for(size_t count) {
         std::unique_lock<std::mutex> lock(mutex_);
         return changed_.wait_for(lock, k_patience, [&] { return samples.size() >= count; });
+    }
+
+    // Blocks until a write() is held (hold): the worker has taken audio from the ring and is stuck in the sink.
+    bool wait_stalled() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return changed_.wait_for(lock, k_patience, [this] { return stalled_; });
     }
 
     void release() {
@@ -269,6 +282,7 @@ private:
     std::mutex mutex_;
     std::condition_variable changed_;
     std::condition_variable gate_;
+    bool stalled_ = false;
 };
 
 // A source that never ends.
@@ -621,28 +635,35 @@ TEST(audio_live_input_stops_from_a_signal_handler) {
     g_signalled_input = nullptr;
 }
 
+// A sink that falls behind: the device's first block reaches the sink, whose write() stalls; only then does the device
+// run on (its stand-in waits for that: a device may otherwise fill the ring before the worker's first read), filling the
+// ring behind the stalled write and losing the rest. After the release exactly the stalled block and one full ring
+// arrive, the samples in order with none missing between; every block that found no room is one xrun.
 TEST(audio_live_input_counts_what_a_slow_sink_loses) {
     const size_t ring = 2048;
+    const size_t block = 256;
     const std::vector<int16_t> samples = ramp(20000);
-    FakeCapture* capture = new FakeCapture(samples, 256, 1);
+    FakeCapture* capture = new FakeCapture(samples, block, 1);
     std::future<void> produced = capture->produced.get_future();
     LiveInput input(std::unique_ptr<CaptureBackend>(capture), ring);
     RecordingSink sink;
     sink.hold = true;  // the first write stalls: the ring fills behind it, the rest is dropped
+    std::promise<void> resume;  // after the input: destroyed first, it never leaves the stand-in waiting
+    capture->resume = resume.get_future();
     REQUIRE(input.start(sink, k_rate));
-    REQUIRE(produced.wait_for(k_patience) == std::future_status::ready);
-    CHECK(input.xruns() > 0);
-    const size_t first = sink.received();  // the chunk the stalled write holds
-    CHECK(first >= 1 && first <= unlimited::pc::k_live_chunk_samples);
+    CHECK(sink.wait_stalled());  // the worker took the first block and its write() holds it
+    resume.set_value();          // now the device runs ahead of the stalled sink
+    CHECK(produced.wait_for(k_patience) == std::future_status::ready);
+    const size_t blocks = (samples.size() + block - 1) / block;
+    CHECK_EQ(input.xruns(), static_cast<uint32_t>(blocks - 1 - ring / block));
+    CHECK_EQ(sink.received(), block);  // the stalled write holds the first block
     sink.release();
-    CHECK(sink.wait_for(first + ring));  // then the full ring, and nothing else
+    CHECK(sink.wait_for(block + ring));  // then the full ring, and nothing else
     input.stop();
     CHECK(input.wait());
-    NOTE("%zu of %zu samples delivered (a stalled chunk of %zu and a full ring of %zu), %u xruns",
-         sink.samples.size(), samples.size(), first, ring, input.xruns());
-    CHECK_EQ(sink.samples.size(), first + ring);
-    for (size_t i = 1; i < sink.samples.size(); ++i)
-        if (!CHECK(sink.samples[i - 1] < sink.samples[i])) break;  // what arrives is in order, gaps only
+    NOTE("%zu of %zu samples delivered (a stalled block of %zu and a full ring of %zu), %u xruns", sink.samples.size(),
+         samples.size(), block, ring, static_cast<unsigned>(input.xruns()));
+    CHECK(sink.samples == std::vector<int16_t>(samples.begin(), samples.begin() + block + ring));
 }
 
 TEST(audio_live_input_reports_a_device_error) {

@@ -1,5 +1,6 @@
 #include "terminal.hpp"
 
+#include <atomic>
 #include <csignal>
 #include <cstddef>
 #include <cstdlib>
@@ -38,6 +39,21 @@ volatile std::sig_atomic_t g_restore_armed = 0;
 bool g_exit_hook_installed = false;
 bool g_hooked[k_restore_signal_count];
 
+// StopOnSignals: SIGHUP too, where the system has it (a closed terminal must still release a keyed radio).
+#ifdef SIGHUP
+const int k_stop_signals[] = {SIGINT, SIGTERM, SIGHUP};
+#else
+const int k_stop_signals[] = {SIGINT, SIGTERM};
+#endif
+const std::size_t k_stop_signal_count = sizeof(k_stop_signals) / sizeof(k_stop_signals[0]);
+
+static_assert(ATOMIC_POINTER_LOCK_FREE == 2, "a signal handler may use lock-free atomics only");
+std::atomic<StopOnSignals::StopFunction> g_stop_function(nullptr);
+std::atomic<void*> g_stop_context(nullptr);
+volatile std::sig_atomic_t g_stop_count = 0;
+volatile std::sig_atomic_t g_stop_last = 0;
+SignalHandler g_stop_previous[k_stop_signal_count];
+
 #ifdef _WIN32
 HANDLE stream_handle(std::FILE* stream) {
     return reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stream)));
@@ -67,6 +83,14 @@ void on_process_exit() {
     g_restore_armed = 0;
     std::fputs(k_restore_sequence, stdout);
     std::fflush(stdout);
+}
+
+// Async-signal-safe: lock-free atomics, sig_atomic_t, and the stop function (a live device's stop()).
+void on_stop_signal(int signal_number) {
+    g_stop_last = signal_number;
+    g_stop_count = g_stop_count + 1;
+    const StopOnSignals::StopFunction stop = g_stop_function.load();
+    if (stop != nullptr) stop(g_stop_context.load());
 }
 
 }  // namespace
@@ -136,6 +160,33 @@ void restore_terminal_on_exit(bool enabled) {
         if (g_hooked[i]) std::signal(k_restore_signals[i], SIG_DFL);
         g_hooked[i] = false;
     }
+}
+
+// An ignored signal stays ignored (a program started with nohup, or in the background by a shell without job control).
+StopOnSignals::StopOnSignals(StopFunction stop, void* context) {
+    g_stop_count = 0;
+    g_stop_last = 0;
+    g_stop_context.store(context);
+    g_stop_function.store(stop);
+    for (std::size_t i = 0; i < k_stop_signal_count; ++i) {
+        g_stop_previous[i] = std::signal(k_stop_signals[i], on_stop_signal);
+        if (g_stop_previous[i] == SIG_IGN) std::signal(k_stop_signals[i], SIG_IGN);
+    }
+}
+
+StopOnSignals::~StopOnSignals() {
+    for (std::size_t i = 0; i < k_stop_signal_count; ++i)
+        if (g_stop_previous[i] != SIG_ERR) std::signal(k_stop_signals[i], g_stop_previous[i]);
+    g_stop_function.store(nullptr);
+    g_stop_context.store(nullptr);
+}
+
+int StopOnSignals::count() const {
+    return g_stop_count;
+}
+
+int StopOnSignals::last_signal() const {
+    return g_stop_last;
 }
 
 }  // namespace pc

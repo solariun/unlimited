@@ -439,13 +439,20 @@ void print_bandwidth() {
 
 void print_receiver() {
     const DecoderConfig defaults;
+    const bool adaptive = defaults.decision_mode == unlimited::DecisionMode::adaptive;
     std::printf("## 6. The receiver's settings (spec 3, 5)\n\n");
-    std::printf("`DecoderConfig()`: %s bytes/s, passband %u–%u Hz, the fixed decision line at %u %% of each window's "
-                "START–STOP reference line (`--threshold auto`: the adaptive line), impulse blanker on. The receiver "
-                "searches the pitch in `search_range()`: the passband less half the occupied band at its speed, within "
-                "300..2700 Hz.\n\n",
+    std::printf("`DecoderConfig()`: %s bytes/s, passband %u–%u Hz, %s; the fixed line sits at `threshold_percent` "
+                "(%u %% by default) of each window's START–STOP reference line; impulse blanker %s; fade bridge %s "
+                "(V16). The receiver searches the pitch in `search_range()`: the passband less half the occupied band "
+                "at its speed, within 300..2700 Hz.\n\n",
                 speed_text(unlimited::bytes_per_second(defaults.slot_us)).c_str(), defaults.passband.low_hz,
-                defaults.passband.high_hz, static_cast<unsigned>(defaults.threshold_percent));
+                defaults.passband.high_hz,
+                adaptive ? "the adaptive decision line (`--threshold auto`, the default since 2026-09-28)"
+                         : "the fixed decision line",
+                static_cast<unsigned>(defaults.threshold_percent), defaults.impulse_blanker ? "on" : "off",
+                defaults.fade_bridge ? "on" : "off");
+    std::printf("One byte, one decision (V20): the first window after the anchor is decided alone, like every "
+                "other, and its byte comes out with `locked`; `dcd()` is on while the receiver tracks (spec 3.10).\n\n");
     std::printf("| Speed |");
     for (size_t f = 0; f < sizeof(k_filters) / sizeof(k_filters[0]); ++f) std::printf(" %s |", k_filters[f].name);
     std::printf("\n|---|");

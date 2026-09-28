@@ -39,11 +39,11 @@ const double k_percent = 100.0;
 const double k_gates_db[k_speed_count] = {-6.5, -1.7, 1.3, 4.3, 8.0};
 const double k_leading_slots = 15.0;  // a whole silent window before the first START (V6), and a margin
 
-// Scoring: a lock belongs to the latest transmission whose first START lies 19.5 to 75 slots before it (loopback's
-// rule), and a lock segment is shifted when at least half of its bytes (and twice as many as at its own numbering)
+// Scoring: a lock belongs to the latest transmission whose first START lies 9.5 to 100 slots before it (loopback's
+// rule: the lock comes once the first window is in), and a lock segment is shifted when at least half of its bytes (and twice as many as at its own numbering)
 // match the sent data at another byte offset; segments shorter than this are not judged.
-const double k_lock_min_slots = 19.5;
-const double k_lock_max_slots = 75.0;
+const double k_lock_min_slots = 9.5;
+const double k_lock_max_slots = 100.0;
 const std::size_t k_shift_min_bytes = 4;
 const std::size_t k_shift_ratio = 2;
 const std::size_t k_settle_windows = 8;  // L5: T is judged after the loops settled
@@ -81,6 +81,7 @@ struct LedgerEntry {
     std::size_t extra;
     std::size_t shifted;
     std::size_t released;
+    bool fade_bridge;
 };
 
 std::vector<LedgerEntry>& ledger_entries() {
@@ -237,9 +238,20 @@ EncoderConfig speed_config(float speed, std::uint16_t tone_hz) {
     return loopback::speed_config(speed, tone_hz);
 }
 
-DecoderConfig receiver_for(const EncoderConfig& config, bool adaptive) {
+DecoderConfig receiver_for(const EncoderConfig& config) {
+    return loopback::receiver_for(config);
+}
+
+DecoderConfig fixed_receiver_for(const EncoderConfig& config) {
     DecoderConfig receiver = loopback::receiver_for(config);
-    if (adaptive) receiver.decision_mode = DecisionMode::adaptive;
+    receiver.decision_mode = DecisionMode::fixed;
+    receiver.threshold_percent = k_default_threshold_percent;
+    return receiver;
+}
+
+DecoderConfig fade_receiver_for(const EncoderConfig& config) {
+    DecoderConfig receiver = loopback::receiver_for(config);
+    receiver.fade_bridge = true;
     return receiver;
 }
 
@@ -286,14 +298,6 @@ double Outcome::mean_slot_error() const {
 
 bool delivered(const Outcome& outcome) {
     return outcome.delivered() >= k_min_delivered;
-}
-
-bool integrity(const Outcome& outcome) {
-    return outcome.score.extra_bytes == 0 && outcome.shifted_bytes == 0;
-}
-
-bool near_zero_errors(const Outcome& outcome) {
-    return outcome.score.ber() <= k_near_zero_ber && integrity(outcome);
 }
 
 void merge(Outcome& into, const Outcome& from) {
@@ -525,31 +529,39 @@ double upper_95(std::size_t errors, double trials) {
     return (k + k_z95 * std::sqrt(k) + k_z95 * k_z95 / 2.0) / trials;
 }
 
-void ledger(const std::string& where, const Outcome& outcome) {
+void ledger(const std::string& where, const Outcome& outcome, bool fade_bridge) {
     std::lock_guard<std::mutex> lock(lines_mutex());
-    ledger_entries().push_back(
-        LedgerEntry{where, outcome.score.extra_bytes, outcome.shifted_bytes, outcome.score.bytes_released});
+    ledger_entries().push_back(LedgerEntry{where, outcome.score.extra_bytes, outcome.shifted_bytes,
+                                           outcome.score.bytes_released, fade_bridge});
 }
 
 void test_integrity() {
     const std::vector<LedgerEntry>& entries = ledger_entries();
     REQUIRE(!entries.empty());
-    std::size_t extra = 0;
-    std::size_t shifted = 0;
-    std::size_t released = 0;
-    std::size_t rows = 0;
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        extra += entries[i].extra;
-        shifted += entries[i].shifted;
-        released += entries[i].released;
-        if (entries[i].extra == 0 && entries[i].shifted == 0) continue;
-        ++rows;
-        note(format("integrity: %s: %zu extra, %zu shifted bytes", entries[i].where.c_str(), entries[i].extra,
-                    entries[i].shifted));
+    for (int bridge = 0; bridge < 2; ++bridge) {
+        std::size_t extra = 0;
+        std::size_t shifted = 0;
+        std::size_t released = 0;
+        std::size_t rows = 0;
+        std::size_t problem_rows = 0;
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].fade_bridge != (bridge != 0)) continue;
+            ++rows;
+            extra += entries[i].extra;
+            shifted += entries[i].shifted;
+            released += entries[i].released;
+            if (entries[i].extra == 0 && entries[i].shifted == 0) continue;
+            ++problem_rows;
+            note(format("integrity: %s: %zu extra, %zu shifted bytes", entries[i].where.c_str(), entries[i].extra,
+                        entries[i].shifted));
+        }
+        if (rows == 0) continue;
+        const std::string what = bridge != 0 ? "every C row with the fade bridge" : "every A, S, L and C row";
+        result(bridge != 0 ? "Integrity-fade" : "Integrity", format("%s (%zu rows, %zu bytes released)", what.c_str(),
+                                                                  rows, released),
+               format("%zu extra bytes, %zu shifted bytes, in %zu rows", extra, shifted, problem_rows),
+               "report: the upper protocol rejects them (V22; was a gate of 0 and 0)", true, Kind::report);
     }
-    result("Integrity", format("every A, S, L and C row (%zu rows, %zu bytes released)", entries.size(), released),
-           format("%zu extra bytes, %zu shifted bytes, in %zu rows", extra, shifted, rows),
-           "0 extra and 0 shifted bytes", extra == 0 && shifted == 0);
 }
 
 void print_summary() {

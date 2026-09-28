@@ -5,6 +5,8 @@
 #include <cmath>
 
 // C (spec 4): the channel simulator's conditions, re-measured for v1.0 and reported; their gates are Gustavo's to set.
+// Each recording is decoded three times: the defaults (the adaptive line), the fixed 70 % line, and the defaults with the
+// fade bridge (spec 3.7; the gaps of 1.5 s give every START the 300 ms of silence it then needs).
 namespace unlimited {
 namespace regression {
 
@@ -117,8 +119,9 @@ void test_c_channels() {
             JobPlan shape;
             shape.channel = list[c].channel;
             shape.peak_factor = list[c].peak_factor;
-            shape.decoders.push_back(receiver_for(config, false));
-            shape.decoders.push_back(receiver_for(config, true));
+            shape.decoders.push_back(receiver_for(config));
+            shape.decoders.push_back(fixed_receiver_for(config));
+            shape.decoders.push_back(fade_receiver_for(config));
             add_jobs(jobs, points, rows.size(), shape, config, k_c_transmissions, k_c_bytes,
                      k_test_c + static_cast<std::uint32_t>(c));
             rows.push_back(Row{c, list[c].speeds[v]});
@@ -129,13 +132,16 @@ void test_c_channels() {
         const Condition& condition = list[rows[r].condition];
         const std::string text = format("%s, %s, %zu x %zu bytes", condition.name, speed_text(rows[r].speed).c_str(),
                                         k_c_transmissions, k_c_bytes);
-        const Outcome& fixed = outcomes[r][0];
-        const Outcome& adaptive = outcomes[r][1];
-        ledger(std::string(condition.id) + " " + text, fixed);
-        ledger(std::string(condition.id) + " adaptive " + text, adaptive);
-        result(condition.id, text + ", fixed 70 % line", ber_text(fixed), "report (gate: Gustavo's decision)", true,
-               Kind::report);
-        result(condition.id, text + ", adaptive line", ber_text(adaptive), "report", true, Kind::report);
+        const Outcome& adaptive = outcomes[r][0];
+        const Outcome& fixed = outcomes[r][1];
+        const Outcome& bridge = outcomes[r][2];
+        ledger(std::string(condition.id) + " " + text, adaptive);
+        ledger(std::string(condition.id) + " fixed " + text, fixed);
+        ledger(std::string(condition.id) + " fade bridge " + text, bridge, true);
+        result(condition.id, text + ", adaptive line (the default)", ber_text(adaptive),
+               "report (gate: Gustavo's decision)", true, Kind::report);
+        result(condition.id, text + ", fixed 70 % line", ber_text(fixed), "report", true, Kind::report);
+        result(condition.id, text + ", fade bridge (adaptive line)", ber_text(bridge), "report", true, Kind::report);
     }
 }
 

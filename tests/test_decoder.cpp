@@ -1,3 +1,4 @@
+#include "support/interference.hpp"
 #include "support/loopback.hpp"
 #include "test_harness.hpp"
 #include "unlimited/decoder.hpp"
@@ -50,6 +51,10 @@ const size_t k_window_slots = unlimited::k_window_slots;
 const double k_margin_slots = 0.5;     // the history a window needs past its STOP before it is read
 const double k_pipeline_blocks = 5.0;  // 2 blocks of the CIC-2, 2 of the impulse blanker's delay, 1 of rounding
 const double k_grid_slots = 0.1;       // the tracked grid against the sent one
+const double k_first_steps_blocks = 2.0;  // the first window's pitch at one block, its anchor and decision at the next
+const double k_first_pitch_hz = 6.0;       // the pitch of the first bytes: the first window's alone (V20)
+const double k_pitch_hz = 2.0;             // ... and once the pitch loop settled
+const uint32_t k_pitch_settle_windows = 3;
 
 double slot_of(const EncoderConfig& config) {
     return slot_samples(config);
@@ -90,6 +95,84 @@ size_t count_type(const Capture& capture, EventType type) {
     return count_events(capture, type);
 }
 
+// Receiver noise (USB, the interference's reference level at 0 dB) plus an interferer, `seconds` long: the long suite's
+// F scenes (spec 4 F) in short.
+std::vector<int16_t> scene(unlimited::interference::Interferer& interferer, double seconds, uint32_t seed) {
+    const double full_scale = 32768.0;
+    sim::ChannelConfig channel;
+    channel.mode = sim::Mode::usb;
+    channel.signal_level = unlimited::interference::k_reference;
+    channel.snr_db = 0.0;
+    channel.seed = seed;
+    sim::Channel noise(channel);
+    const size_t count = static_cast<size_t>(seconds * unlimited::k_decoder_rate_hz);
+    std::vector<float> zeros(count, 0.0f);
+    std::vector<float> out(count);
+    noise.process(zeros.data(), out.data(), count);
+    std::vector<int16_t> samples(count);
+    for (size_t i = 0; i < count; ++i) {
+        const double value = std::round((out[i] + interferer.next()) * full_scale);
+        samples[i] = static_cast<int16_t>(std::max(-full_scale, std::min(full_scale - 1.0, value)));
+    }
+    return samples;
+}
+
+// A decoder run sample by sample: its locks and bytes, and how long DCD was on.
+struct DcdRun {
+    size_t locks = 0;
+    size_t bytes = 0;
+    size_t dcd_samples = 0;
+    size_t first_on = 0;      // the first sample (1-based) after which dcd() was on; 0: never
+    size_t last_on = 0;       // the last one
+    size_t end_sample = 0;    // when `end` came (samples consumed); 0: never
+    bool gap = false;         // DCD went off and on again between first_on and last_on
+    size_t not_track = 0;     // samples where dcd() differed from state() == TRACK (spec 3.10: none)
+};
+
+struct DcdSink {
+    DcdRun* run;
+    const size_t* consumed;
+    static void on_event(const Event& event, void* context) {
+        DcdSink* sink = static_cast<DcdSink*>(context);
+        if (event.type == EventType::locked) ++sink->run->locks;
+        if (event.type == EventType::byte) ++sink->run->bytes;
+        if (event.type == EventType::end && sink->run->end_sample == 0) sink->run->end_sample = *sink->consumed;
+    }
+};
+
+DcdRun run_with_dcd(const std::vector<int16_t>& samples, const DecoderConfig& config) {
+    DcdRun run;
+    size_t consumed = 0;
+    DcdSink sink = {&run, &consumed};
+    Decoder decoder(config, &DcdSink::on_event, &sink);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        consumed = i + 1;
+        decoder.process_sample(samples[i]);
+        if (decoder.dcd() != (decoder.state() == DecoderState::track)) ++run.not_track;
+        if (!decoder.dcd()) continue;
+        ++run.dcd_samples;
+        if (run.first_on == 0) run.first_on = consumed;
+        if (run.last_on != 0 && run.last_on + 1 != consumed) run.gap = true;
+        run.last_on = consumed;
+    }
+    return run;
+}
+
+// A receiver of `config`'s speed and passband with the fade bridge (spec 3.7, V16).
+DecoderConfig bridge_for(const EncoderConfig& config) {
+    DecoderConfig receiver = receiver_for(config);
+    receiver.fade_bridge = true;
+    return receiver;
+}
+
+// Scales every slot of windows [first, first + count) of transmission 0 by `gain`: a fade across whole windows (0: the
+// signal gone).
+void fade_windows(Recording& recording, size_t first, size_t count, double gain = 0.0) {
+    for (size_t w = first; w < first + count; ++w) {
+        for (size_t slot = 0; slot < k_window_slots; ++slot) scale_slot(recording, 0, w, slot, gain);
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -102,8 +185,9 @@ TEST(decoder_config_defaults_and_check) {
     CHECK_EQ(config.passband.low_hz, 300);
     CHECK_EQ(config.passband.high_hz, 2700);
     CHECK_EQ(unsigned(config.threshold_percent), 70u);
-    CHECK(config.decision_mode == DecisionMode::fixed);
+    CHECK(config.decision_mode == DecisionMode::adaptive);  // V14 as decided on 2026-09-28: auto by default
     CHECK(config.impulse_blanker);
+    CHECK(!config.fade_bridge);  // V16: optional, off by default
     CHECK(config.valid());
     const Passband search = config.search_range();
     CHECK_EQ(search.low_hz, 432);
@@ -181,6 +265,7 @@ TEST(decoder_size_and_lookahead) {
         CHECK_NEAR(decoder.slot_ms(), config.slot_us / 1000.0, 1e-3);
         CHECK_EQ(decoder.tone_hz(), 0.0f);
         CHECK_EQ(decoder.snr_db(), 0.0f);
+        CHECK(!decoder.dcd());
     }
 }
 
@@ -189,7 +274,7 @@ TEST(decoder_size_and_lookahead) {
 // ---------------------------------------------------------------------------
 
 // Clean audio at the five speeds: every byte at its byte_index, one lock, one end, T and the pitch as sent, each
-// byte's 8 slot events with the window's levels.
+// byte's 8 slot events with the window's levels and the default line (adaptive: 50 % of the reference when clean).
 TEST(decoder_clean_loopback_all_speeds) {
     for (size_t v = 0; v < count_of(k_speeds); ++v) {
         const EncoderConfig config = speed_config(k_speeds[v]);
@@ -210,7 +295,7 @@ TEST(decoder_clean_loopback_all_speeds) {
                 CHECK(e.slot >= unlimited::k_first_data_slot && e.slot < unlimited::k_stop_slot);
                 CHECK(std::abs(int(e.start_pct) - int(k_full_pct)) <= k_pct_tolerance);
                 CHECK(std::abs(int(e.stop_pct) - int(k_full_pct)) <= k_pct_tolerance);
-                CHECK_EQ(unsigned(e.threshold_pct), 70u);
+                CHECK_EQ(unsigned(e.threshold_pct), 50u);
                 CHECK(e.value == 1 ? e.level_pct >= 90 && e.soft[0] > 0 : e.level_pct <= 10 && e.soft[0] < 0);
             }
             if (e.type != EventType::byte) continue;
@@ -226,8 +311,9 @@ TEST(decoder_clean_loopback_all_speeds) {
     }
 }
 
-// Spec 3.6: each byte comes out as soon as its window is in the history: half a slot and a few blocks after its STOP
-// (plus the look-ahead); the end comes a silent window after the last STOP (spec 3.7).
+// Spec 3.3, 3.6, V20: each byte comes out as soon as its window is in the history: half a slot and a few blocks after
+// its STOP (plus the look-ahead), the first one too (it waits a block or two more for the pitch and the anchor, and
+// comes right after `locked`); the end comes a silent window after the last STOP (spec 3.7).
 TEST(decoder_streams_each_byte_at_its_stop) {
     const float speeds[] = {1.0f, 6.0f, 25.0f};
     for (size_t v = 0; v < count_of(speeds); ++v) {
@@ -235,22 +321,31 @@ TEST(decoder_streams_each_byte_at_its_stop) {
         const std::vector<uint8_t> data = random_bytes(12, uint32_t(7 + v));
         const Recording recording = single(data, config, k_silence_ms);
         const Capture capture = run_decoder(recording.samples, receiver_for(config), 0);
-        const Decoder probe(receiver_for(config), nullptr, nullptr);
         const Transmission& tx = recording.transmissions[0];
         const double slot = slot_of(config);
         const double block = block_of(config);
         double worst = 0.0;
         size_t bytes = 0;
+        bool locked = false;
         for (size_t i = 0; i < capture.events.size(); ++i) {
             const Event& e = capture.events[i];
             const double heard = static_cast<double>(capture.event_sample[i]) - capture.lookahead;
-            // The windows of the check before lock (and the one being read) come out with the lock.
-            if (e.type == EventType::byte && e.byte_index > probe.acquire_windows()) {
+            if (e.type == EventType::locked) {
+                locked = true;
+                CHECK_EQ(bytes, 0u);
+            }
+            if (e.type == EventType::byte) {
                 const double stop_end = slot_start_sample(tx, e.byte_index + 1, 0);
                 const double latency = heard - stop_end;
+                const double extra = e.byte_index == 0 ? k_first_steps_blocks * block : 0.0;
                 worst = std::max(worst, latency / slot);
+                CHECK(locked);
                 CHECK(latency >= k_margin_slots * slot + (k_pipeline_blocks - 1.0) * block - k_grid_slots * slot);
-                CHECK(latency <= k_margin_slots * slot + k_pipeline_blocks * block + k_grid_slots * slot);
+                CHECK(latency <= k_margin_slots * slot + k_pipeline_blocks * block + extra + k_grid_slots * slot);
+                if (e.byte_index == 0) {
+                    NOTE("%.0f bytes/s: byte 0 (with `locked`) %.2f slots after its STOP", static_cast<double>(speeds[v]),
+                         latency / slot);
+                }
                 ++bytes;
             }
             if (e.type == EventType::end) {
@@ -263,12 +358,12 @@ TEST(decoder_streams_each_byte_at_its_stop) {
                      static_cast<double>(speeds[v]), after / slot, capture.lookahead);
             }
         }
-        CHECK_EQ(bytes, data.size() - probe.acquire_windows() - 1u);
+        CHECK_EQ(bytes, data.size());
         NOTE("%.0f bytes/s: bytes %.2f slots after their STOP at most", static_cast<double>(speeds[v]), worst);
     }
 }
 
-// Spec 4 A1: AWGN at the gate and 3 dB above it (the key-down tone in 2500 Hz), the fixed 70 % line.
+// Spec 4 A1: AWGN at the gate and 3 dB above it (the key-down tone in 2500 Hz), the default (adaptive) line.
 TEST(decoder_awgn_per_speed) {
     const size_t transmissions = 8;
     const size_t bytes = 16;
@@ -305,7 +400,9 @@ TEST(decoder_awgn_per_speed) {
 }
 
 // Spec 3.2, 4 L19: the receiver finds the pitch anywhere in its search: mistuned +-50 Hz, and the whole signal
-// shifted across the passband (USB mistuning), at 20 dB.
+// shifted across the passband (USB mistuning), at 20 dB. The pitch comes from the first window's tone slots (V20:
+// within 6 Hz; 4.6 Hz at 25 bytes/s next to a filter's edge, whose slope tilts the spectrum) and the pitch loop brings
+// it within 2 Hz by the fourth byte.
 TEST(decoder_mistuned_and_shifted) {
     const double delay = channel_delay_samples();
     const double offsets[] = {-50.0, -17.0, 0.0, 33.0, 50.0};
@@ -354,8 +451,9 @@ TEST(decoder_mistuned_and_shifted) {
             note_score("shifted", s);
         }
         for (size_t e = 0; e < capture.events.size(); ++e) {
-            if (capture.events[e].type == EventType::byte)
-                CHECK_NEAR(capture.events[e].tone_hz, shifts[i].tone_hz, 2.0);
+            if (capture.events[e].type != EventType::byte) continue;
+            const bool settled = capture.events[e].byte_index >= k_pitch_settle_windows;
+            CHECK_NEAR(capture.events[e].tone_hz, shifts[i].tone_hz, settled ? k_pitch_hz : k_first_pitch_hz);
         }
     }
 }
@@ -437,45 +535,183 @@ TEST(decoder_vox_lead) {
     }
 }
 
-// Spec 2.3, 3.7: transmissions back to back, the next START 2 slots after the last STOP (the shortest tail) or more:
-// each ends and the next locks on its byte 0.
-TEST(decoder_back_to_back) {
-    const double gaps_slots[] = {2.0, 3.5, 7.3, 12.0};
+// Spec 2.1, 3.3: a VOX lead near the gate. The lead is a steady tone: the first window's decision tells it from a START
+// by the mean edge over all its boundaries in the window (one or two edges alone are noisy there: 7b15d50 took a third
+// of the leads for data, rejected them for their markers and skipped the transmission, 65 % from byte 0 at 12 and 25
+// bytes/s against 97-99 % without the lead). 30 transmissions each at the gate: at least 90 % from byte 0.
+TEST(decoder_vox_lead_near_the_gate) {
+    const float speeds[] = {12.0f, 25.0f};
+    const double gates_db[] = {4.3, 8.0};
+    const size_t transmissions = 30;
+    const double gap_ms = 1500.0;
+    const double min_decoded = 0.9;
     const double delay = channel_delay_samples();
-    for (size_t v = 0; v < count_of(k_speeds); ++v) {
-        for (size_t g = 0; g < count_of(gaps_slots); ++g) {
-            const EncoderConfig base = speed_config(k_speeds[v]);
-            Recording recording;
-            append_silence(recording, leading_silence_ms(base, k_silence_ms));
-            for (size_t t = 0; t < 3; ++t) {
-                EncoderConfig config = base;
-                config.tail_ms = 0;  // the 2-slot minimum
-                config.lead_in_ms = static_cast<uint16_t>(
-                    t == 0 ? 0 : std::lround((gaps_slots[g] - 2.0) * base.slot_us / 1000.0));
-                append_transmission(recording, random_bytes(6, uint32_t(150 + 3 * g + t)), config);
-            }
-            append_silence(recording, 2.0 * k_window_slots * base.slot_us / 1000.0 + k_silence_ms);
-            const Score s =
-                decode(recording, noisy(recording, base, k_strong_db, uint32_t(160 + g + v)), receiver_for(base), delay)
-                    .score;
-            if (!CHECK(exact(s, 3))) {
-                NOTE("%.0f bytes/s, gap %.1f slots", static_cast<double>(k_speeds[v]), gaps_slots[g]);
-                note_score("back to back", s);
+    for (size_t v = 0; v < count_of(speeds); ++v) {
+        EncoderConfig config = speed_config(speeds[v]);
+        config.vox_lead_ms = unlimited::k_default_vox_lead_ms;
+        Recording recording;
+        append_silence(recording, gap_ms);
+        for (size_t t = 0; t < transmissions; ++t) {
+            append_transmission(recording, random_bytes(16, uint32_t(530 + 50 * v + t)), config);
+            append_silence(recording, gap_ms);
+        }
+        const Score s = decode(recording, noisy(recording, config, gates_db[v], uint32_t(540 + v), 20.0),
+                               receiver_for(config), delay)
+                            .score;
+        NOTE("%.0f bytes/s, VOX lead, %.1f dB: %zu of %zu from byte 0, extra %zu", static_cast<double>(speeds[v]),
+             gates_db[v], s.locked_transmissions, transmissions, s.extra_bytes);
+        CHECK(static_cast<double>(s.locked_transmissions) >= min_decoded * static_cast<double>(transmissions));
+        CHECK_EQ(s.extra_bytes, 0u);
+    }
+}
+
+// Spec 2.3, 3.3, 3.7: transmissions back to back: each ends and the next locks on its byte 0. With the default tail
+// (100 ms, the encoder of 7b15d50) 6-byte transmissions follow each other at once or a little later; with the shortest
+// tail (2 slots) the next START comes 2 slots after the last STOP or more, after transmissions of 8 bytes and of 1 byte
+// (one byte, one decision, V20: a key pressed alone needs nothing after it; with the check before lock of V18 it needed
+// 2 silent windows).
+TEST(decoder_back_to_back) {
+    struct Layout {
+        uint16_t tail_ms;
+        size_t bytes;
+        double extra_slots[4];  // silence before the next transmission besides the tail (its lead-in)
+    };
+    const Layout layouts[] = {{unlimited::k_default_tail_ms, 6, {0.0, 1.5, 5.3, 10.0}},
+                              {0, 8, {0.0, 1.5, 5.3, 10.0}},
+                              {0, 1, {0.0, 1.5, 5.3, 10.0}}};
+    const double delay = channel_delay_samples();
+    for (size_t l = 0; l < count_of(layouts); ++l) {
+        for (size_t v = 0; v < count_of(k_speeds); ++v) {
+            for (size_t g = 0; g < count_of(layouts[l].extra_slots); ++g) {
+                const EncoderConfig base = speed_config(k_speeds[v]);
+                Recording recording;
+                append_silence(recording, leading_silence_ms(base, k_silence_ms));
+                for (size_t t = 0; t < 3; ++t) {
+                    EncoderConfig config = base;
+                    config.tail_ms = layouts[l].tail_ms;
+                    config.lead_in_ms = static_cast<uint16_t>(
+                        t == 0 ? 0 : std::lround(layouts[l].extra_slots[g] * base.slot_us / 1000.0));
+                    append_transmission(recording, random_bytes(layouts[l].bytes, uint32_t(150 + 3 * g + t)), config);
+                }
+                append_silence(recording, 3.0 * k_window_slots * base.slot_us / 1000.0 + k_silence_ms);
+                const Score s = decode(recording, noisy(recording, base, k_strong_db, uint32_t(160 + g + v)),
+                                       receiver_for(base), delay)
+                                    .score;
+                if (!CHECK(exact(s, 3))) {
+                    NOTE("%.0f bytes/s, tail %u ms, %zu bytes, %.1f slots more", static_cast<double>(k_speeds[v]),
+                         layouts[l].tail_ms, layouts[l].bytes, layouts[l].extra_slots[g]);
+                    note_score("back to back", s);
+                }
             }
         }
     }
 }
 
+// Spec 3.3, V20, pure one byte, one decision: the first window is decided alone. Window 1 unreadable (its STOP erased):
+// byte 0 comes out with `locked`, window 1 is dropped, the rest follows (with the check before lock of V18 nothing of
+// the transmission came out: its windows 0 and 1 had to be readable together). Window 0 unreadable: no transmission
+// starts there, and one that began is not joined later (V6): nothing comes out.
+TEST(decoder_first_window_decided_alone) {
+    const float speeds[] = {1.0f, 6.0f, 25.0f};
+    for (size_t v = 0; v < count_of(speeds); ++v) {
+        const EncoderConfig config = speed_config(speeds[v]);
+        const std::vector<uint8_t> data = random_bytes(12, uint32_t(560 + v));
+        for (size_t erased = 0; erased < 2; ++erased) {
+            Recording recording = single(data, config, k_silence_ms);
+            scale_slot(recording, 0, erased, unlimited::k_stop_slot, 0.0);
+            const Mapping mapping = decode(recording, noisy(recording, config, k_strong_db, uint32_t(570 + v)),
+                                           receiver_for(config), channel_delay_samples());
+            const Score& s = mapping.score;
+            const bool ok = erased == 0 ? s.locks == 0 && s.bytes_released == 0
+                                        : s.locks == 1 && s.ends == 1 && s.extra_bytes == 0 && s.wrong_bytes == 0 &&
+                                              s.lost_bytes == 1 && s.framing_windows == 1 &&
+                                              mapping.received[0][0] == data[0] && mapping.received[0][1] == -1;
+            if (!CHECK(ok)) {
+                NOTE("%.0f bytes/s, the STOP of window %zu erased", static_cast<double>(speeds[v]), erased);
+                note_score("first window", s);
+            }
+        }
+    }
+}
+
+// Spec 3.5, V24: the running reference settles over the first 2 windows. A fade of 7.5 dB from window 1 on (a QSB at
+// 1 byte/s, where a window lasts a second) is read as a fade: window 1's markers are judged against the mean of the
+// markers of windows 0 and 1, and every byte comes out. Before V24 window 0's two markers alone set the reference:
+// window 1's markers fell under half of it, then window 2's, and the transmission was `lost` after byte 0. A fade of
+// 12 dB still reads as missing markers (V17): `lost` after byte 0.
+TEST(decoder_first_windows_settle_the_reference) {
+    const float speeds[] = {1.0f, 6.0f, 25.0f};
+    const double fade_gain = 0.42;  // -7.5 dB
+    const double deep_gain = 0.25;  // -12 dB
+    for (size_t v = 0; v < count_of(speeds); ++v) {
+        const EncoderConfig config = speed_config(speeds[v]);
+        const std::vector<uint8_t> data = random_bytes(12, uint32_t(580 + v));
+        Recording faded = single(data, config, k_silence_ms);
+        fade_windows(faded, 1, data.size() - 1, fade_gain);
+        const Score s = decode(faded, noisy(faded, config, k_strong_db, uint32_t(590 + v)), receiver_for(config),
+                               channel_delay_samples())
+                            .score;
+        if (!CHECK(exact(s, 1))) {
+            NOTE("%.0f bytes/s, windows 1.. faded 7.5 dB", static_cast<double>(speeds[v]));
+            note_score("settling", s);
+        }
+        Recording deep = single(data, config, k_silence_ms);
+        fade_windows(deep, 1, data.size() - 1, deep_gain);
+        const Mapping mapping = decode(deep, noisy(deep, config, k_strong_db, uint32_t(600 + v)), receiver_for(config),
+                                       channel_delay_samples());
+        const Score& d = mapping.score;
+        if (!CHECK(d.locks == 1 && d.lost_events == 1 && d.bytes_released == 1 && mapping.received[0][0] == data[0] &&
+                   d.wrong_bytes == 0 && d.extra_bytes == 0)) {
+            NOTE("%.0f bytes/s, windows 1.. faded 12 dB", static_cast<double>(speeds[v]));
+            note_score("deep fade", d);
+        }
+    }
+}
+
+// Spec 3.3, V24: a candidate whose START is no tone above the noise is noise: it is let go without putting the scan in
+// data. At 1 byte/s a receiver AGC raises the hiss in the silence between transmissions (its gain recovers over half a
+// second); a swell of it 0.4 s before a START became a candidate whose START and STOP were 2.8 times the noise, where a
+// marker needs 4. Before V24 its rejection put the scan in data (a missing marker) and the transmission starting just
+// after it was missed: 7 of these 8 transmissions from byte 0 (USB 10 dB with the AGC, 16 bytes each, 1.5 s apart,
+// seed 1); now 8.
+TEST(decoder_noise_start_is_let_go) {
+    const EncoderConfig config = speed_config(1.0f);
+    const size_t transmissions = 8;
+    const double gap_ms = 1500.0;
+    Recording recording;
+    append_silence(recording, gap_ms);
+    for (size_t t = 0; t < transmissions; ++t) {
+        append_transmission(recording, random_bytes(16, uint32_t(1000 + t)), config);
+        append_silence(recording, gap_ms);
+    }
+    sim::ChannelConfig channel;
+    channel.mode = sim::Mode::usb;
+    channel.snr_db = 10.0;
+    channel.agc = true;
+    channel.seed = 1;
+    const Score s = decode(recording, through_channel(recording.samples, channel, config.amplitude),
+                           receiver_for(config), channel_delay_samples())
+                        .score;
+    NOTE("1 byte/s, receiver AGC: %zu of %zu transmissions from byte 0, %zu extra bytes", s.locked_transmissions,
+         transmissions, s.extra_bytes);
+    CHECK_EQ(s.locked_transmissions, transmissions);
+    CHECK_EQ(s.extra_bytes, 0u);
+    CHECK_EQ(s.wrong_bytes, 0u);
+}
+
 // Spec 3.6: a window whose START or STOP is missing is dropped (its slot events flagged, no byte) and the counting
-// goes on; two in a row with signal present end the transmission with `lost`.
+// goes on; two in a row with signal present end the transmission with `lost`. (A missing marker in the first window
+// makes it unreadable: no transmission starts there, spec 3.3, V20.)
 TEST(decoder_framing_error_drops_the_window) {
     const float speeds[] = {1.0f, 6.0f, 25.0f};
+    const size_t no_start = 10;
+    const size_t no_stop = 13;
     for (size_t v = 0; v < count_of(speeds); ++v) {
         const EncoderConfig config = speed_config(speeds[v]);
         const std::vector<uint8_t> data = random_bytes(16, uint32_t(170 + v));
         Recording recording = single(data, config, k_silence_ms);
-        scale_slot(recording, 0, 5, unlimited::k_start_slot, 0.0);  // window 5 without its START
-        scale_slot(recording, 0, 9, unlimited::k_stop_slot, 0.0);   // window 9 without its STOP
+        scale_slot(recording, 0, no_start, unlimited::k_start_slot, 0.0);
+        scale_slot(recording, 0, no_stop, unlimited::k_stop_slot, 0.0);
         Capture capture;
         const Mapping mapping = decode(recording, noisy(recording, config, k_strong_db, uint32_t(180 + v)),
                                        receiver_for(config), channel_delay_samples(), &capture);
@@ -486,20 +722,24 @@ TEST(decoder_framing_error_drops_the_window) {
             note_score("framing", s);
             continue;
         }
-        CHECK_EQ(mapping.received[0][5], -1);
-        CHECK_EQ(mapping.received[0][9], -1);
+        CHECK_EQ(mapping.received[0][no_start], -1);
+        CHECK_EQ(mapping.received[0][no_stop], -1);
         size_t flagged = 0;
         for (size_t i = 0; i < capture.events.size(); ++i) {
             const Event& e = capture.events[i];
             if (e.type == EventType::slot && (e.flags & unlimited::event_flag_framing) != 0) {
-                CHECK(e.byte_index == 5 || e.byte_index == 9);
+                CHECK(e.byte_index == no_start || e.byte_index == no_stop);
                 ++flagged;
             }
             if (e.type == EventType::byte) CHECK((e.flags & unlimited::event_flag_framing) == 0);
         }
         CHECK_EQ(flagged, 2 * k_bits_per_byte);
     }
-    // Two STARTs missing in a row: `lost` (framing), nothing wrong delivered; the next transmission locks again.
+    // Two STARTs missing in a row: the old grid is lost (framing), nothing on it is delivered wrong; the next
+    // transmission locks again. One byte, one decision (V20): the silent START's window is weighed for a new
+    // transmission (spec 3.7) and a tone after its zero run whose window reads as a byte is one, released alone and lost
+    // at the next window (here 0x03's last two bits and the next window: 1 byte that belongs to nothing; with a check of
+    // 2 windows, until V20, none).
     const EncoderConfig config = speed_config(6.0f);
     Recording recording;
     append_silence(recording, leading_silence_ms(config, k_silence_ms));
@@ -517,7 +757,7 @@ TEST(decoder_framing_error_drops_the_window) {
     note_score("two in a row", s);
     CHECK_EQ(s.lost_events, 1u);
     CHECK_EQ(s.wrong_bytes, 0u);
-    CHECK_EQ(s.extra_bytes, 0u);
+    CHECK(s.extra_bytes <= 1u);
     for (size_t k = 0; k < 6; ++k) CHECK(mapping.received[0][k] >= 0);
     for (size_t k = 0; k < 8; ++k) CHECK(mapping.received[1][k] >= 0);
     bool framing = false;
@@ -556,18 +796,19 @@ TEST(decoder_end_detection) {
     }
 }
 
-// V14: the fixed line at 50, 70 and 90 % of the reference and the adaptive line: on a clean signal all decode; at the
-// gate the adaptive line and 70 % are compared (reported); the slot events carry the line used.
+// V14: the fixed line at 50, 70 and 90 % of the reference (selectable) and the adaptive line (the default): on a clean
+// signal all decode; at the gate the adaptive line and 70 % are compared (reported); the slot events carry the line
+// used.
 TEST(decoder_threshold_settings) {
     const EncoderConfig config = speed_config(6.0f);
     const uint8_t fixed_lines[] = {50, 70, 90};
     const double delay = channel_delay_samples();
     for (size_t f = 0; f <= count_of(fixed_lines); ++f) {
         DecoderConfig receiver = receiver_for(config);
+        CHECK(receiver.decision_mode == DecisionMode::adaptive);
         if (f < count_of(fixed_lines)) {
+            receiver.decision_mode = DecisionMode::fixed;
             receiver.threshold_percent = fixed_lines[f];
-        } else {
-            receiver.decision_mode = DecisionMode::adaptive;
         }
         const Recording clean = single(random_bytes(16, 220), config, k_silence_ms);
         Capture capture;
@@ -856,6 +1097,197 @@ TEST(decoder_chunking_and_blanker_do_not_change_clean_decoding) {
             CHECK(bytes == recording.transmissions[0].data);
             CHECK(bytes == reference);
         }
+    }
+}
+
+// Spec 3.7, V16: a fade that silences one whole window. With the fade bridge the window is held, the next one's markers
+// on the old grid show the fade, and the transmission goes on: one lock, one end, the faded byte dropped (framing) and
+// every other byte at its place. Without it (the default) the silent window is the end, and the signal coming back is
+// taken for a new transmission, numbered from 0: bytes that belong to no transmission (P4).
+TEST(decoder_fade_bridge_rides_a_one_window_fade) {
+    const float speeds[] = {1.0f, 6.0f, 25.0f};
+    const size_t faded = 12;
+    for (size_t v = 0; v < count_of(speeds); ++v) {
+        EncoderConfig config = speed_config(speeds[v]);
+        config.lead_in_ms = unlimited::k_min_onset_silence_ms;
+        Recording recording = single(random_bytes(24, uint32_t(400 + v)), config, k_silence_ms);
+        fade_windows(recording, faded, 1);
+        const std::vector<int16_t> samples = noisy(recording, config, k_strong_db, uint32_t(410 + v));
+        const Mapping bridged = decode(recording, samples, bridge_for(config), channel_delay_samples());
+        const Score& b = bridged.score;
+        if (!CHECK(b.locks == 1 && b.ends == 1 && b.lost_events == 0 && b.extra_bytes == 0 && b.wrong_bytes == 0 &&
+                   b.lost_bytes == 1 && b.framing_windows == 1 && bridged.received[0][faded] == -1)) {
+            NOTE("%.0f bytes/s", static_cast<double>(speeds[v]));
+            note_score("fade bridge", b);
+        }
+        const Score plain = decode(recording, samples, receiver_for(config), channel_delay_samples()).score;
+        if (!CHECK(plain.locks == 2 && plain.ends >= 1 && plain.extra_bytes > 0)) {
+            NOTE("%.0f bytes/s", static_cast<double>(speeds[v]));
+            note_score("without the bridge", plain);
+        }
+    }
+}
+
+// Spec 3.3, 3.7, V16: with the fade bridge a START needs 300 ms of silence before it. A fade of 3 windows at 12 and 25
+// bytes/s (250 and 120 ms) ends the transmission (2 silent windows), and the signal coming back is not a new one: the
+// rest is lost, nothing is released out of place. Without the bridge the rest comes back numbered from 0.
+TEST(decoder_fade_bridge_ignores_a_signal_back_too_soon) {
+    const float speeds[] = {12.0f, 25.0f};
+    const size_t faded = 12;
+    const size_t fade_windows_count = 3;
+    for (size_t v = 0; v < count_of(speeds); ++v) {
+        EncoderConfig config = speed_config(speeds[v]);
+        config.lead_in_ms = unlimited::k_min_onset_silence_ms;
+        Recording recording = single(random_bytes(32, uint32_t(420 + v)), config, k_silence_ms);
+        fade_windows(recording, faded, fade_windows_count);
+        const std::vector<int16_t> samples = noisy(recording, config, k_strong_db, uint32_t(430 + v));
+        const Mapping bridged = decode(recording, samples, bridge_for(config), channel_delay_samples());
+        const Score& b = bridged.score;
+        bool before_fade = true;
+        for (size_t k = 0; k < faded; ++k) before_fade = before_fade && bridged.received[0][k] >= 0;
+        if (!CHECK(b.locks == 1 && b.ends == 1 && b.extra_bytes == 0 && b.wrong_bytes == 0 && b.matched == faded &&
+                   before_fade)) {
+            NOTE("%.0f bytes/s", static_cast<double>(speeds[v]));
+            note_score("fade bridge", b);
+        }
+        const Score plain = decode(recording, samples, receiver_for(config), channel_delay_samples()).score;
+        if (!CHECK(plain.locks == 2 && plain.extra_bytes > 0)) {
+            NOTE("%.0f bytes/s", static_cast<double>(speeds[v]));
+            note_score("without the bridge", plain);
+        }
+    }
+}
+
+// Spec 2.1, 3.3, V16: with the fade bridge the senders give each transmission a lead-in of 300 ms: transmissions back to
+// back after the default tail decode; a VOX lead and its 2-slot gap stand for the silence (no lead-in); a transmission
+// far from where the receiver listened (a fresh tone taken over: the tone search's quiet of 300 ms before it is
+// credited) decodes from byte 0; the end comes 2 silent windows after the last STOP.
+TEST(decoder_fade_bridge_back_to_back_vox_and_far_pitch) {
+    const double delay = channel_delay_samples();
+    for (size_t v = 0; v < count_of(k_speeds); ++v) {
+        const EncoderConfig base = speed_config(k_speeds[v]);
+        Recording recording;
+        append_silence(recording, leading_silence_ms(base, k_silence_ms));
+        for (size_t t = 0; t < 3; ++t) {
+            EncoderConfig config = base;
+            config.lead_in_ms = unlimited::k_min_onset_silence_ms;
+            append_transmission(recording, random_bytes(8, uint32_t(440 + 3 * v + t)), config);
+        }
+        append_silence(recording, 3.0 * k_window_slots * base.slot_us / 1000.0 + k_silence_ms);
+        const Score s = decode(recording, noisy(recording, base, k_strong_db, uint32_t(450 + v)), bridge_for(base),
+                               delay)
+                            .score;
+        if (!CHECK(exact(s, 3))) {
+            NOTE("%.0f bytes/s back to back", static_cast<double>(k_speeds[v]));
+            note_score("fade bridge", s);
+        }
+        EncoderConfig vox = base;
+        vox.vox_lead_ms = unlimited::k_default_vox_lead_ms;
+        const Recording lead = single(random_bytes(8, uint32_t(460 + v)), vox, k_silence_ms);
+        const Score l = decode(lead, noisy(lead, vox, k_strong_db, uint32_t(470 + v)), bridge_for(vox), delay).score;
+        if (!CHECK(exact(l, 1))) {
+            NOTE("%.0f bytes/s VOX lead", static_cast<double>(k_speeds[v]));
+            note_score("fade bridge", l);
+        }
+        const uint16_t far_hz = 900;  // the receiver starts on 1500 Hz: a move of 600 Hz
+        EncoderConfig far = speed_config(k_speeds[v], far_hz);
+        far.lead_in_ms = unlimited::k_min_onset_silence_ms;
+        REQUIRE(far.valid());
+        const Recording moved = single(random_bytes(8, uint32_t(480 + v)), far, k_silence_ms);
+        const Score m = decode(moved, noisy(moved, far, k_strong_db, uint32_t(490 + v)), bridge_for(far), delay).score;
+        if (!CHECK(exact(m, 1))) {
+            NOTE("%.0f bytes/s at %u Hz", static_cast<double>(k_speeds[v]), far_hz);
+            note_score("fade bridge", m);
+        }
+    }
+}
+
+// Spec 3.3, V20: speech-shaped bursts (the long suite's F4 model: voiced syllables of a 90-250 Hz f0, formants,
+// pauses) at 12 bytes/s (T = 8.3 ms: a 120 Hz voice's glottal period, speech's worst speed) and 25 bytes/s, 3 minutes
+// each. One byte, one decision: a first window that speech makes readable is released, a stray byte left to the upper
+// protocol; the stray bytes per hour are reported. Each stray lock ends at once (DCD, which is TRACK, is on for at most
+// a tenth of the time: 98-99 % on 7b15d50, which read any tone as DCD).
+TEST(decoder_speech_stray_bytes_are_reported) {
+    const float speeds[] = {12.0f, 25.0f};
+    const uint32_t seeds[] = {1, 2};
+    const double seconds = 180.0;
+    const double s_per_hour = 3600.0;
+    const double max_dcd = 0.1;
+    for (size_t v = 0; v < count_of(speeds); ++v) {
+        DecoderConfig receiver;
+        receiver.slot_us = unlimited::slot_us_for_speed(speeds[v]);
+        unlimited::interference::Speech speech(seeds[v]);
+        const std::vector<int16_t> samples = scene(speech, seconds, seeds[v] + 7u);
+        const DcdRun run = run_with_dcd(samples, receiver);
+        const double dcd = static_cast<double>(run.dcd_samples) / static_cast<double>(samples.size());
+        NOTE("%.0f bytes/s, %.0f s of speech: %zu locks, %zu stray bytes (%.0f per hour), DCD on %.1f %%",
+             static_cast<double>(speeds[v]), seconds, run.locks, run.bytes,
+             static_cast<double>(run.bytes) * s_per_hour / seconds, 100.0 * dcd);
+        CHECK(dcd <= max_dcd);
+        CHECK_EQ(run.not_track, 0u);
+    }
+}
+
+// Spec 3.10, V19, V20: DCD means a transmission is being decoded: the TRACK state. Around a transmission (20 dB): off
+// before it, on at the lock (the first window read and its byte released: its START, 10.5 slots, the pipeline's blocks,
+// the first window's two steps and the look-ahead later), on without a break up to `end`, off from `end` on (a silent
+// window after the last STOP; 2 with the fade bridge). Noise and a steady carrier (30 s each) never turn it on (they
+// did: DCD was "not SEARCH"); keyed CW only while a stray lock is tracked (V20: its bytes are the upper protocol's).
+TEST(decoder_dcd_means_a_transmission_is_decoded) {
+    const float speeds[] = {1.0f, 6.0f, 25.0f};
+    const double delay = channel_delay_samples();
+    for (size_t v = 0; v < count_of(speeds); ++v) {
+        for (size_t bridge = 0; bridge < 2; ++bridge) {
+            EncoderConfig config = speed_config(speeds[v]);
+            if (bridge != 0) config.lead_in_ms = unlimited::k_min_onset_silence_ms;
+            const Recording recording = single(random_bytes(12, uint32_t(500 + v)), config, k_silence_ms);
+            const std::vector<int16_t> samples = noisy(recording, config, k_strong_db, uint32_t(510 + v));
+            const DcdRun run = run_with_dcd(samples, bridge != 0 ? bridge_for(config) : receiver_for(config));
+            const Decoder probe(receiver_for(config), nullptr, nullptr);
+            const Transmission& tx = recording.transmissions[0];
+            const double slot = slot_of(config);
+            const double block = block_of(config);
+            const double lookahead = probe.lookahead_samples();
+            const double on_after = static_cast<double>(run.first_on) - lookahead - delay - first_start_sample(tx);
+            const double first_window = (k_window_slots + k_margin_slots) * slot;
+            NOTE("%.0f bytes/s%s: DCD on %.2f slots after the START (look-ahead %.0f samples), off %.2f slots after "
+                 "the last STOP",
+                 static_cast<double>(speeds[v]), bridge != 0 ? ", fade bridge" : "", on_after / slot, lookahead,
+                 (static_cast<double>(run.last_on) - lookahead - delay - end_sample(tx)) / slot);
+            CHECK_EQ(run.locks, 1u);
+            REQUIRE(run.first_on > 0);
+            CHECK(on_after >= first_window + (k_pipeline_blocks - 1.0) * block - k_grid_slots * slot);
+            CHECK(on_after <= first_window + (k_pipeline_blocks + k_first_steps_blocks) * block + k_grid_slots * slot);
+            CHECK(!run.gap);
+            CHECK_EQ(run.not_track, 0u);
+            CHECK(run.end_sample > 0);
+            CHECK_EQ(run.last_on + 1, run.end_sample);
+            const double off_after = static_cast<double>(run.end_sample) - lookahead - delay - end_sample(tx);
+            const double windows = bridge != 0 ? 2.0 : 1.0;
+            CHECK(off_after >= (windows * k_window_slots + k_margin_slots) * slot - k_grid_slots * slot);
+            CHECK(off_after <= (windows * k_window_slots + k_margin_slots) * slot + k_pipeline_blocks * block +
+                                   k_grid_slots * slot);
+        }
+    }
+    // Noise, a carrier and keyed CW at 6 bytes/s: DCD is the TRACK state throughout; noise and a carrier never lock.
+    DecoderConfig receiver;
+    const Passband range = receiver.search_range();
+    const double margin_hz = 50.0;
+    const double seconds = 30.0;
+    const uint32_t seed = 520;
+    unlimited::interference::NoInterferer none;
+    unlimited::interference::DriftingCarrier carrier(seed, range.low_hz + margin_hz, range.high_hz - margin_hz);
+    unlimited::interference::TwoCwTracks cw(seed, range.low_hz + margin_hz, range.high_hz - margin_hz);
+    unlimited::interference::Interferer* interferers[] = {&none, &carrier, &cw};
+    const char* names[] = {"noise", "a carrier", "keyed CW"};
+    for (size_t i = 0; i < count_of(interferers); ++i) {
+        const DcdRun run = run_with_dcd(scene(*interferers[i], seconds, seed + uint32_t(i)), receiver);
+        NOTE("%s, %.0f s: %zu locks, %zu stray bytes, DCD on %.2f s", names[i], seconds, run.locks, run.bytes,
+             static_cast<double>(run.dcd_samples) / unlimited::k_decoder_rate_hz);
+        CHECK_EQ(run.not_track, 0u);
+        if (interferers[i] == &cw) continue;
+        CHECK_EQ(run.locks, 0u);
+        CHECK_EQ(run.dcd_samples, 0u);
     }
 }
 

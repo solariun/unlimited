@@ -1,5 +1,6 @@
 #include "../demo/cli.hpp"
 #include "audio.hpp"
+#include "output_capture.hpp"
 #include "support/loopback.hpp"
 #include "test_harness.hpp"
 #include "unlimited/audio_io.hpp"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +18,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 using unlimited::ConfigError;
@@ -380,10 +383,108 @@ TEST(demo_cli_speed_and_numbers_in_words) {
     CHECK_EQ(ms_text(16.667), std::string("16.667"));
     CHECK_EQ(trimmed(31.25, 2), std::string("31.25"));
     CHECK_EQ(trimmed(250.0, 2), std::string("250"));
-    CHECK_EQ(threshold_text(DecoderConfig()), std::string("decision line at 70 % of the reference"));
+    DecoderConfig fixed_line;  // set here: the library's own default may be either line
+    fixed_line.decision_mode = DecisionMode::fixed;
+    fixed_line.threshold_percent = unlimited::k_default_threshold_percent;
+    CHECK_EQ(threshold_text(fixed_line), std::string("decision line at 70 % of the reference"));
     DecoderConfig adaptive;
     adaptive.decision_mode = DecisionMode::adaptive;
-    CHECK(has(threshold_text(adaptive), "adaptive decision line"));
+    CHECK_EQ(threshold_text(adaptive), std::string("adaptive decision line (auto: 50-75 % of the reference)"));
+}
+
+// The programs default to --threshold auto (Gustavo, 2026-09-28) whatever the library's default is; the rest of the
+// receiver is the library's.
+TEST(demo_cli_receiver_defaults_to_auto) {
+    const DecoderConfig library;
+    const DecoderConfig programs = unlimited::cli::receiver_config();
+    CHECK(programs.decision_mode == DecisionMode::adaptive);
+    CHECK_EQ(programs.slot_us, library.slot_us);
+    CHECK_EQ(programs.passband.low_hz, library.passband.low_hz);
+    CHECK_EQ(programs.passband.high_hz, library.passband.high_hz);
+    CHECK_EQ(programs.impulse_blanker, library.impulse_blanker);
+    CHECK(programs.check() == ConfigError::none);
+    CHECK(!unlimited::cli::fade_bridge_of(programs));  // --fade-bridge is off by default
+    DecoderConfig fixed_line = programs;
+    unlimited::cli::to_threshold("--threshold", "70", fixed_line);
+    CHECK(fixed_line.decision_mode == DecisionMode::fixed);
+    CHECK_EQ(unsigned(fixed_line.threshold_percent), 70u);
+}
+
+// --in and --out take what --input and --output take (pc::RadioOptions): a sound card, a WAV file or null.
+TEST(demo_cli_device_specs_of_in_and_out) {
+    using unlimited::cli::is_live;
+    using unlimited::cli::to_device_spec;
+    const char* const live[] = {"coreaudio:3", "coreaudio:USB Audio CODEC", "alsa:hw:1,0", "default"};
+    for (size_t i = 0; i < count_of(live); ++i) {
+        CHECK_EQ(to_device_spec("--in", live[i]), std::string(live[i]));
+        CHECK(is_live(live[i]));
+    }
+    const char* const files[] = {"wav:rx", "rx.wav", "RX.WAV", "null"};
+    for (size_t i = 0; i < count_of(files); ++i) {
+        CHECK_EQ(to_device_spec("--out", files[i]), std::string(files[i]));
+        CHECK(!is_live(files[i]));
+    }
+    const char* const refused[] = {"3", "CODEC", "", "rx.txt"};
+    for (size_t i = 0; i < count_of(refused); ++i) {
+        std::string message;
+        try {
+            to_device_spec("--in", refused[i]);
+        } catch (const UsageError& error) {
+            message = error.what();
+        }
+        CHECK(has(message, "--in: '" + std::string(refused[i]) + "' is not a device"));
+        CHECK(has(message, "--list-devices shows the devices"));
+    }
+}
+
+// --fade-bridge (spec 3.7): off by default; the sender's silence before the first START; the receiver's flag is
+// DecoderConfig::fade_bridge.
+TEST(demo_cli_fade_bridge) {
+    CHECK_EQ(unsigned(unlimited::cli::k_fade_bridge_silence_ms), 300u);
+    DecoderConfig config = unlimited::cli::receiver_config();
+    CHECK(!unlimited::cli::fade_bridge_of(config));
+    unlimited::cli::to_fade_bridge(config);
+    CHECK(unlimited::cli::fade_bridge_of(config));
+}
+
+TEST(demo_cli_signal_names) {
+    using unlimited::cli::signal_name;
+    CHECK_EQ(signal_name(SIGINT), std::string("Ctrl-C (SIGINT)"));
+    CHECK_EQ(signal_name(SIGTERM), std::string("SIGTERM"));
+#ifdef SIGHUP
+    CHECK_EQ(signal_name(SIGHUP), std::string("SIGHUP (the terminal closed)"));
+#endif
+    CHECK(has(signal_name(SIGUSR1), "signal "));
+}
+
+// Lines to stdout and warnings to stderr at once; held while the view owns the screen and released in order; at most
+// k_max_held_lines kept (the newest), the rest counted.
+TEST(demo_cli_console_holds_warnings_and_caps) {
+    using unlimited::cli::Console;
+    std::string printed;
+    std::string warned;
+    {
+        test::OutputCapture out(STDOUT_FILENO);
+        test::OutputCapture err(STDERR_FILENO);
+        Console console;
+        console.line("first");
+        console.warning("warning one");
+        console.hold(true);
+        console.item("label", "held");
+        console.warning("warning two");
+        console.hold(false);
+        console.hold(true);
+        const size_t extra = 5;
+        for (size_t i = 0; i < Console::k_max_held_lines + extra; ++i) console.line("line " + std::to_string(i));
+        console.hold(false);
+        printed = out.finish();
+        warned = err.finish();
+    }
+    CHECK_EQ(printed.find("first\nlabel      held\n(5 earlier lines not kept while the view was open)\nline 5\n"),
+             0u);
+    CHECK(has(printed, "\nline " + std::to_string(Console::k_max_held_lines + 4) + "\n"));
+    CHECK(!has(printed, "line 4\n"));
+    CHECK_EQ(warned, std::string("warning one\nwarning two\n"));
 }
 
 // The bandwidth line (spec 1.3), from the core's occupied_band() and passband_fit(): the shift tolerance stops where the
