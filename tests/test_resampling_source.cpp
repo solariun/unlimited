@@ -16,7 +16,9 @@
 using unlimited::pc::ResamplingSource;
 using unlimited::pc::resample;
 
-// Allocation counter for the whole test binary: operator new counts while this thread asks it to.
+// Allocation counter for the whole test binary: operator new counts while this thread asks it to. Both stay out of
+// line: g++ inlines one of them into its caller and then sees operator new paired with free (or malloc with operator
+// delete), a false -Wmismatched-new-delete that -Werror turns into a build failure (g++ 13 on Linux, -O2).
 namespace {
 
 thread_local bool t_counting = false;
@@ -24,14 +26,14 @@ thread_local std::size_t t_allocations = 0;
 
 }  // namespace
 
-void* operator new(std::size_t size) {
+[[gnu::noinline]] void* operator new(std::size_t size) {
     if (t_counting) ++t_allocations;
     void* memory = std::malloc(size != 0 ? size : 1);
     if (memory == nullptr) throw std::bad_alloc();
     return memory;
 }
 
-void operator delete(void* memory) noexcept {
+[[gnu::noinline]] void operator delete(void* memory) noexcept {
     std::free(memory);
 }
 
@@ -118,10 +120,9 @@ TEST(resampling_source_equals_the_resampler) {
 TEST(resampling_source_never_allocates_in_read) {
     t_allocations = 0;
     t_counting = true;
-    {
-        std::vector<int16_t> probe(10);  // the counter's own check: one allocation
-        probe[0] = 1;
-    }
+    // The counter's own check: one allocation. Called directly: a compiler may drop a container's unused allocation
+    // (clang with libc++ does), never a direct call.
+    ::operator delete(::operator new(sizeof(int16_t)));
     t_counting = false;
     CHECK_EQ(t_allocations, 1u);
     const std::vector<int16_t> input = noise(k_input_samples);

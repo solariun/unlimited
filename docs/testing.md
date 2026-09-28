@@ -180,8 +180,9 @@ and which were skipped.
 - **macOS:** the Command Line Tools for Xcode provide clang, GNU `make` 3.81 and `nm`; CoreAudio is part of the
   system.
 - **Linux:** your distribution's C++ compiler, `make`, binutils and the ALSA headers. On Debian and Ubuntu:
-  `sudo apt-get install build-essential libasound2-dev`. CI installs exactly `libasound2-dev` on `ubuntu-latest`
-  ([§10](#10-continuous-integration)); the first real Linux build is CI's (spec §11 M8).
+  `sudo apt-get install build-essential libasound2-dev`. CI installs exactly `libasound2-dev` on `ubuntu-latest` and
+  builds and tests everything there with g++ ([§10](#10-continuous-integration)); Linux with a real sound card and
+  serial port is proven on a bench (spec §11 M8).
 - **The Arduino check (optional):** install [`arduino-cli`](https://arduino.github.io/arduino-cli/), then the cores
   `arduino:avr` and `esp32:esp32` (the latter from Espressif's board index,
   `https://espressif.github.io/arduino-esp32/package_esp32_index.json`, added to `arduino-cli`'s board manager URLs).
@@ -1259,8 +1260,60 @@ have no sound cards and the tests never play or record, so only radios prove the
 
 Not in CI: `make test_long` (1 min 38 s on 10 cores; run it before and after a change to the receiver or the signal),
 `make arduino_check` (needs `arduino-cli` and its cores), `make docs` (its determinism is checked by hand) and the
-smoke test (needs the virtual device). The KISS modem and the programs on live audio are not committed yet, so CI has
-not built them: their first GCC and Linux build will be CI's (spec §11 M8).
+smoke test (needs the virtual device).
+
+### 10.1 When only the Linux runner fails
+
+**In plain words.** The two runners compile the same code with two different compilers, and each has warnings the
+other lacks. `-Werror` makes every warning a failed build, so a change that is green on a Mac can still fail on
+Ubuntu. Read the failing step first (`gh run view <run> --log-failed`): it names the file, the line and the warning.
+
+```mermaid
+flowchart LR
+    push["git push"] --> mac["macOS runner<br/>Clang: green"]
+    push --> ubu["Ubuntu runner<br/>g++: red"]
+    ubu --> log["gh run view --log-failed<br/>the file, the line, the warning"]
+    log --> gcc["the same file through a g++<br/>on the Mac: the warning again"]
+    gcc --> fix["fix, then make test on the Mac<br/>and the g++ check again"]
+    fix --> both["push: both runners green"]
+```
+
+**The v1.0.0 case.** The first run with the modem and the live programs built every program on Ubuntu (g++ 13.3 and
+ALSA), then stopped while compiling `tests/test_resampling_source.cpp`. That test counts allocations with its own
+`operator new` (a `malloc`) and `operator delete` (a `free`). g++ copied the `operator delete` into `std::vector`'s
+destructor, saw memory from `operator new` handed to `free`, and reported `-Wmismatched-new-delete`: a false alarm,
+but an error under `-Werror`. Clang has no such check, so the Mac never showed it. The fix keeps both functions out of
+line (`[[gnu::noinline]]`), so g++ always sees `operator new` paired with `operator delete`; and the counter's own
+check now calls `::operator new` directly, because Clang, no longer seeing the counter inside, dropped the unused
+`std::vector` the check had allocated (spec §12.8).
+
+**A g++ on a Mac, without installing one.** The ESP32 core that `make arduino_check` uses brings GCC 14
+(`xtensa-esp32-elf-g++`). It can compile the test files as a stand-in for Ubuntu's g++, for its warnings only (it
+cannot link or run them):
+
+```bash
+G=$(ls ~/Library/Arduino15/packages/esp32/tools/esp-x32/*/bin/xtensa-esp32-elf-g++ | tail -1)
+for f in tests/*.cpp; do echo "== $f"; $G -O2 -std=c++11 -Wall -Wextra -Wpedantic -Isrc -Ipc -Itests -c $f -o /dev/null 2>&1 | grep -E 'warning:|error:' | sort -u; done
+```
+
+Before the fix, for that file, it printed the line CI had failed on (without `-Werror`, as a warning):
+
+```text
+== tests/test_resampling_source.cpp
+tests/test_resampling_source.cpp:35:14: warning: 'void free(void*)' called on pointer returned from a mismatched allocation function [-Wmismatched-new-delete]
+```
+
+After the fix, nothing for that file.
+
+| It shows | Meaning |
+|---|---|
+| a warning Clang never gives (`-Wmismatched-new-delete`, `-Wmaybe-uninitialized`, `-Warray-bounds`, …) | very likely real: Ubuntu's g++ 13 gives it too unless it inlines differently; fix it |
+| `format '%u' expects argument of type 'unsigned int', but … 'long unsigned int'` | not real: on the ESP32 `uint32_t` is `unsigned long`; on Linux and macOS it is `unsigned int` |
+| `fatal error: poll.h: No such file or directory` (`test_kiss_port.cpp`, `test_ptt.cpp`) | the ESP32's C library has no pseudo-terminals; small stand-in headers passed with `-isystem` (declarations only) let those two files compile too |
+
+Not covered by the stand-in, so checked by reading: Ubuntu's glibc marks results that must be used (`read`, `write`,
+`pipe`, …; a `(void)` cast does not silence g++), and its `int64_t` is `long` where macOS's is `long long` (print
+64-bit values as `long long` with `%lld`, as the tests do).
 
 ---
 

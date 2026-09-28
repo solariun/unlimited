@@ -1602,7 +1602,7 @@ since V20 and V22; P1, P7, P12, P14, P16 and P17 are resolved; V24's part of P11
 | M5 | ~~ThreadSanitizer was not run on the modem.~~ **Done:** the hand-offs moved to `load_acquire()`/`store_release()`; 0 reports; three ordering and tearing defects fixed on the way (§12.2, §9). | Still open: TSan here misses races on byte buffers written and read in order (§9), so the queue's bytes are covered by review, not by TSan. The encoder keeps volatile values and fences: under TSan, `unlimited_encode`'s live output (its queue between a thread and the output callback) would be reported the same way the modem was. | Move the encoder's hand-offs to the same accessors (its owner's call). |
 | M6 | **VOX at 25 bytes/s near the gate**: 29 of 30 frames at 11 dB (the gate + 3 dB), against 30 of 30 with PTT and at 20 dB (with and without V18's check, §9). | At 25 bytes/s the VOX gap is 2 slots = 8 ms, short for the receiver to see silence between the lead and the START in noise. A receiver matter, found by the modem's tests. | A longer gap at high speeds (max(2 slots, about 30 ms): a protocol change, Gustavo's decision), or a receiver that bridges the lead better. |
 | M7 | **DCD comes on only at the lock** (V19, V20): 10.7–11.3 slots plus the look-ahead after another station's START (0.42 s at 6 bytes/s, 0.25 s at 25, §9). | A station whose p-persistence draw falls in that time keys over the other (the usual limit of CSMA); dwait covers the turnaround after a frame. | Measure collisions with both stations' frames queued at once (not done); a shorter look-ahead is a receiver trade-off (P9). |
-| M8 | **The modem's and the live programs' PC code has only been built by Clang on macOS.** | The PTY, serial, threads and signals follow POSIX (`openpty` from `<pty.h>` with `-lutil` on Linux). The first GCC/Linux build is CI's, once they are committed and pushed. | Watch the Ubuntu runner. |
+| M8 | ~~The modem's and the live programs' PC code has only been built by Clang on macOS.~~ **Built on Linux by CI (the v1.0.0 tag, 2026-09-28):** g++ 13.3 on Ubuntu 24.04 compiles and links every program with ALSA. The first g++ build of the unit tests stopped at `tests/test_resampling_source.cpp` (a false `-Wmismatched-new-delete`, §12.8), fixed after the tag. | The PTY, serial, threads and signals follow POSIX (`openpty` from `<pty.h>` with `-lutil` on Linux). Linux at run time (ALSA devices, a real serial port, udev) is proven only on a bench. | Gustavo's bench. |
 | M9 | **What the modem holds at a stop is dropped.** | Frames still waiting, and a frame cut short on the air, are reported on the stop line, not saved. | Accept (AX.25 resends); or save them. |
 | M10 | **A computer that never reads the PTY** gets stale bytes later. | The kernel's PTY buffer fills, then the modem's 64 KiB ring, then bytes are dropped and counted. A program that opens the PTY later reads the old bytes first. | Flush the slave's input when the ring overflows; or accept, as kiss_modem does. |
 | M11 | **The dwait default of 1500 ms is kiss_modem's.** | At 1 byte/s the receiver's end latency alone is about 1.5 s (1471 ms after the last STOP, §9). | Gustavo's choice per speed, or keep. |
@@ -2947,8 +2947,19 @@ on silicon (§11 E2), FreeRTOS scheduling, the USB-serial bridge and the radios'
 - **CI:** `.github/workflows/ci.yml`, on every push and pull request, a matrix with `fail-fast: false`: `ubuntu-latest`
   with `CXX=g++` (after `apt-get install -y libasound2-dev`) and `macos-latest` with `CXX=clang++`; steps `make -j4`,
   `make -j4 test`, `make demo_run`, `make check_embedded`. The runners have no sound cards and the tests never play or
-  record: CI proves the builds and the tests; only radios prove the audio path (V13). The modem and the live programs
-  are not committed yet, so CI has not built them (§11 M8).
+  record: CI proves the builds and the tests; only radios prove the audio path (V13).
+  - *The first run with the modem and the live programs* (the v1.0.0 tag, 2026-09-28): `make -j4` built every program
+    on Linux (g++ 13.3, Ubuntu 24.04, ALSA); `make -j4 test` stopped at compiling `tests/test_resampling_source.cpp`.
+    g++ inlined the test's replacement `operator delete` (a `free`) into `std::vector`'s destructor and saw memory
+    from `operator new` handed to `free`: a false `-Wmismatched-new-delete` (that `operator new` is a `malloc`), an
+    error under `-Werror`; Clang has no such check (§11 M8).
+  - *The fix, after the tag:* the replacement `operator new` and `operator delete` stay out of line
+    (`[[gnu::noinline]]`), so g++ never sees the pair split; the counter's own check calls `::operator new` directly,
+    because a compiler may drop a container's unused allocation (Clang with libc++ does once the counter is out of
+    line). *Proof:* GCC 14.2 (the ESP32 core's xtensa g++, a stand-in for Linux's g++; `docs/testing.md` §10) gives
+    11 of those warnings before the fix at the Makefile's `-O2` (none at `-O3` or `-Os`, which inline differently)
+    and none after at any of the three; on macOS `make test` 312/312, and under ASan and UBSan 312/312 with no
+    report.
 - **Documents:** `docs/modem.md` (the modem for operators: connecting a radio, with pictures; levels and ALC; VOX;
   choosing the speed from measured airtimes; the AX.25 timers; `--min-frame` and `--fade-bridge`; the monitor and the
   view; AX25Toolkit, linbpq and other KISS programs; Linux; troubleshooting; and a bench checklist for each of
